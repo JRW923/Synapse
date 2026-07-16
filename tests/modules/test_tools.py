@@ -1,4 +1,5 @@
 """Tests for basic tools."""
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -8,6 +9,9 @@ from synapse.modules.tools.file_write import WriteTool
 from synapse.modules.tools.file_edit import EditTool
 from synapse.modules.tools.file_glob import GlobTool
 from synapse.modules.tools.search_grep import GrepTool
+from synapse.modules.tools.shell import ShellTool
+from synapse.modules.tools.git_ import GitTool
+from synapse.modules.tools.registry import DefaultToolRegistry
 
 
 @pytest.mark.asyncio
@@ -95,3 +99,76 @@ async def test_grep_tool_fallback_non_python(tmp_path: Path):
     result = await tool.execute({"pattern": "login bug", "path": str(tmp_path)})
     assert result.success
     assert "login bug" in result.output
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_echo():
+    tool = ShellTool()
+    result = await tool.execute({"command": "echo hello"})
+    assert result.success
+    assert "hello" in result.output
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_timeout():
+    tool = ShellTool()
+    result = await tool.execute({"command": "sleep 10"}, timeout=1)
+    assert not result.success
+    assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_git_tool_log(tmp_path: Path):
+    import subprocess
+    # Initialize a git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("content")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+
+    tool = GitTool()
+    result = await tool.execute({"command": "log", "cwd": str(tmp_path)})
+    assert result.success
+    assert "init" in result.output
+
+
+@pytest.mark.asyncio
+async def test_git_tool_diff(tmp_path: Path):
+    import subprocess
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("before")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, capture_output=True)
+    (tmp_path / "file.txt").write_text("after")
+
+    tool = GitTool()
+    result = await tool.execute({"command": "diff", "cwd": str(tmp_path)})
+    assert result.success
+    assert "before" in result.output or "after" in result.output
+
+
+def test_tool_registry():
+    registry = DefaultToolRegistry()
+    read = ReadTool()
+    registry.register(read)
+
+    assert registry.get("read") is read
+    assert len(registry.list_all()) == 1
+    schemas = registry.get_schemas()
+    assert len(schemas) == 1
+    assert schemas[0]["name"] == "read"
+
+
+def test_registry_list_by_category():
+    registry = DefaultToolRegistry()
+    read = ReadTool()
+    write = WriteTool()
+    registry.register(read)
+    registry.register(write)
+
+    file_tools = registry.list_by_category("file")
+    assert len(file_tools) == 2
