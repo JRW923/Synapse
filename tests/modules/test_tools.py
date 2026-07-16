@@ -85,3 +85,13 @@ async def test_grep_tool(tmp_path: Path):
     assert result.success
     assert "def foo" in result.output
     assert "def bar" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_grep_tool_fallback_non_python(tmp_path: Path):
+    """GrepTool fallback should search non-Python files (e.g., .txt) via rglob("*")."""
+    (tmp_path / "notes.txt").write_text("TODO: fix the login bug\n")
+    tool = GrepTool()
+    result = await tool.execute({"pattern": "login bug", "path": str(tmp_path)})
+    assert result.success
+    assert "login bug" in result.output

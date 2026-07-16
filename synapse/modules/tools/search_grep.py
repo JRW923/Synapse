@@ -34,6 +34,10 @@ class GrepTool:
                 ["rg", "--no-heading", "-n", "--color=never", pattern, search_path],
                 capture_output=True, text=True, timeout=30,
             )
+            if result.returncode != 0:
+                err = result.stderr.strip()
+                if err:
+                    return ToolResult(success=False, output="", error=err, metadata=meta)
             output = result.stdout.strip() or "(no matches)"
             return ToolResult(success=True, output=output[:50000], metadata=meta)
         except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -43,7 +47,7 @@ class GrepTool:
                 root = Path(search_path)
                 import re
                 regex = re.compile(pattern)
-                for f in root.rglob("*.py") if root.is_dir() else [root]:
+                for f in root.rglob("*") if root.is_dir() else [root]:
                     if not f.is_file():
                         continue
                     try:
