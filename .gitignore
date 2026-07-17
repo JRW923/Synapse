@@ -23,6 +23,10 @@ Thumbs.db
 .env
 .env.local
 
+# Synapse config (contains API keys)
+synapse.yaml
+.synapse/audit/
+
 # Jupyter
 .ipynb_checkpoints/
 
