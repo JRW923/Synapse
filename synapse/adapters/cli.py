@@ -276,6 +276,18 @@ def main():
         choices=["react", "plan_execute", "hierarchical"],
         help="Planning mode (overrides config)",
     )
+    run_parser.add_argument(
+        "--memory-backend",
+        default="chromadb",
+        choices=["chromadb", "qdrant"],
+        help="Semantic memory backend (default: chromadb)",
+    )
+    run_parser.add_argument(
+        "--enable-external-tools",
+        action="store_true",
+        default=False,
+        help="Enable external tools (HTTP, DB, Browser) — disabled by default",
+    )
 
     sub.add_parser("version", help="Show version")
 
@@ -290,6 +302,18 @@ def main():
         "--host",
         default="127.0.0.1",
         help="Host to bind to (default: 127.0.0.1)",
+    )
+    serve_parser.add_argument(
+        "--memory-backend",
+        default="chromadb",
+        choices=["chromadb", "qdrant"],
+        help="Semantic memory backend (default: chromadb)",
+    )
+    serve_parser.add_argument(
+        "--enable-external-tools",
+        action="store_true",
+        default=False,
+        help="Enable external tools (HTTP, DB, Browser) — disabled by default",
     )
 
     eval_parser = sub.add_parser("eval", help="Run a benchmark evaluation")
@@ -347,32 +371,42 @@ def main():
 
     if args.command == "run":
         task = " ".join(args.task)
-        config = load_config()
 
-        # CLI flags override config
-        if args.provider:
-            config.provider.provider = args.provider
+        from synapse.adapters.library import Synapse
+
+        kwargs: dict[str, object] = {
+            "provider": args.provider or "anthropic",
+            "memory_backend": args.memory_backend,
+            "enable_external_tools": args.enable_external_tools,
+        }
         if args.model:
-            config.provider.model = args.model
+            kwargs["model"] = args.model
         if args.mode:
-            config.planning.mode = args.mode
+            kwargs["mode"] = args.mode
 
-        container = build_container(config)
-        agent = Agent(container)
-        session = Session()
+        synapse = Synapse(**kwargs)  # type: ignore[arg-type]
 
-        async def execute():
-            result = await agent.run(task, session)
+        async def _exec():
+            result = await synapse.run(task)
             return result
 
-        result = asyncio.run(execute())
+        result = asyncio.run(_exec())
         print(f"\n[Status: {result.status.value}]")
         print(result.output)
         return
 
     if args.command == "serve":
         import uvicorn
-        from synapse.adapters.server import app as server_app
+
+        from synapse.adapters.library import Synapse
+        from synapse.adapters.server import create_app
+
+        synapse = Synapse(
+            provider="anthropic",
+            memory_backend=args.memory_backend,
+            enable_external_tools=args.enable_external_tools,
+        )
+        server_app = create_app(synapse_instance=synapse)
         uvicorn.run(server_app, host=args.host, port=args.port)
         return
 

@@ -34,10 +34,35 @@ from synapse.modules.tools.search_grep import GrepTool
 from synapse.modules.tools.shell import ShellTool
 from synapse.modules.tools.git_ import GitTool
 
+# External tools — optional dependencies (httpx, playwright, sqlite3)
+try:
+    from synapse.modules.tools.web import HTTPTool
+except ImportError:  # pragma: no cover
+    HTTPTool = None  # type: ignore[assignment]
+
+try:
+    from synapse.modules.tools.db import DBTool
+except ImportError:  # pragma: no cover
+    DBTool = None  # type: ignore[assignment]
+
+try:
+    from synapse.modules.tools.browser import BrowserTool
+except ImportError:  # pragma: no cover
+    BrowserTool = None  # type: ignore[assignment]
+
 from synapse.modules.memory.session import SessionMemory
 from synapse.modules.memory.project import ProjectMemory
 from synapse.modules.memory.user import UserMemory
-from synapse.modules.memory.semantic import SemanticMemory
+
+try:
+    from synapse.modules.memory.semantic import SemanticMemory
+except ImportError:  # pragma: no cover
+    SemanticMemory = None  # type: ignore[assignment]
+
+try:
+    from synapse.modules.memory.qdrant_backend import QdrantMemory
+except ImportError:  # pragma: no cover
+    QdrantMemory = None  # type: ignore[assignment]
 
 from synapse.modules.context.retriever import BasicContextRetriever
 from synapse.modules.context.partitioner import ContextPartitioner
@@ -187,10 +212,21 @@ class Synapse:
         LLM provider name.  One of ``anthropic`` (default), ``openai``,
         ``deepseek``, ``google``, ``ollama``.
     model:
-        Model identifier string.  If *None*, the provider’s default is used.
+        Model identifier string.  If *None*, the provider's default is used.
     config_path:
         Path to a YAML configuration file.  If *None*, the default lookup
         order is used (``synapse.yaml``, then ``~/.synapse/config.yaml``).
+    enable_eval:
+        If ``True``, wire eval metrics collectors to the event bus (Phase 3).
+        Defaults to ``False``.
+    memory_backend:
+        Semantic memory backend.  One of ``"chromadb"`` (default) or
+        ``"qdrant"``.
+    enable_external_tools:
+        If ``True``, register HTTPTool, DBTool, and BrowserTool in the tool
+        registry.  These tools have ``RiskLevel.EXTERNAL`` and are disabled
+        by default for safety.  Requires corresponding optional dependencies
+        (``httpx``, ``playwright``).
     **overrides:
         Additional keyword arguments are applied as overrides on top of the
         loaded configuration.  Supported keys include any field on
@@ -205,10 +241,14 @@ class Synapse:
         model: str | None = None,
         config_path: str | None = None,
         enable_eval: bool = False,
+        memory_backend: str = "chromadb",
+        enable_external_tools: bool = False,
         **overrides: Any,
     ) -> None:
         self._provider_name = provider
         self._enable_eval = enable_eval
+        self._memory_backend = memory_backend
+        self._enable_external_tools = enable_external_tools
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
 
@@ -294,7 +334,7 @@ class Synapse:
         session_memory = SessionMemory()
         project_memory = ProjectMemory()
         user_memory = UserMemory()
-        semantic_memory = SemanticMemory()
+        semantic_memory = self._create_semantic_memory()
         layered = LayeredMemory(session_memory, project_memory, user_memory, semantic_memory)
         c.register(MemoryStore, layered)
 
@@ -350,6 +390,40 @@ class Synapse:
             max_tokens=cfg.max_tokens,
         )
 
+    # -- Internal: semantic memory factory -----------------------------------
+
+    def _create_semantic_memory(self):
+        """Instantiate the configured semantic memory backend.
+
+        Returns
+        -------
+        SemanticMemory | QdrantMemory | None
+            The semantic memory store instance, or *None* if the backend
+            is not available.
+        """
+        backend = self._memory_backend.lower()
+
+        if backend == "chromadb":
+            if SemanticMemory is None:
+                raise ImportError(
+                    "SemanticMemory (chromadb) is not available — "
+                    "install chromadb to use it."
+                )
+            return SemanticMemory()
+
+        if backend == "qdrant":
+            if QdrantMemory is None:
+                raise ImportError(
+                    "QdrantMemory is not available — "
+                    "install qdrant-client to use it."
+                )
+            return QdrantMemory()
+
+        raise ValueError(
+            f"Unknown memory_backend '{backend}'. "
+            f"Available: chromadb, qdrant"
+        )
+
     # -- Internal: planner factory -------------------------------------------
 
     def _create_planner(self, auth: ActionAuthorizer) -> Planner:
@@ -384,10 +458,9 @@ class Synapse:
 
     # -- Internal: tool factory ----------------------------------------------
 
-    @staticmethod
-    def _create_all_tools():
-        """Return the full set of built-in tools."""
-        return [
+    def _create_all_tools(self):
+        """Return the full set of tools, including external ones when enabled."""
+        tools: list = [
             ReadTool(),
             WriteTool(),
             EditTool(),
@@ -396,3 +469,15 @@ class Synapse:
             ShellTool(),
             GitTool(),
         ]
+
+        if self._enable_external_tools:
+            if HTTPTool is not None:
+                tools.append(HTTPTool())
+            if DBTool is not None:
+                tools.append(DBTool(
+                    workspace_root=self._config.tools.workspace_root,
+                ))
+            if BrowserTool is not None:
+                tools.append(BrowserTool())
+
+        return tools
