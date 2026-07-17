@@ -23,10 +23,12 @@ def test_write_in_workspace_requires_confirmation(auth):
     assert decision.requires_confirmation
 
 
-def test_write_outside_workspace_blocked(auth):
+def test_write_outside_workspace_requires_confirmation(auth):
+    """Outside workspace: allowed=True, requires_confirmation=True (interactive mode)."""
     req = auth.create_request("write", {"path": "/etc/passwd"}, RiskLevel.WRITE_LOCAL, "s1")
     decision = auth.authorize(req)
-    assert not decision.allowed
+    assert decision.allowed
+    assert decision.requires_confirmation
 
 
 def test_execute_allowlisted_command(auth):

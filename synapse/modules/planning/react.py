@@ -21,10 +21,12 @@ class ReActPlanner:
 
     mode = PlanningMode.REACT
 
-    def __init__(self, max_iterations: int = 50, thrashing_threshold: int = 3, auth=None):
+    def __init__(self, max_iterations: int = 50, thrashing_threshold: int = 3,
+                 auth=None, confirm_callback=None):
         self.max_iterations = max_iterations
         self.thrashing_threshold = thrashing_threshold
-        self.auth = auth  # ActionAuthorizer or None (None = backward compat, no auth checks)
+        self.auth = auth  # ActionAuthorizer or None
+        self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
 
     @staticmethod
     async def _maybe_await(obj):
@@ -106,6 +108,8 @@ class ReActPlanner:
                                 tool_name, tool_input, risk_level, session.id,
                             )
                             decision = self.auth.authorize(auth_req)
+
+                            # Hard deny
                             if not decision.allowed:
                                 result = type("TR", (), {
                                     "success": False,
@@ -116,7 +120,6 @@ class ReActPlanner:
                                         "sandbox_used": False,
                                     })(),
                                 })()
-                                # Still record metrics and emit events for the denied call
                                 metrics.tool_call_count += 1
                                 duration_ms = int((time.time() - t0) * 1000)
                                 await event_bus.emit(ToolCallCompleted(
@@ -128,6 +131,31 @@ class ReActPlanner:
                                 ))
                                 tool_results.append((tc["id"], result))
                                 continue
+
+                            # Requires user confirmation → ask if callback available
+                            if decision.requires_confirmation and self._confirm is not None:
+                                approved = await self._confirm(auth_req)
+                                if not approved:
+                                    result = type("TR", (), {
+                                        "success": False,
+                                        "output": "",
+                                        "error": f"User denied: {decision.reason}",
+                                        "metadata": type("M", (), {
+                                            "tool_name": tool_name, "files_touched": [],
+                                            "sandbox_used": False,
+                                        })(),
+                                    })()
+                                    metrics.tool_call_count += 1
+                                    duration_ms = int((time.time() - t0) * 1000)
+                                    await event_bus.emit(ToolCallCompleted(
+                                        session_id=session.id,
+                                        tool_name=tool_name,
+                                        success=False,
+                                        duration_ms=duration_ms,
+                                        files_touched=[],
+                                    ))
+                                    tool_results.append((tc["id"], result))
+                                    continue
 
                     result = await tool.execute(tool_input, sandbox=sandbox)
                 except KeyError:

@@ -1,13 +1,22 @@
 """Action-Time Authorization — evaluates tool calls before execution."""
 
-import os
+from collections.abc import Callable, Awaitable
 from pathlib import Path
 from synapse.protocols.tool import RiskLevel
 from synapse.protocols.sandbox import AuthRequest, AuthDecision
 
+#: Callback signature for interactive confirmation.
+#: Receives the AuthRequest, returns True if user approves.
+AuthCallback = Callable[[AuthRequest], Awaitable[bool]]
+
 
 class ActionAuthorizer:
-    """Evaluates tool call authorization based on risk level, workspace, and allowlists."""
+    """Evaluates tool call authorization based on risk level, workspace, and allowlists.
+
+    In interactive mode (chat), workspace-bounded writes trigger a user
+    confirmation instead of being hard-blocked.  In non-interactive mode
+    (run / serve), they are auto-denied.
+    """
 
     DANGEROUS_PATTERNS = [
         "rm -rf /",
@@ -37,7 +46,8 @@ class ActionAuthorizer:
         self.confirmation_enabled = confirmation_enabled
 
     def create_request(
-        self, tool_name: str, params: dict, risk_level: RiskLevel, session_id: str, user_id: str | None = None,
+        self, tool_name: str, params: dict, risk_level: RiskLevel, session_id: str,
+        user_id: str | None = None,
     ) -> AuthRequest:
         return AuthRequest(
             tool_name=tool_name,
@@ -50,59 +60,65 @@ class ActionAuthorizer:
     def authorize(self, request: AuthRequest) -> AuthDecision:
         risk = request.risk_level
 
-        # READ_ONLY: always allow
+        # --- READ_ONLY: always allow ------------------------------------------------
         if risk == RiskLevel.READ_ONLY.value:
-            return AuthDecision(allowed=True, reason="Read-only operation", requires_confirmation=False)
+            return AuthDecision(allowed=True, reason="Read-only operation")
 
-        # WRITE_LOCAL: allow in workspace, confirm
+        # --- WRITE_LOCAL ------------------------------------------------------------
         if risk == RiskLevel.WRITE_LOCAL.value:
-            if self._is_in_workspace(request):
+            target = request.tool_params.get("path", "")
+            if target and self._is_in_workspace(target):
                 return AuthDecision(
                     allowed=True,
                     reason="Write within workspace",
                     requires_confirmation=self.confirmation_enabled,
                 )
+            # Outside workspace → ask the user if interactive, deny if not
             return AuthDecision(
-                allowed=False,
+                allowed=True,
                 reason=(
-                    f"Write target is outside workspace "
-                    f"(workspace: {self.workspace_root}). "
-                    f"Only files within the workspace can be modified."
+                    f"Write target '{target}' is outside workspace "
+                    f"({self.workspace_root}). Requires user approval."
                 ),
+                requires_confirmation=True,
             )
 
-        # EXECUTE: allowlist check + dangerous pattern check
+        # --- EXECUTE ----------------------------------------------------------------
         if risk == RiskLevel.EXECUTE.value:
             command = request.tool_params.get("command", "")
             if self._is_dangerous(command):
                 return AuthDecision(allowed=False, reason="Command matches dangerous pattern")
             if not self._is_allowlisted(command):
-                return AuthDecision(allowed=False, reason=f"Command not in allowlist: {command.split()[0] if command else ''}")
+                return AuthDecision(
+                    allowed=False,
+                    reason=f"Command not in allowlist: {command.split()[0] if command else ''}",
+                )
             return AuthDecision(
                 allowed=True,
                 reason="Command in allowlist",
                 requires_confirmation=self.confirmation_enabled,
             )
 
-        # EXTERNAL: must be explicitly enabled
+        # --- EXTERNAL ---------------------------------------------------------------
         if risk == RiskLevel.EXTERNAL.value:
             if self.allow_external:
-                return AuthDecision(allowed=True, reason="External access enabled", requires_confirmation=True)
+                return AuthDecision(
+                    allowed=True, reason="External access enabled",
+                    requires_confirmation=True,
+                )
             return AuthDecision(allowed=False, reason="External tools are disabled")
 
-        # META: allow
+        # --- META -------------------------------------------------------------------
         if risk == RiskLevel.META.value:
             return AuthDecision(allowed=True, reason="Meta/experimental tool")
 
         return AuthDecision(allowed=False, reason=f"Unknown risk level: {risk}")
 
-    def _is_in_workspace(self, request: AuthRequest) -> bool:
-        target = request.tool_params.get("path", "")
-        if not target:
-            return False
+    # ------------------------------------------------------------------
+    def _is_in_workspace(self, path_str: str) -> bool:
         try:
-            resolved = Path(target).resolve()
-            return str(resolved).startswith(str(self.workspace_root))
+            resolved = Path(path_str).resolve()
+            return resolved.is_relative_to(self.workspace_root)
         except (ValueError, OSError):
             return False
 
@@ -116,5 +132,4 @@ class ActionAuthorizer:
         if not command.strip():
             return False
         base = command.strip().split()[0]
-        # Allow commands starting with any allowlisted prefix
         return base in self.ALWAYS_ALLOWED_COMMANDS

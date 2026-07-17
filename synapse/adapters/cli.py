@@ -324,6 +324,26 @@ def _check_api_key(config):
         print()
 
 
+def _make_confirm_callback():
+    """Return an async callback that prompts the user for tool-call approval."""
+    async def _confirm(request):
+        try:
+            from rich.console import Console
+            console = Console()
+            console.print(f"\n[bold yellow]  Auth required:[/bold yellow] {request.tool_name}")
+            console.print(f"  [dim]Reason: {request.reason if hasattr(request, 'reason') else 'outside workspace'}[/dim]")
+            console.print(f"  [dim]Params: {request.tool_params}[/dim]")
+            answer = console.input("  [bold]Allow? [y/n]:[/bold] ")
+            return answer.strip().lower().startswith("y")
+        except ImportError:
+            print(f"\n  Auth required: {request.tool_name}")
+            print(f"  Params: {request.tool_params}")
+            answer = input("  Allow? [y/n]: ")
+            return answer.strip().lower().startswith("y")
+
+    return _confirm
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="synapse",
@@ -536,6 +556,7 @@ def main():
             config_path=None,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
+            confirm_callback=_make_confirm_callback(),
         )
 
         try:

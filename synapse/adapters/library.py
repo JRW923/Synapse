@@ -254,6 +254,7 @@ class Synapse:
         memory_backend: str = "chromadb",
         enable_external_tools: bool = False,
         mcp_servers: list[McpServerConfig] | None = None,
+        confirm_callback=None,  # async (AuthRequest) -> bool
         **overrides: Any,
     ) -> None:
         self._provider_name = provider
@@ -261,6 +262,7 @@ class Synapse:
         self._memory_backend = memory_backend
         self._enable_external_tools = enable_external_tools
         self._mcp_servers = mcp_servers
+        self._confirm_callback = confirm_callback
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
 
@@ -455,6 +457,7 @@ class Synapse:
             max_iterations=cfg.max_iterations,
             thrashing_threshold=cfg.thrashing_threshold,
             auth=auth,
+            confirm_callback=self._confirm_callback,
         )
 
         if mode == PlanningMode.REACT:
