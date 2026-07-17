@@ -569,3 +569,44 @@ CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
 
 **量化**：172 tests (+24), 50 commits, ~10,500 lines。
 
+---
+
+## 2026-07-17 · 体验优化 & 打包发布
+
+### 十七、交互式 Chat REPL
+
+新增 `synapse chat` 命令，提供持续对话的交互式终端。
+
+- 多轮对话自动保持 Session（上下文跨轮累计）
+- `/clear` 重置会话，`/exit` 或 `Ctrl+C` 退出
+- 自动读取 `synapse.yaml` 配置，也支持 `--provider`/`--model` 覆盖
+- 检测 `rich` 库，可用时用 Markdown 渲染输出
+
+### 十八、多厂商 API Key 环境变量
+
+配置加载器（`synapse/config/loader.py`）原先只识别 `ANTHROPIC_API_KEY`。新增：
+
+- `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`GOOGLE_API_KEY` 支持
+- DeepSeekProvider 自动按优先级解析：配置 api_key → `DEEPSEEK_API_KEY` → `OPENAI_API_KEY`
+
+**修复**：DeepSeekProvider 原先 `api_key=""` 传给 SDK 会覆盖环境变量读取，改为 `api_key or os.environ.get(...)` 链式回退。
+
+### 十九、打包与分发优化
+
+| 问题 | 修复 |
+|------|------|
+| `pyproject.toml` 缺依赖声明 | 拆为 12 个可选依赖组（`synapse[deepseek]`、`synapse[chromadb]` 等）。核心只依赖 pydantic+pyyaml+rich |
+| README 仅骨架 | 重写：Quick Start、配置三方式、全部命令参考、可选依赖组说明、架构图 |
+| 新手无引导 | `synapse chat`/`run` 在无 API Key 时打印三种配置方式提示 |
+| `requirements.txt` 冗余 | 精简为核心三依赖，详细依赖组在 pyproject.toml 中管理 |
+
+**用户安装体验**：`pip install git+https://github.com/JRW923/Synapse.git#egg=synapse[deepseek]` → 设 Key → `synapse chat`，三步即可。
+
+### 二十、当前状态
+
+| 指标 | 数值 |
+|------|------|
+| Commits | 53 |
+| Tests | 172 |
+| 交互模式 | CLI run / CLI chat / Library API / HTTP Server |
+
