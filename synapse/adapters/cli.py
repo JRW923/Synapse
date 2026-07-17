@@ -373,6 +373,37 @@ def main():
         help="Enable external tools (HTTP, DB, Browser) — disabled by default",
     )
 
+    chat_parser = sub.add_parser("chat", help="Start an interactive chat session")
+    chat_parser.add_argument(
+        "--provider", "-p",
+        default=None,
+        choices=["anthropic", "openai", "deepseek", "google", "ollama"],
+        help="LLM provider (overrides config)",
+    )
+    chat_parser.add_argument(
+        "--model", "-m",
+        default=None,
+        help="Model name (overrides config)",
+    )
+    chat_parser.add_argument(
+        "--mode",
+        default=None,
+        choices=["react", "plan_execute", "hierarchical"],
+        help="Planning mode (overrides config)",
+    )
+    chat_parser.add_argument(
+        "--memory-backend",
+        default="chromadb",
+        choices=["chromadb", "qdrant"],
+        help="Semantic memory backend (default: chromadb)",
+    )
+    chat_parser.add_argument(
+        "--enable-external-tools",
+        action="store_true",
+        default=False,
+        help="Enable external tools (HTTP, DB, Browser)",
+    )
+
     eval_parser = sub.add_parser("eval", help="Run a benchmark evaluation")
     eval_parser.add_argument(
         "benchmark",
@@ -454,6 +485,92 @@ def main():
         result = asyncio.run(_exec())
         print(f"\n[Status: {result.status.value}]")
         print(result.output)
+        return
+
+    if args.command == "chat":
+        config = load_config()
+        if args.provider:
+            config.provider.provider = args.provider
+        if args.model:
+            config.provider.model = args.model
+        if args.mode:
+            config.planning.mode = args.mode
+
+        from synapse.adapters.library import Synapse
+
+        synapse = Synapse(
+            provider=config.provider.provider,
+            model=config.provider.model,
+            config_path=None,
+            memory_backend=args.memory_backend,
+            enable_external_tools=args.enable_external_tools,
+        )
+
+        try:
+            from rich.console import Console
+            from rich.markdown import Markdown
+            console = Console()
+            use_rich = True
+        except ImportError:
+            console = None
+            use_rich = False
+
+        async def _chat():
+            from synapse.core.session import Session
+            session = Session()
+            welcome = (
+                f"Synapse Chat [{config.provider.provider}/{config.provider.model}]"
+            )
+            if use_rich:
+                console.print(f"[bold cyan]{welcome}[/bold cyan]")
+                console.print("[dim]Type your task or question. /exit to quit, /clear to reset.[/dim]\n")
+            else:
+                print(welcome)
+                print("Type your task or question. /exit to quit, /clear to reset.\n")
+
+            while True:
+                try:
+                    if use_rich:
+                        user_input = console.input("[bold green]> [/bold green]")
+                    else:
+                        user_input = input("> ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nGoodbye.")
+                    break
+
+                user_input = user_input.strip()
+                if not user_input:
+                    continue
+
+                if user_input.lower() in ("/exit", "/quit"):
+                    print("Goodbye.")
+                    break
+
+                if user_input.lower() == "/clear":
+                    session = Session()
+                    if use_rich:
+                        console.print("[dim]Session cleared.[/dim]\n")
+                    else:
+                        print("Session cleared.\n")
+                    continue
+
+                if use_rich:
+                    console.print("[dim]Working...[/dim]", end="\r")
+
+                result = await synapse.run(user_input, session=session)
+
+                if use_rich:
+                    console.print(" " * 20, end="\r")  # clear "Working..."
+                    status_color = "green" if result.status.value == "success" else "yellow"
+                    console.print(f"[dim]Status:[/dim] [{status_color}]{result.status.value}[/{status_color}]")
+                    console.print(Markdown(result.output))
+                    console.print()
+                else:
+                    print(f"\n[Status: {result.status.value}]")
+                    print(result.output)
+                    print()
+
+        asyncio.run(_chat())
         return
 
     if args.command == "serve":
