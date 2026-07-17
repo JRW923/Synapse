@@ -62,7 +62,14 @@ class ActionAuthorizer:
                     reason="Write within workspace",
                     requires_confirmation=self.confirmation_enabled,
                 )
-            return AuthDecision(allowed=False, reason="Write target is outside workspace")
+            return AuthDecision(
+                allowed=False,
+                reason=(
+                    f"Write target is outside workspace "
+                    f"(workspace: {self.workspace_root}). "
+                    f"Only files within the workspace can be modified."
+                ),
+            )
 
         # EXECUTE: allowlist check + dangerous pattern check
         if risk == RiskLevel.EXECUTE.value:

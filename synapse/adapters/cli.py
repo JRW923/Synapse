@@ -586,10 +586,29 @@ def main():
                         print("Session cleared.\n")
                     continue
 
-                if use_rich:
-                    console.print("[dim]Working...[/dim]", end="\r")
+                import time as _time
+                _start = _time.time()
+                _done = False
 
-                result = await synapse.run(user_input, session=session)
+                async def _spinner():
+                    _frames = ["-", "\\", "|", "/"]
+                    _i = 0
+                    while not _done:
+                        _elapsed = int(_time.time() - _start)
+                        if use_rich:
+                            console.print(
+                                f"[dim]{_frames[_i % 4]} Working... ({_elapsed}s)[/dim]",
+                                end="\r",
+                            )
+                        await asyncio.sleep(0.25)
+                        _i += 1
+
+                _spinner_task = asyncio.ensure_future(_spinner())
+                try:
+                    result = await synapse.run(user_input, session=session)
+                finally:
+                    _done = True
+                    await _spinner_task
 
                 if use_rich:
                     console.print(" " * 20, end="\r")  # clear "Working..."
