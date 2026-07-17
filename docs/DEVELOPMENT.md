@@ -1,6 +1,18 @@
 # Synapse 开发日志
 
-> 从需求到交付的完整过程。每个节点记录所有方案选项、trade-off 分析和最终决策。后续每次会话追加，内容过多时压缩精简。
+> 从需求到交付的完整过程。每个条目标注变更类型。后续每次会话追加，内容过多时压缩精简。
+
+### 变更类型说明
+
+| 前缀 | 含义 |
+|------|------|
+| `[feat]` | 新功能、新模块 |
+| `[fix]` | Bug 修复 |
+| `[docs]` | 文档、注释、README、开发日志 |
+| `[chore]` | 项目配置、依赖、gitignore、打包 |
+| `[design]` | 架构决策、方案选型、trade-off |
+| `[review]` | 审查发现与修复 |
+| `[ux]` | 用户交互体验改进 |
 
 ---
 
@@ -571,42 +583,40 @@ CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
 
 ---
 
-## 2026-07-17 · 体验优化 & 打包发布
+## 2026-07-17 · 体验优化 & Bug 修复
 
-### 十七、交互式 Chat REPL
+### [feat] 交互式 Chat REPL
 
-新增 `synapse chat` 命令，提供持续对话的交互式终端。
+新增 `synapse chat` 命令：多轮对话自动保持 Session，`/clear` 重置，`/exit` 退出，自动读取配置，Rich Markdown 渲染输出。
 
-- 多轮对话自动保持 Session（上下文跨轮累计）
-- `/clear` 重置会话，`/exit` 或 `Ctrl+C` 退出
-- 自动读取 `synapse.yaml` 配置，也支持 `--provider`/`--model` 覆盖
-- 检测 `rich` 库，可用时用 Markdown 渲染输出
+### [fix] 多厂商 API Key 环境变量支持
 
-### 十八、多厂商 API Key 环境变量
+配置加载器原先只识别 `ANTHROPIC_API_KEY`。新增 `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`GOOGLE_API_KEY`，DeepSeekProvider 改为链式回退（配置 → 环境变量 → SDK 默认）。
 
-配置加载器（`synapse/config/loader.py`）原先只识别 `ANTHROPIC_API_KEY`。新增：
+### [chore] 打包与分发优化
 
-- `OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`GOOGLE_API_KEY` 支持
-- DeepSeekProvider 自动按优先级解析：配置 api_key → `DEEPSEEK_API_KEY` → `OPENAI_API_KEY`
+- `pyproject.toml` 拆为 12 个可选依赖组，核心只依赖 pydantic+pyyaml+rich
+- README 重写（Quick Start、配置三方式、命令参考、架构图）
+- `synapse chat`/`run` 无 API Key 时打印配置引导
+- `requirements.txt` 精简
 
-**修复**：DeepSeekProvider 原先 `api_key=""` 传给 SDK 会覆盖环境变量读取，改为 `api_key or os.environ.get(...)` 链式回退。
+### [fix] Spinner + 进度指示器
 
-### 十九、打包与分发优化
+原先只显示静态 "Working..."，Agent 卡住时用户无法判断。改为旋转动画 + 计时（`\ Working... (12s)`），后台 `asyncio.Event` 控制启停。
 
-| 问题 | 修复 |
-|------|------|
-| `pyproject.toml` 缺依赖声明 | 拆为 12 个可选依赖组（`synapse[deepseek]`、`synapse[chromadb]` 等）。核心只依赖 pydantic+pyyaml+rich |
-| README 仅骨架 | 重写：Quick Start、配置三方式、全部命令参考、可选依赖组说明、架构图 |
-| 新手无引导 | `synapse chat`/`run` 在无 API Key 时打印三种配置方式提示 |
-| `requirements.txt` 冗余 | 精简为核心三依赖，详细依赖组在 pyproject.toml 中管理 |
+### [feat] 交互式授权确认
 
-**用户安装体验**：`pip install git+https://github.com/JRW923/Synapse.git#egg=synapse[deepseek]` → 设 Key → `synapse chat`，三步即可。
+`ActionAuthorizer` 原先对 workspace 外写入做硬拒绝（`allowed=False`）。改为弹出交互确认（`allowed=True, requires_confirmation=True`），用户在 chat 中看到 `Allow? [y/n]:` 提示后决定。非交互模式（run/serve）自动拒绝。`_is_in_workspace` 从 `startswith` 改为 `Path.is_relative_to`，防止 `/project_evil` 绕过 `/project` 检查。
 
-### 二十、当前状态
+### [fix] Auth 弹窗被 Spinner 覆盖
+
+确认回调触发时 spinner 仍在后台刷新，导致 `Allow? [y/n]:` 提示被覆盖。修复：`_make_confirm_callback(pause_event)` 在显示提示前 `pause_event.clear()` 暂停 spinner，用户回复后 `pause_event.set()` 恢复。
+
+### 当前状态
 
 | 指标 | 数值 |
 |------|------|
-| Commits | 53 |
+| Commits | 56 |
 | Tests | 172 |
 | 交互模式 | CLI run / CLI chat / Library API / HTTP Server |
 
