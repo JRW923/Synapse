@@ -108,6 +108,10 @@ from synapse.eval.metrics.quality import QualityMetrics
 from synapse.eval.metrics.efficiency import EfficiencyMetrics
 from synapse.eval.metrics.safety import SafetyMetrics
 
+# MCP — Model Context Protocol integration (Phase 5)
+from synapse.protocols.mcp import McpServerConfig
+from synapse.modules.mcp.manager import McpManager
+
 
 # ---- LayeredMemory ---------------------------------------------------------
 
@@ -227,6 +231,12 @@ class Synapse:
         registry.  These tools have ``RiskLevel.EXTERNAL`` and are disabled
         by default for safety.  Requires corresponding optional dependencies
         (``httpx``, ``playwright``).
+    mcp_servers:
+        Optional list of :class:`~synapse.protocols.mcp.McpServerConfig`
+        objects describing MCP servers to connect.  Each server's tools are
+        registered in the tool registry under ``mcp.<server_name>.<tool>``
+        names.  Servers are connected during container assembly (at
+        construction time).
     **overrides:
         Additional keyword arguments are applied as overrides on top of the
         loaded configuration.  Supported keys include any field on
@@ -243,12 +253,14 @@ class Synapse:
         enable_eval: bool = False,
         memory_backend: str = "chromadb",
         enable_external_tools: bool = False,
+        mcp_servers: list[McpServerConfig] | None = None,
         **overrides: Any,
     ) -> None:
         self._provider_name = provider
         self._enable_eval = enable_eval
         self._memory_backend = memory_backend
         self._enable_external_tools = enable_external_tools
+        self._mcp_servers = mcp_servers
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
 
@@ -328,6 +340,13 @@ class Synapse:
         registry = DefaultToolRegistry()
         for tool in self._create_all_tools():
             registry.register(tool)
+
+        # MCP — Connect external MCP servers and register their tools
+        mcp_manager: McpManager | None = None
+        if self._mcp_servers:
+            mcp_manager = McpManager(tool_registry=registry, event_bus=event_bus)
+            self._connect_mcp_servers_sync(mcp_manager, self._mcp_servers)
+
         c.register(ToolRegistry, registry)
 
         # Memory — layered: session + project + user + semantic
@@ -481,3 +500,36 @@ class Synapse:
                 tools.append(BrowserTool())
 
         return tools
+
+    # -- Internal: MCP server connection --------------------------------------
+
+    @staticmethod
+    def _connect_mcp_servers_sync(
+        manager: "McpManager",
+        servers: list[McpServerConfig],
+    ) -> None:
+        """Connect *manager* to every server in *servers* synchronously.
+
+        Uses :func:`asyncio.run` in a thread-pool executor when called from
+        inside a running event loop (e.g. during pytest-asyncio tests).
+        When no event loop is running it calls :func:`asyncio.run` directly.
+        """
+        import asyncio
+        import concurrent.futures
+
+        async def _connect_all() -> None:
+            for server_config in servers:
+                await manager.add_server(server_config)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — safe to call asyncio.run directly
+            asyncio.run(_connect_all())
+            return
+
+        # A loop is already running — run the coroutine in a dedicated thread
+        # so that it can create its own fresh event loop.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(asyncio.run, _connect_all())
+            future.result(timeout=60)

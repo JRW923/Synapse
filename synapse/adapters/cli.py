@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from synapse.config import load_config
+from synapse.protocols.mcp import McpServerConfig
 from synapse.core.container import Container
 from synapse.core.agent import Agent
 from synapse.core.session import Session
@@ -250,6 +251,49 @@ def build_container(config) -> Container:
 # ---- CLI entry point -------------------------------------------------------
 
 
+def _parse_mcp_servers(raw_values: list[str] | None) -> list[McpServerConfig] | None:
+    """Parse ``--mcp-server`` values into a list of :class:`McpServerConfig`.
+
+    Format: ``name:command_or_url``
+
+    - If the part after ``:`` starts with ``http://`` or ``https://``,
+      the transport is ``streamable_http``.
+    - Otherwise the transport is ``stdio``; the command and its arguments
+      are split on whitespace.
+    """
+    if not raw_values:
+        return None
+
+    configs: list[McpServerConfig] = []
+    for raw in raw_values:
+        if ":" not in raw:
+            raise ValueError(
+                f"Invalid --mcp-server format: {raw!r}.  "
+                f"Expected 'name:command' or 'name:http://...'."
+            )
+
+        name, rest = raw.split(":", 1)
+
+        if rest.startswith("http://") or rest.startswith("https://"):
+            configs.append(McpServerConfig(
+                name=name,
+                transport="streamable_http",
+                url=rest,
+            ))
+        else:
+            parts = rest.split()
+            command = parts[0]
+            args = parts[1:] if len(parts) > 1 else []
+            configs.append(McpServerConfig(
+                name=name,
+                transport="stdio",
+                command=command,
+                args=args,
+            ))
+
+    return configs
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="synapse",
@@ -287,6 +331,19 @@ def main():
         action="store_true",
         default=False,
         help="Enable external tools (HTTP, DB, Browser) — disabled by default",
+    )
+    run_parser.add_argument(
+        "--mcp-server",
+        action="append",
+        default=None,
+        dest="mcp_servers",
+        metavar="NAME:CMD_OR_URL",
+        help=(
+            "Connect to an MCP server.  Format: 'NAME:COMMAND_OR_URL'.  "
+            "If the value after ':' starts with http:// or https:// it is "
+            "treated as a streamable-HTTP URL; otherwise it is a stdio "
+            "command (args space-separated).  Repeat for multiple servers."
+        ),
     )
 
     sub.add_parser("version", help="Show version")
@@ -383,6 +440,10 @@ def main():
             kwargs["model"] = args.model
         if args.mode:
             kwargs["mode"] = args.mode
+
+        mcp_servers = _parse_mcp_servers(args.mcp_servers)
+        if mcp_servers is not None:
+            kwargs["mcp_servers"] = mcp_servers
 
         synapse = Synapse(**kwargs)  # type: ignore[arg-type]
 

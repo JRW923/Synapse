@@ -12,6 +12,10 @@ class DefaultToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def unregister(self, name: str) -> None:
+        """Remove a tool by name. No-op if not registered."""
+        self._tools.pop(name, None)
+
     def get(self, name: str) -> Tool:
         if name not in self._tools:
             raise KeyError(f"Tool '{name}' not registered")
