@@ -577,17 +577,13 @@ def main():
 
         from synapse.adapters.library import Synapse
 
-        # Shared pause event — lets the auth callback pause the spinner
-        _pause_event = asyncio.Event()
-        _pause_event.set()
-
         synapse = Synapse(
             provider=config.provider.provider,
             model=config.provider.model,
             config_path=None,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
-            confirm_callback=_make_confirm_callback(_pause_event),
+            confirm_callback=_make_confirm_callback(),
         )
 
         try:
@@ -638,33 +634,21 @@ def main():
                         print("Session cleared.\n")
                     continue
 
-                import time as _time
-                _start = _time.time()
-                _done = False
+                if use_rich:
+                    console.print("[dim]Working...[/dim]")
+                else:
+                    print("Working...")
 
-                async def _spinner():
-                    _frames = ["-", "\\", "|", "/"]
-                    _i = 0
-                    while not _done:
-                        if _pause_event.is_set():
-                            _elapsed = int(_time.time() - _start)
-                            if use_rich:
-                                console.print(
-                                    f"[dim]{_frames[_i % 4]} Working... ({_elapsed}s)[/dim]",
-                                    end="\r",
-                                )
-                        await asyncio.sleep(0.25)
-                        _i += 1
-
-                _spinner_task = asyncio.ensure_future(_spinner())
                 try:
                     result = await synapse.run(user_input, session=session)
-                finally:
-                    _done = True
-                    await _spinner_task
+                except Exception as exc:
+                    if use_rich:
+                        console.print(f"[bold red]Error:[/bold red] {exc}")
+                    else:
+                        print(f"Error: {exc}")
+                    continue
 
                 if use_rich:
-                    console.print(" " * 20, end="\r")  # clear "Working..."
                     status_color = "green" if result.status.value == "success" else "yellow"
                     console.print(f"[dim]Status:[/dim] [{status_color}]{result.status.value}[/{status_color}]")
                     console.print(Markdown(result.output))
