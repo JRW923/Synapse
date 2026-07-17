@@ -524,4 +524,48 @@ Synapse/
 | 上下文 | Retriever + Partitioner + Compactor + InjectionGuard（4 组件） |
 | 评测 | Process/Quality/Efficiency/Safety Metrics + SWE-bench + ProcessBench + A/B Experiments |
 | 入口 | CLI（6 命令）+ Python Library API + HTTP Server（6 端点） |
+| MCP | McpClient Protocol + OfficialSdkMcpClient(stdio+HTTP) + McpManager + McpToolWrapper |
+
+---
+
+## 2026-07-16 · MCP 协议支持
+
+### 十六、MCP 实施
+
+**7 个任务**，遵循 Protocol → 实现 → Manager → 集成 模式：
+
+| # | 模块 | 产出 | 测试 |
+|---|------|------|------|
+| 1 | Protocol + Config | `McpClient` Protocol, `McpServerConfig` dataclass | - |
+| 2 | McpToolWrapper | MCP tool → Synapse `Tool` Protocol（`mcp.<server>.<tool>` 命名） | 5 |
+| 3 | SDK Client (stdio) | 基于 `mcp` 官方 SDK，子进程 JSON-RPC | 3 |
+| 4 | SDK Client (HTTP) | Streamable HTTP transport 扩展 | 并入 3 |
+| 5 | McpManager | 多连接生命周期管理：add → discover → wrap → register | 5 |
+| 6 | Wiring | `Synapse(mcp_servers=...)` + CLI `--mcp-server` flag | 7 |
+| 7 | Integration | 端到端 MCP 工具调用验证 | 4 |
+
+**架构**：
+```
+CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
+        │                               │
+        └───────────┬───────────────────┘
+                    ▼
+            McpManager.add_server(config)
+                    │
+                    ▼
+            OfficialSdkMcpClient.connect()
+                    │
+                    ▼
+            client.list_tools() → [tool_schemas]
+                    │
+                    ▼
+            McpToolWrapper(tool) → registry.register()
+                    │
+                    ▼
+            Agent 透明调用: tools.get("mcp.filesystem.read_file")
+```
+
+**Transport 支持**：stdio（子进程 JSON-RPC）、Streamable HTTP（远程端点）。SSE 已由 MCP 规范废弃。
+
+**量化**：172 tests (+24), 50 commits, ~10,500 lines。
 
