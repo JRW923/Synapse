@@ -349,7 +349,7 @@ def _make_confirm_callback(pause_event=None):
                 console.print(f"  [dim]参数: {params}[/dim]")
 
                 def _ask():
-                    return input("  [bold]允许吗? [y/n]: [/bold]")
+                    return input("  允许吗? [y/n]: ")
 
                 answer = await loop.run_in_executor(None, _ask)
                 return answer.strip().lower().startswith("y")
