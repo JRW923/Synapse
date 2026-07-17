@@ -8,18 +8,39 @@ version = "0.1.0"
 description = "Connecting ideas into code — an intelligent code agent"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.40.0",
-    "fastapi>=0.100.0",
-    "google-genai>=2.0",
-    "openai>=1.0.0",
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "rich>=13.0",
-    "uvicorn>=0.22.0",
 ]
 
 [project.optional-dependencies]
+# ---- LLM Providers -------------------------------------------------
+anthropic = ["anthropic>=0.40.0"]
+openai     = ["openai>=1.0.0"]
+deepseek   = ["openai>=1.0.0"]    # OpenAI-compatible API
+google     = ["google-genai>=2.0"]
+ollama     = ["openai>=1.0.0"]    # OpenAI-compatible API
+
+# ---- Memory backends -------------------------------------------------
+chromadb   = ["chromadb>=1.5.0"]
+qdrant     = ["qdrant-client>=1.9.0"]
+
+# ---- Optional tools ---------------------------------------------------
+http       = ["httpx>=0.27.0"]
+browser    = ["playwright>=1.40.0"]
+
+# ---- Protocol extensions ----------------------------------------------
+mcp        = ["mcp>=1.0.0"]
+
+# ---- Eval -------------------------------------------------------------
+eval       = ["scipy>=1.10.0"]
+
+# ---- HTTP server -------------------------------------------------------
+server     = ["fastapi>=0.100.0", "uvicorn>=0.22.0"]
+
+# ---- Dev / Test --------------------------------------------------------
 dev = [
+    "synapse[anthropic,openai,deepseek,chromadb,mcp,eval,server,http]",
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
     "pytest-httpx>=0.30.0",
@@ -29,17 +50,10 @@ test = [
     "pytest-asyncio>=0.24.0",
     "pytest-httpx>=0.30.0",
 ]
-http-tool = [
-    "httpx>=0.27.0",
-]
-browser-tool = [
-    "playwright>=1.40.0",
-]
-qdrant = [
-    "qdrant-client>=1.9.0",
-]
+
+# ---- Everything --------------------------------------------------------
 all = [
-    "synapse[test,http-tool,browser-tool,qdrant]",
+    "synapse[anthropic,openai,deepseek,google,ollama,chromadb,qdrant,http,browser,mcp,eval,server,dev]",
 ]
 
 [project.scripts]

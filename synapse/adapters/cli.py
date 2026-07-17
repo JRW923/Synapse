@@ -294,6 +294,36 @@ def _parse_mcp_servers(raw_values: list[str] | None) -> list[McpServerConfig] | 
     return configs
 
 
+def _check_api_key(config):
+    """Warn and show setup guide if no API key is configured."""
+    if config.provider.api_key:
+        return
+
+    provider = config.provider.provider
+    env_vars = {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "google": "GOOGLE_API_KEY",
+        "ollama": None,  # Ollama runs locally, no key needed
+    }
+    env_var = env_vars.get(provider)
+
+    if env_var:
+        import os
+        if os.environ.get(env_var):
+            return  # found in env
+
+        print(f"\n  No API key found for '{provider}'.\n")
+        print(f"  Set it with one of:\n")
+        print(f"    1. Environment:  set {env_var}=sk-your-key    (Windows CMD)")
+        print(f"                     $env:{env_var} = \"sk-...\"    (PowerShell)")
+        print(f"    2. Config file:  echo 'provider:'  > synapse.yaml")
+        print(f"                     echo '  api_key: sk-...' >> synapse.yaml")
+        print(f"    3. User config:  same format at ~/.synapse/config.yaml")
+        print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="synapse",
@@ -459,6 +489,8 @@ def main():
 
     if args.command == "run":
         task = " ".join(args.task)
+        config = load_config()
+        _check_api_key(config)
 
         from synapse.adapters.library import Synapse
 
