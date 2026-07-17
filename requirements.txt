@@ -1,5 +1,7 @@
 # Synapse - Core Dependencies
 anthropic>=0.40.0
+google-genai>=2.0
+openai>=1.0.0
 pydantic>=2.0
 pyyaml>=6.0
 rich>=13.0
