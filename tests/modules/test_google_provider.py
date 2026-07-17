@@ -1,8 +1,23 @@
 """Tests for GoogleProvider — mock-based, no real API calls."""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from synapse.modules.providers.google import GoogleProvider
 from synapse.protocols.llm import Message, LLMResponse
+
+# Google provider may not be available (google-genai not installed)
+try:
+    from synapse.modules.providers.google import GoogleProvider
+    if GoogleProvider is not None:
+        from synapse.modules.providers.google import genai_types as gtypes
+        _GOOGLE_AVAILABLE = True
+    else:
+        gtypes = None
+        _GOOGLE_AVAILABLE = False
+except ImportError:
+    GoogleProvider = None  # type: ignore
+    gtypes = None
+    _GOOGLE_AVAILABLE = False
+
+pytestmark = pytest.mark.skipif(not _GOOGLE_AVAILABLE, reason="google-genai package is not installed")
 
 
 @pytest.fixture
@@ -19,19 +34,17 @@ async def test_chat_basic():
     provider = GoogleProvider(model="gemini-pro", api_key="test-key")
 
     # Build a mock Gemini response
-    from google.genai import types
-
-    mock_response = types.GenerateContentResponse(
+    mock_response = gtypes.GenerateContentResponse(
         candidates=[
-            types.Candidate(
-                content=types.Content(
+            gtypes.Candidate(
+                content=gtypes.Content(
                     role="model",
-                    parts=[types.Part.from_text(text="Hello from Gemini")],
+                    parts=[gtypes.Part.from_text(text="Hello from Gemini")],
                 ),
-                finish_reason=types.FinishReason.STOP,
+                finish_reason=gtypes.FinishReason.STOP,
             )
         ],
-        usage_metadata=types.GenerateContentResponseUsageMetadata(
+        usage_metadata=gtypes.GenerateContentResponseUsageMetadata(
             prompt_token_count=10,
             candidates_token_count=5,
         ),
