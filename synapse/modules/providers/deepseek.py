@@ -25,10 +25,13 @@ class DeepSeekProvider:
         max_tokens: int = 4096,
         base_url: str = DEEPSEEK_BASE_URL,
     ):
+        import os
         self._model = model
         self._max_tokens = max_tokens
         self._base_url = base_url
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # If no key provided, try env vars (DEEPSEEK_API_KEY first, then OPENAI_API_KEY)
+        resolved_key = api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+        self._client = AsyncOpenAI(api_key=resolved_key, base_url=base_url)
 
     @property
     def model_id(self) -> str:

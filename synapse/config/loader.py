@@ -29,6 +29,12 @@ def load_config(config_path: str | None = None) -> SynapseConfig:
         config.provider.model = os.environ["SYNAPSE_MODEL"]
     if os.environ.get("ANTHROPIC_API_KEY"):
         config.provider.api_key = os.environ["ANTHROPIC_API_KEY"]
+    if os.environ.get("OPENAI_API_KEY"):
+        config.provider.api_key = os.environ["OPENAI_API_KEY"]
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        config.provider.api_key = os.environ["DEEPSEEK_API_KEY"]
+    if os.environ.get("GOOGLE_API_KEY"):
+        config.provider.api_key = os.environ["GOOGLE_API_KEY"]
     if os.environ.get("SYNAPSE_SANDBOX"):
         val = os.environ["SYNAPSE_SANDBOX"].lower()
         config.security.sandbox_enabled = val not in ("0", "false", "off")
