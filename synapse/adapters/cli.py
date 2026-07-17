@@ -327,29 +327,46 @@ def _check_api_key(config):
 def _make_confirm_callback(pause_event=None):
     """Return an async callback that prompts the user for tool-call approval.
 
-    If *pause_event* is an :class:`asyncio.Event`, it is cleared during
-    the prompt so that background spinners don't overwrite the UI.
+    Uses ``run_in_executor`` so the blocking ``input()`` call does not
+    freeze the asyncio event loop (which would prevent Ctrl+C handling).
     """
     async def _confirm(request):
         if pause_event is not None:
-            pause_event.clear()  # pause the spinner
+            pause_event.clear()  # 暂停 spinner
+
         try:
+            loop = asyncio.get_event_loop()
+            reason = getattr(request, "reason", "requires approval")
+            params = getattr(request, "tool_params", {})
+
+            # 先把 spinner 行清掉，避免 \r 残留覆盖确认提示
             try:
                 from rich.console import Console
                 console = Console()
-                console.print(f"\n[bold yellow]  Auth required:[/bold yellow] {request.tool_name}")
-                console.print(f"  [dim]Reason: {request.reason if hasattr(request, 'reason') else 'outside workspace'}[/dim]")
-                console.print(f"  [dim]Params: {request.tool_params}[/dim]")
-                answer = console.input("  [bold]Allow? [y/n]:[/bold] ")
+                console.print(" " * 50, end="\r")  # 清除 spinner 行
+                console.print(f"\n[bold yellow]  需要授权:[/bold yellow] {request.tool_name}")
+                console.print(f"  [dim]原因: {reason}[/dim]")
+                console.print(f"  [dim]参数: {params}[/dim]")
+
+                def _ask():
+                    return input("  [bold]允许吗? [y/n]: [/bold]")
+
+                answer = await loop.run_in_executor(None, _ask)
                 return answer.strip().lower().startswith("y")
             except ImportError:
-                print(f"\n  Auth required: {request.tool_name}")
-                print(f"  Params: {request.tool_params}")
-                answer = input("  Allow? [y/n]: ")
+                print(" " * 50, end="\r")
+                print(f"\n  需要授权: {request.tool_name}")
+                print(f"  原因: {reason}")
+                print(f"  参数: {params}")
+
+                def _ask_plain():
+                    return input("  允许吗? [y/n]: ")
+
+                answer = await loop.run_in_executor(None, _ask_plain)
                 return answer.strip().lower().startswith("y")
         finally:
             if pause_event is not None:
-                pause_event.set()  # resume spinner
+                pause_event.set()  # 恢复 spinner
 
     return _confirm
 
