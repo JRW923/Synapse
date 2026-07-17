@@ -324,22 +324,32 @@ def _check_api_key(config):
         print()
 
 
-def _make_confirm_callback():
-    """Return an async callback that prompts the user for tool-call approval."""
+def _make_confirm_callback(pause_event=None):
+    """Return an async callback that prompts the user for tool-call approval.
+
+    If *pause_event* is an :class:`asyncio.Event`, it is cleared during
+    the prompt so that background spinners don't overwrite the UI.
+    """
     async def _confirm(request):
+        if pause_event is not None:
+            pause_event.clear()  # pause the spinner
         try:
-            from rich.console import Console
-            console = Console()
-            console.print(f"\n[bold yellow]  Auth required:[/bold yellow] {request.tool_name}")
-            console.print(f"  [dim]Reason: {request.reason if hasattr(request, 'reason') else 'outside workspace'}[/dim]")
-            console.print(f"  [dim]Params: {request.tool_params}[/dim]")
-            answer = console.input("  [bold]Allow? [y/n]:[/bold] ")
-            return answer.strip().lower().startswith("y")
-        except ImportError:
-            print(f"\n  Auth required: {request.tool_name}")
-            print(f"  Params: {request.tool_params}")
-            answer = input("  Allow? [y/n]: ")
-            return answer.strip().lower().startswith("y")
+            try:
+                from rich.console import Console
+                console = Console()
+                console.print(f"\n[bold yellow]  Auth required:[/bold yellow] {request.tool_name}")
+                console.print(f"  [dim]Reason: {request.reason if hasattr(request, 'reason') else 'outside workspace'}[/dim]")
+                console.print(f"  [dim]Params: {request.tool_params}[/dim]")
+                answer = console.input("  [bold]Allow? [y/n]:[/bold] ")
+                return answer.strip().lower().startswith("y")
+            except ImportError:
+                print(f"\n  Auth required: {request.tool_name}")
+                print(f"  Params: {request.tool_params}")
+                answer = input("  Allow? [y/n]: ")
+                return answer.strip().lower().startswith("y")
+        finally:
+            if pause_event is not None:
+                pause_event.set()  # resume spinner
 
     return _confirm
 
@@ -556,7 +566,7 @@ def main():
             config_path=None,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
-            confirm_callback=_make_confirm_callback(),
+            confirm_callback=_make_confirm_callback(_pause_spinner),
         )
 
         try:
@@ -610,17 +620,20 @@ def main():
                 import time as _time
                 _start = _time.time()
                 _done = False
+                _pause_spinner = asyncio.Event()
+                _pause_spinner.set()  # initially not paused
 
                 async def _spinner():
                     _frames = ["-", "\\", "|", "/"]
                     _i = 0
                     while not _done:
-                        _elapsed = int(_time.time() - _start)
-                        if use_rich:
-                            console.print(
-                                f"[dim]{_frames[_i % 4]} Working... ({_elapsed}s)[/dim]",
-                                end="\r",
-                            )
+                        if _pause_spinner.is_set():
+                            _elapsed = int(_time.time() - _start)
+                            if use_rich:
+                                console.print(
+                                    f"[dim]{_frames[_i % 4]} Working... ({_elapsed}s)[/dim]",
+                                    end="\r",
+                                )
                         await asyncio.sleep(0.25)
                         _i += 1
 
