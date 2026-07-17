@@ -69,13 +69,22 @@ class Agent:
 
     async def _build_context(self, task: str):
         """Assemble context from retriever + memory."""
+        import asyncio
         from pathlib import Path
-        return await self.retriever.retrieve(
-            task=task,
-            project_root=Path.cwd(),
-            tools=self.tools,
-            memory=self.memory,
-        )
+        try:
+            return await asyncio.wait_for(
+                self.retriever.retrieve(
+                    task=task,
+                    project_root=Path.cwd(),
+                    tools=self.tools,
+                    memory=self.memory,
+                ),
+                timeout=5,  # context 构建不应超过 5 秒
+            )
+        except asyncio.TimeoutError:
+            # 大型目录下 grep/glob 可能很慢，返回空上下文比卡死好
+            from synapse.protocols.retriever import Context
+            return Context()
 
     async def _persist_memory(self, session: Session, task: str, result: AgentResult) -> None:
         """Store task summary as session memory."""

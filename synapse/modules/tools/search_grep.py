@@ -75,11 +75,16 @@ class GrepTool:
         """Synchronous Python regex grep (executed in a thread)."""
         import re
         lines = []
+        files_scanned = 0
+        max_files = 1000  # 最多扫描 1000 个文件，防止大目录卡死
         root = Path(search_path)
         regex = re.compile(pattern)
         for f in root.rglob("*") if root.is_dir() else [root]:
+            if files_scanned >= max_files:
+                break
             if not f.is_file():
                 continue
+            files_scanned += 1
             try:
                 for i, line in enumerate(f.read_text(errors="ignore").splitlines(), 1):
                     if regex.search(line):
