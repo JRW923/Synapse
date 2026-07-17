@@ -279,6 +279,65 @@ def main():
 
     sub.add_parser("version", help="Show version")
 
+    serve_parser = sub.add_parser("serve", help="Start the HTTP API server")
+    serve_parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8000,
+        help="Port to listen on (default: 8000)",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host to bind to (default: 127.0.0.1)",
+    )
+
+    eval_parser = sub.add_parser("eval", help="Run a benchmark evaluation")
+    eval_parser.add_argument(
+        "benchmark",
+        choices=["process_quality", "swebench"],
+        help="Benchmark to run",
+    )
+    eval_parser.add_argument(
+        "--provider", "-p",
+        default="anthropic",
+        choices=["anthropic", "openai", "deepseek", "google", "ollama"],
+        help="LLM provider (default: anthropic)",
+    )
+    eval_parser.add_argument(
+        "--model", "-m",
+        default=None,
+        help="Model name (overrides config)",
+    )
+
+    experiment_parser = sub.add_parser("experiment", help="Run an A/B experiment")
+    experiment_parser.add_argument(
+        "--name", "-n",
+        required=True,
+        help="Experiment name",
+    )
+    experiment_parser.add_argument(
+        "--config-a",
+        required=True,
+        help="JSON string of variant A config, e.g. '{\"provider\":\"anthropic\"}'",
+    )
+    experiment_parser.add_argument(
+        "--config-b",
+        required=True,
+        help="JSON string of variant B config",
+    )
+    experiment_parser.add_argument(
+        "--task", "-t",
+        default="Say hello.",
+        help="Benchmark task description (default: 'Say hello.')",
+    )
+    experiment_parser.add_argument(
+        "--runs",
+        type=int,
+        default=5,
+        help="Number of runs per config (default: 5)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "version":
@@ -311,7 +370,116 @@ def main():
         print(result.output)
         return
 
+    if args.command == "serve":
+        import uvicorn
+        from synapse.adapters.server import app as server_app
+        uvicorn.run(server_app, host=args.host, port=args.port)
+        return
+
+    if args.command == "eval":
+        asyncio.run(_run_eval(args))
+        return
+
+    if args.command == "experiment":
+        asyncio.run(_run_experiment(args))
+        return
+
     parser.print_help()
+
+
+# ---- Eval command handler -------------------------------------------------
+
+
+async def _run_eval(args) -> None:
+    """Execute a named benchmark via the Synapse facade."""
+    import json as _json
+
+    from synapse.adapters.library import Synapse
+    from synapse.eval.runner import BenchmarkRunner, Benchmark
+
+    print(f"Benchmark: {args.benchmark}")
+    print(f"Provider:  {args.provider}")
+
+    # Build the benchmark
+    if args.benchmark == "process_quality":
+        from synapse.eval.benchmarks.process_bench import ProcessQualityBenchmark
+        tasks = ProcessQualityBenchmark.tasks()
+    elif args.benchmark == "swebench":
+        from synapse.eval.benchmarks.swebench import SWEBenchAdapter
+        adapter = SWEBenchAdapter()
+        tasks = adapter.tasks()
+    else:
+        print(f"Unknown benchmark: {args.benchmark}")
+        return
+
+    benchmark = Benchmark(name=args.benchmark, tasks=tasks)
+    print(f"Tasks:     {len(tasks)}")
+
+    # Create Synapse instance
+    kwargs: dict = {"provider": args.provider, "enable_eval": True}
+    if args.model:
+        kwargs["model"] = args.model
+
+    synapse = Synapse(**kwargs)
+    runner = BenchmarkRunner()
+    result = await runner.run(benchmark, synapse.run)
+
+    print(f"\n--- Results ---")
+    print(f"Total:     {result.total}")
+    print(f"Completed: {result.completed}")
+    print(f"Failed:    {result.failed}")
+    print(f"Duration:  {result.duration_ms}ms")
+
+    for tr in result.results:
+        status_icon = "+" if tr.status == "success" else "!" if tr.status == "failed" else "?"
+        print(f"  [{status_icon}] {tr.task_id}: {tr.status} ({tr.duration_ms}ms)")
+
+
+# ---- Experiment command handler -------------------------------------------
+
+
+async def _run_experiment(args) -> None:
+    """Execute an A/B experiment."""
+    import json as _json
+
+    from synapse.eval.experiments import Experiment
+
+    config_a = _json.loads(args.config_a)
+    config_b = _json.loads(args.config_b)
+
+    print(f"Experiment: {args.name}")
+    print(f"Config A:   {_json.dumps(config_a)}")
+    print(f"Config B:   {_json.dumps(config_b)}")
+    print(f"Task:       {args.task}")
+    print(f"Runs:       {args.runs}")
+    print()
+
+    from synapse.adapters.library import Synapse
+
+    async def benchmark(config: dict) -> float:
+        synapse = Synapse(**config)
+        result = await synapse.run(args.task)
+        return float(result.metrics.duration_ms)
+
+    import uuid
+    experiment = Experiment(
+        id=str(uuid.uuid4()),
+        name=args.name,
+        variables={"task": args.task},
+        agent_config_a=config_a,
+        agent_config_b=config_b,
+        benchmark=benchmark,
+        runs_per_config=args.runs,
+    )
+
+    print("Running experiment...")
+    result = await experiment.run()
+
+    print(f"\n--- Results ---")
+    print(f"Config A metrics: {result.metrics_a}")
+    print(f"Config B metrics: {result.metrics_b}")
+    print(f"p-value:          {result.p_value}")
+    print(f"Winner:           {result.winner or 'none (not significant)'}")
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ from synapse.modules.tools.git_ import GitTool
 from synapse.modules.memory.session import SessionMemory
 from synapse.modules.memory.project import ProjectMemory
 from synapse.modules.memory.user import UserMemory
+from synapse.modules.memory.semantic import SemanticMemory
 
 from synapse.modules.context.retriever import BasicContextRetriever
 from synapse.modules.context.partitioner import ContextPartitioner
@@ -45,6 +46,7 @@ from synapse.modules.context.compactor import ContextCompactor
 from synapse.modules.security.sandbox import ProcessSandbox
 from synapse.modules.security.auth import ActionAuthorizer
 from synapse.modules.security.audit import AuditLogger
+from synapse.modules.security.injection import InjectionGuard
 
 # LLM Providers — imported at module level so tests can patch them.
 # Anthropic is the default and always required; others are optional.
@@ -75,6 +77,12 @@ from synapse.modules.planning.react import ReActPlanner
 from synapse.modules.planning.plan_execute import PlanExecutePlanner
 from synapse.modules.planning.hierarchical import HierarchicalPlanner
 
+# Eval — metrics collectors (Phase 3)
+from synapse.eval.metrics.process import ProcessMetrics
+from synapse.eval.metrics.quality import QualityMetrics
+from synapse.eval.metrics.efficiency import EfficiencyMetrics
+from synapse.eval.metrics.safety import SafetyMetrics
+
 
 # ---- LayeredMemory ---------------------------------------------------------
 
@@ -82,9 +90,9 @@ from synapse.modules.planning.hierarchical import HierarchicalPlanner
 class LayeredMemory:
     """Routes memory operations to the correct store based on MemoryLevel.
 
-    Composes SessionMemory, ProjectMemory, and UserMemory into a single
-    MemoryStore-compatible interface.  Each layer only handles its own level;
-    queries for unhandled levels return an empty list.
+    Composes SessionMemory, ProjectMemory, UserMemory, and SemanticMemory
+    into a single MemoryStore-compatible interface.  Each layer only handles
+    its own level; queries for unhandled levels return an empty list.
     """
 
     def __init__(
@@ -92,10 +100,12 @@ class LayeredMemory:
         session_memory: SessionMemory,
         project_memory: ProjectMemory,
         user_memory: UserMemory,
+        semantic_memory: SemanticMemory | None = None,
     ) -> None:
         self._session = session_memory
         self._project = project_memory
         self._user = user_memory
+        self._semantic = semantic_memory
 
     async def store(self, entry: MemoryEntry) -> None:
         if entry.level == MemoryLevel.SESSION:
@@ -104,6 +114,8 @@ class LayeredMemory:
             await self._project.store(entry)
         elif entry.level == MemoryLevel.USER:
             await self._user.store(entry)
+        elif entry.level == MemoryLevel.SEMANTIC and self._semantic is not None:
+            await self._semantic.store(entry)
 
     async def retrieve(
         self, query: str, level: MemoryLevel, top_k: int = 5
@@ -114,12 +126,16 @@ class LayeredMemory:
             return await self._project.retrieve(query, level, top_k)
         if level == MemoryLevel.USER:
             return await self._user.retrieve(query, level, top_k)
+        if level == MemoryLevel.SEMANTIC and self._semantic is not None:
+            return await self._semantic.retrieve(query, level, top_k)
         return []
 
     async def forget(self, entry_id: str) -> None:
         await self._session.forget(entry_id)
         await self._project.forget(entry_id)
         await self._user.forget(entry_id)
+        if self._semantic is not None:
+            await self._semantic.forget(entry_id)
 
 
 # ---- Provider registry -----------------------------------------------------
@@ -188,21 +204,28 @@ class Synapse:
         provider: str = "anthropic",
         model: str | None = None,
         config_path: str | None = None,
+        enable_eval: bool = False,
         **overrides: Any,
     ) -> None:
         self._provider_name = provider
+        self._enable_eval = enable_eval
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
 
     # -- Public API ----------------------------------------------------------
 
-    async def run(self, task: str) -> AgentResult:
+    async def run(self, task: str, session: Session | None = None) -> AgentResult:
         """Execute *task* asynchronously and return the result.
 
         Creates a fresh ``Session`` and ``Agent`` for each invocation,
         so multiple calls are independent.
+
+        If *session* is provided it is used directly; otherwise a new
+        ``Session`` is created.  This allows the HTTP server to retain a
+        reference to the session for later inspection.
         """
-        session = Session()
+        if session is None:
+            session = Session()
         agent = Agent(self._container)
         return await agent.run(task, session)
 
@@ -267,11 +290,12 @@ class Synapse:
             registry.register(tool)
         c.register(ToolRegistry, registry)
 
-        # Memory — layered: session + project + user
+        # Memory — layered: session + project + user + semantic
         session_memory = SessionMemory()
         project_memory = ProjectMemory()
         user_memory = UserMemory()
-        layered = LayeredMemory(session_memory, project_memory, user_memory)
+        semantic_memory = SemanticMemory()
+        layered = LayeredMemory(session_memory, project_memory, user_memory, semantic_memory)
         c.register(MemoryStore, layered)
 
         # Context
@@ -291,6 +315,20 @@ class Synapse:
             confirmation_enabled=self._config.security.auth_confirmation,
         )
         c.register(ActionAuthorizer, auth)
+
+        # Injection guard — annotates context blocks with trust levels
+        injection_guard = InjectionGuard()
+        c.register(InjectionGuard, injection_guard)
+
+        # Eval — optionally wire metrics collectors to EventBus (Phase 3)
+        if self._enable_eval:
+            c.register(ProcessMetrics, ProcessMetrics(bus=event_bus))
+            c.register(QualityMetrics, QualityMetrics(bus=event_bus))
+            c.register(EfficiencyMetrics, EfficiencyMetrics(bus=event_bus))
+            c.register(SafetyMetrics, SafetyMetrics(
+                bus=event_bus,
+                workspace_root=self._config.tools.workspace_root,
+            ))
 
         # Planner (selected by planning mode)
         planner = self._create_planner(auth)

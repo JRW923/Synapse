@@ -13,6 +13,10 @@ class ContextSource(str, Enum):
     GREP = "grep"
     AST = "ast"
     GIT = "git"
+    USER_INPUT = "user_input"
+    WEB = "web"
+    API = "api"
+    DB = "db"
 
 
 @dataclass
@@ -22,6 +26,7 @@ class ContextBlock:
     priority: int = 5  # 1-10, higher = harder to evict
     token_count: int = 0
     expires_after_phase: bool = False
+    trust_annotation: "TrustAnnotation | None" = None
 
 
 @dataclass

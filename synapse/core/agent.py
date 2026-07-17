@@ -6,9 +6,16 @@ from synapse.protocols.llm import LLMProvider
 from synapse.protocols.planner import Planner, AgentResult
 from synapse.protocols.tool import ToolRegistry
 from synapse.protocols.memory import MemoryStore, MemoryLevel, MemoryEntry, MemoryMetadata
-from synapse.protocols.retriever import ContextRetriever, ContextSource
+from synapse.protocols.retriever import ContextRetriever, ContextSource, Context
 from synapse.protocols.sandbox import Sandbox
 from synapse.core.events import EventBus
+
+# Lazy import — InjectionGuard lives in modules/, not core/.
+# It is resolved from the container at runtime when available.
+try:
+    from synapse.modules.security.injection import InjectionGuard as _InjectionGuard
+except ImportError:  # pragma: no cover
+    _InjectionGuard = None  # type: ignore[assignment]
 
 
 class Agent:
@@ -28,11 +35,23 @@ class Agent:
         self.event_bus: EventBus = container.resolve(EventBus)
         self._planner: Planner = container.resolve(Planner)
 
+        # Phase 3: optional InjectionGuard for context trust annotation
+        self._injection_guard: object | None = None
+        if _InjectionGuard is not None:
+            try:
+                self._injection_guard = container.resolve(_InjectionGuard)
+            except KeyError:
+                pass
+
     async def run(self, task: str, session: Session) -> AgentResult:
         # 1. Build context
         context = await self._build_context(task)
 
-        # 2. Delegate to planner
+        # 2. Annotate context with trust levels (Phase 3)
+        if self._injection_guard is not None:
+            context = self._injection_guard.annotate(context)  # type: ignore[union-attr]
+
+        # 3. Delegate to planner
         result = await self._planner.execute(
             task=task,
             context=context,
@@ -43,7 +62,7 @@ class Agent:
             event_bus=self.event_bus,
         )
 
-        # 3. Persist session memory
+        # 4. Persist session memory
         await self._persist_memory(session, task, result)
 
         return result
