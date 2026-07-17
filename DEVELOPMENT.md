@@ -339,4 +339,70 @@ Synapse/
 
 ---
 
-*下一阶段：Phase 2 — PlanExecutePlanner、HierarchicalPlanner、OpenAI/Google/DeepSeek/Ollama Provider、项目/用户记忆、完整四区上下文治理、审计日志*
+## 2026-07-16 · Phase 2 完成
+
+### 九、Phase 2 实施
+
+**12 个任务**，按依赖关系执行：
+
+| # | 模块 | 产出 | 测试 |
+|---|------|------|------|
+| 1 | OpenAI Provider | AsyncOpenAI 封装，tool call 格式转换 | 3 |
+| 2 | Google Gemini Provider | google-genai SDK 封装，system_instruction 分离 | 2 |
+| 3 | DeepSeek Provider | OpenAI 兼容 API（base_url → api.deepseek.com） | 2 |
+| 4 | Ollama Provider | OpenAI 兼容 API（base_url → localhost:11434） | 2 |
+| 5 | ProjectMemory | `.synapse/memory/` 下 YAML frontmatter Markdown 持久化 | 4 |
+| 6 | UserMemory | `~/.synapse/memory/` 跨项目持久化 | 3 |
+| 7 | Context Partitioner + Compactor | 四区预算强制执行 + OVERFLOW 截断压缩 | 4 |
+| 8 | PlanExecutePlanner | Plan → Execute → Verify 三阶段，phase_clear 上下文清理 | 3 |
+| 9 | HierarchicalPlanner | 任务分解 → Session.fork → 串行执行 → LLM 汇总 | 3 |
+| 10 | AuditLogger | EventBus 订阅 → JSONL + HMAC → 不可变审计日志 | 3 |
+| 11 | Library API + CLI | `Synapse` facade 类 + `--provider/--model/--mode` flag | 2 |
+| 12 | Integration + 验证 | 4 集成测试 + 全量测试 + 架构边界检查 | 4 |
+
+**Provider 适配差异**：
+
+| Provider | SDK | 特殊处理 |
+|----------|-----|---------|
+| Anthropic | anthropic | system 参数分离，tool_use content block |
+| OpenAI | openai | `{"type":"function","function":{...}}` 包装，JSON arguments 解析 |
+| Google | google-genai | system_instruction 配置，FunctionDeclaration Schema 递归转换 |
+| DeepSeek | openai (兼容) | base_url="https://api.deepseek.com/v1" |
+| Ollama | openai (兼容) | base_url="http://localhost:11434/v1" |
+
+**LayeredMemory**：组合 SessionMemory + ProjectMemory + UserMemory，统一 MemoryStore 接口，按 MemoryLevel 路由。
+
+### 十、Phase 2 交付物
+
+```
+Synapse/
+├── synapse/
+│   ├── protocols/     # +TaskDecomposed +MergeResult +PlanCreated 事件
+│   ├── core/          # (无变化)
+│   ├── modules/
+│   │   ├── providers/ # +OpenAI +Google +DeepSeek +Ollama (共 5)
+│   │   ├── tools/     # (无变化)
+│   │   ├── planning/  # +PlanExecutePlanner +HierarchicalPlanner
+│   │   ├── memory/    # +ProjectMemory +UserMemory
+│   │   ├── context/   # +Partitioner +Compactor
+│   │   └── security/  # +AuditLogger (JSONL+HMAC)
+│   ├── adapters/      # +Library API (Synapse facade), CLI --provider/--model/--mode
+│   └── config/        # (无变化)
+├── tests/             # 98 tests（0 failures）
+├── tools/             # +check_boundaries.py
+└── docs/superpowers/  # +Phase 2 Plan
+```
+
+| 指标 | Phase 1 | Phase 2 |
+|------|---------|---------|
+| Commits | 23 | +12 → 35 |
+| Tests | 58 | +40 → 98 |
+| Providers | 1 (Anthropic) | 5 |
+| Planners | 1 (ReAct) | 3 (ReAct + PlanExecute + Hierarchical) |
+| Memory | 1 (Session) | 3 (Session + Project + User) |
+| Context | Retriever | Retriever + Partitioner + Compactor |
+| Security | Sandbox + Auth | Sandbox + Auth + Audit |
+
+---
+
+*下一阶段：Phase 3 — 评测框架、语义记忆、HTTP API、Prompt Injection 防御、SWE-bench 防污染*
