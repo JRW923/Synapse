@@ -560,13 +560,17 @@ def main():
 
         from synapse.adapters.library import Synapse
 
+        # Shared pause event — lets the auth callback pause the spinner
+        _pause_event = asyncio.Event()
+        _pause_event.set()
+
         synapse = Synapse(
             provider=config.provider.provider,
             model=config.provider.model,
             config_path=None,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
-            confirm_callback=_make_confirm_callback(_pause_spinner),
+            confirm_callback=_make_confirm_callback(_pause_event),
         )
 
         try:
@@ -620,14 +624,12 @@ def main():
                 import time as _time
                 _start = _time.time()
                 _done = False
-                _pause_spinner = asyncio.Event()
-                _pause_spinner.set()  # initially not paused
 
                 async def _spinner():
                     _frames = ["-", "\\", "|", "/"]
                     _i = 0
                     while not _done:
-                        if _pause_spinner.is_set():
+                        if _pause_event.is_set():
                             _elapsed = int(_time.time() - _start)
                             if use_rich:
                                 console.print(
