@@ -405,4 +405,64 @@ Synapse/
 
 ---
 
-*下一阶段：Phase 3 — 评测框架、语义记忆、HTTP API、Prompt Injection 防御、SWE-bench 防污染*
+## 2026-07-16 · Phase 3 完成
+
+### 十一、Phase 3 实施
+
+**8 个任务**：
+
+| # | 模块 | 产出 | 测试 |
+|---|------|------|------|
+| 1 | Metrics Collectors | Process/Quality/Efficiency/Safety 四维指标采集器 | 8 |
+| 2 | Benchmark Runner | SWE-bench 防污染适配 + 自建过程质量 benchmark | 3 |
+| 3 | A/B Experiments | Experiment 类 + scipy t-test 显著性检验 | 3 |
+| 4 | SemanticMemory | ChromaDB 向量存储，语义相似检索 | 3 |
+| 5 | HTTP API | FastAPI server: /run, /sessions, /eval/experiment, /health | 3 |
+| 6 | Injection Defense | TrustLevel 标注 + EXTERNAL 包裹（标注不拦截） | 3 |
+| 7 | Wiring | SemanticMemory → LayeredMemory, InjectionGuard → Agent, CLI: serve/eval/experiment | - |
+| 8 | Integration + 验证 | 7 集成测试 + 128 全量测试 + 架构边界 | 7 |
+
+**四维指标体系**：
+
+```
+过程质量 (核心差异化):
+  reuse_attempted/found/adopted, root_cause_accuracy,
+  test_persistence_rate, instruction_drift_at_round,
+  plan_quality_score, merge_quality_score,
+  thrashing_events, regex_abuse_events
+
+代码质量:
+  complexity_delta, duplication_rate,
+  function_length_violations, test_coverage_delta,
+  lint_errors_introduced
+
+效率:
+  tokens_input/output/cache_hit, tool_call_count,
+  success_rate, duration_ms, cost_estimate_usd, thrashing_ratio
+
+安全:
+  auth_blocks, sandbox_violations, injection_attempts,
+  out_of_workspace_access, dangerous_command_attempts
+```
+
+**SWE-bench 防污染三措施**：模板变异（同义替换+重排）、时间切片、私有测试套件。
+
+**Injection Defense 设计**：标注 TrustLevel（SYSTEM/USER/DETERMINISTIC/EXTERNAL），EXTERNAL 内容包裹 `<external-content>` 标签。不过滤——让 LLM 自己判断可信度。
+
+### 十二、Phase 3 交付物
+
+| 指标 | Phase 1 | Phase 2 | Phase 3 |
+|------|---------|---------|---------|
+| Commits | 23 | +12 → 35 | +8 → 43 |
+| Tests | 58 | +40 → 98 | +30 → 128 |
+| Providers | 1 | 5 | 5 |
+| Planners | 1 | 3 | 3 |
+| Memory | 1 | 3 | 4（+Semantic） |
+| Context | Retriever | +Partitioner/Compactor | +InjectionGuard |
+| Security | Sandbox+Auth | +Audit | +Injection Defense |
+| New | - | - | Eval(metrics+benchmarks+experiments), HTTP API |
+
+**API 端点**：`POST /run`, `GET /sessions/{id}`, `GET /sessions/{id}/messages`, `POST /eval/experiment`, `GET /eval/experiment/{id}`, `GET /health`
+
+**CLI 新增命令**：`synapse serve`, `synapse eval`, `synapse experiment`
+
