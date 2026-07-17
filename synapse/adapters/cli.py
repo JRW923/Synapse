@@ -46,6 +46,7 @@ def build_container(config) -> Container:
     provider = AnthropicProvider(
         model=config.provider.model,
         api_key=config.provider.api_key,
+        max_tokens=config.provider.max_tokens,
     )
     c.register(LLMProvider, provider)
 
@@ -72,8 +73,17 @@ def build_container(config) -> Container:
     sandbox = ProcessSandbox()
     c.register(Sandbox, sandbox)
 
+    auth = ActionAuthorizer(
+        workspace_root=config.tools.workspace_root,
+        confirmation_enabled=config.security.auth_confirmation,
+    )
+    c.register(ActionAuthorizer, auth)
+
     # Planner
-    planner = ReActPlanner(max_iterations=config.planning.max_iterations)
+    planner = ReActPlanner(
+        max_iterations=config.planning.max_iterations,
+        auth=auth,
+    )
     c.register(Planner, planner)
 
     return c

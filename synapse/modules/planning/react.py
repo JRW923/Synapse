@@ -21,9 +21,10 @@ class ReActPlanner:
 
     mode = PlanningMode.REACT
 
-    def __init__(self, max_iterations: int = 50, thrashing_threshold: int = 3):
+    def __init__(self, max_iterations: int = 50, thrashing_threshold: int = 3, auth=None):
         self.max_iterations = max_iterations
         self.thrashing_threshold = thrashing_threshold
+        self.auth = auth  # ActionAuthorizer or None (None = backward compat, no auth checks)
 
     @staticmethod
     async def _maybe_await(obj):
@@ -51,8 +52,22 @@ class ReActPlanner:
         result_status = ResultStatus.SUCCESS
 
         for iteration in range(1, self.max_iterations + 1):
-            # Call LLM
-            response = await llm.chat(messages, tools=tool_schemas if tool_schemas else None)
+            # Call LLM with exponential backoff retry (I2)
+            max_llm_retries = 3
+            for attempt in range(max_llm_retries + 1):  # 1 initial + 3 retries = 4 total
+                try:
+                    response = await llm.chat(messages, tools=tool_schemas if tool_schemas else None)
+                    break
+                except Exception as e:
+                    if attempt == max_llm_retries:
+                        # All retries exhausted — return FAILED
+                        metrics.duration_ms = int((time.time() - start_time) * 1000)
+                        return AgentResult(
+                            status=ResultStatus.FAILED,
+                            output=f"LLM API call failed after {max_llm_retries + 1} attempts: {e}",
+                            metrics=metrics,
+                        )
+                    await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
             metrics.tokens_input += response.usage.get("input", 0)
             metrics.tokens_output += response.usage.get("output", 0)
 
@@ -82,6 +97,38 @@ class ReActPlanner:
                 t0 = time.time()
                 try:
                     tool = await self._maybe_await(tools.get(tool_name))
+
+                    # Action-time authorization check (C1)
+                    if self.auth is not None:
+                        risk_level = getattr(tool, "risk_level", None)
+                        if risk_level is not None:
+                            auth_req = self.auth.create_request(
+                                tool_name, tool_input, risk_level, session.id,
+                            )
+                            decision = self.auth.authorize(auth_req)
+                            if not decision.allowed:
+                                result = type("TR", (), {
+                                    "success": False,
+                                    "output": "",
+                                    "error": f"Authorization denied: {decision.reason}",
+                                    "metadata": type("M", (), {
+                                        "tool_name": tool_name, "files_touched": [],
+                                        "sandbox_used": False,
+                                    })(),
+                                })()
+                                # Still record metrics and emit events for the denied call
+                                metrics.tool_call_count += 1
+                                duration_ms = int((time.time() - t0) * 1000)
+                                await event_bus.emit(ToolCallCompleted(
+                                    session_id=session.id,
+                                    tool_name=tool_name,
+                                    success=False,
+                                    duration_ms=duration_ms,
+                                    files_touched=[],
+                                ))
+                                tool_results.append((tc["id"], result))
+                                continue
+
                     result = await tool.execute(tool_input, sandbox=sandbox)
                 except KeyError:
                     result = type("TR", (), {

@@ -10,6 +10,7 @@ class ProviderConfig(BaseModel):
     api_key: str = ""
     max_retries: int = 3
     timeout_seconds: int = 120
+    max_tokens: int = 4096
 
 
 class ToolsConfig(BaseModel):
