@@ -466,3 +466,62 @@ Synapse/
 
 **CLI 新增命令**：`synapse serve`, `synapse eval`, `synapse experiment`
 
+---
+
+## 2026-07-16 · Phase 4 完成
+
+### 十三、Phase 4 实施
+
+**5 个任务**：
+
+| # | 模块 | 产出 | 测试 |
+|---|------|------|------|
+| 1 | HTTP Tool | httpx 异步 HTTP（GET/POST，30s 超时，100KB 限制） | 3 |
+| 2 | Database Tool | sqlite3 查询（默认只读，workspace 路径检查） | 6 |
+| 3 | Browser Tool | Playwright 浏览器自动化（navigate + text + screenshot） | 2 |
+| 4 | Qdrant Backend | QdrantMemory（本地模式，TF-IDF embedding） | 3 |
+| 5 | Wiring + CLI + 集成 | --memory-backend, --enable-external-tools 标志 | 4 |
+
+**EXTERNAL 工具安全机制**：默认禁用，需 `--enable-external-tools` 显式启用。通过 ActionAuthorizer 的 `allow_external` 配置门控。
+
+### 十四、最终交付物
+
+```
+Synapse/
+├── synapse/
+│   ├── protocols/     # 8 Protocol + Event 类型（+TaskDecomposed/Merge/PlanCreated）
+│   ├── core/          # Agent, Container, EventBus, Session, Exceptions
+│   ├── modules/
+│   │   ├── providers/ # 5 个 Provider（Anthropic/OpenAI/Google/DeepSeek/Ollama）
+│   │   ├── tools/     # 10 个工具（File×4 + Search + Shell + Git + HTTP + DB + Browser）
+│   │   ├── planning/  # 3 种 Planner（ReAct + PlanExecute + Hierarchical）
+│   │   ├── memory/    # 5 个实现（Session + Project + User + ChromaDB + Qdrant）
+│   │   ├── context/   # Retriever + Partitioner + Compactor
+│   │   └── security/  # Sandbox + Auth + Audit + Injection Defense
+│   ├── adapters/      # CLI + Library API + HTTP Server（FastAPI, 6 endpoints）
+│   ├── config/        # Pydantic schema + YAML/env loader
+│   └── eval/          # 4 Metrics Collectors + 2 Benchmarks + A/B Experiments
+├── tests/             # 148 tests（0 failures）
+└── tools/             # check_boundaries.py
+```
+
+### 十五、四阶段数据总览
+
+| | Phase 1 | Phase 2 | Phase 3 | Phase 4 | **总计** |
+|---|---------|---------|---------|---------|-----|
+| Commits | 23 | +12 | +8 | +5 | **48** |
+| Tests | 58 | 98 | 128 | 148 | **148** |
+| Files | 57 | ~80 | ~110 | ~125 | **~125** |
+| Lines | ~3,100 | ~5,500 | ~8,000 | ~9,000 | **~9,000** |
+
+| 能力 | 覆盖 |
+|------|------|
+| LLM Provider | Anthropic, OpenAI, Google Gemini, DeepSeek, Ollama（5） |
+| 规划模式 | ReAct, Plan-Execute, Hierarchical（3） |
+| 记忆系统 | Session, Project, User, Semantic(ChromaDB+Qdrant)（5 实现） |
+| 工具 | Read, Write, Edit, Glob, Grep, Shell, Git, HTTP, DB, Browser（10） |
+| 安全 | Sandbox, ActionAuth, Audit(JSONL+HMAC), Injection Defense（4 层） |
+| 上下文 | Retriever + Partitioner + Compactor + InjectionGuard（4 组件） |
+| 评测 | Process/Quality/Efficiency/Safety Metrics + SWE-bench + ProcessBench + A/B Experiments |
+| 入口 | CLI（6 命令）+ Python Library API + HTTP Server（6 端点） |
+
