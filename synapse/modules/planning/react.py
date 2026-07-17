@@ -66,12 +66,17 @@ class ReActPlanner:
         metrics = ExecutionMetrics()
         file_touch_counts: dict[str, int] = {}
 
-        # Build initial messages
+        # Build initial messages — reuse session history if available
         system_prompt = self._build_system_prompt(context)
-        messages = [
-            Message(role="system", content=system_prompt),
-            Message(role="user", content=task),
-        ]
+        if session.messages:
+            # 已有历史：追加新任务
+            messages = list(session.messages)
+            messages.append(Message(role="user", content=task))
+        else:
+            messages = [
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=task),
+            ]
 
         tool_schemas_raw = tools.get_schemas() if hasattr(tools, 'get_schemas') else []
         tool_schemas = await self._maybe_await(tool_schemas_raw)
@@ -276,6 +281,9 @@ class ReActPlanner:
 
         metrics.duration_ms = int((time.time() - start_time) * 1000)
 
+        # 保存消息历史到 Session，下次对话可继续
+        session.messages = messages
+
         await event_bus.emit(AgentCompleted(
             session_id=session.id,
             status=result_status.value,
@@ -283,7 +291,6 @@ class ReActPlanner:
             tool_calls=metrics.tool_call_count,
             duration_ms=metrics.duration_ms,
         ))
-
         return AgentResult(
             status=result_status,
             output=final_output,
