@@ -29,6 +29,7 @@ class PlanningConfig(BaseModel):
     mode: str = "react"  # react | plan_execute | hierarchical
     max_iterations: int = 50
     thrashing_threshold: int = 3
+    total_timeout_seconds: int = 300
 
 
 class SecurityConfig(BaseModel):

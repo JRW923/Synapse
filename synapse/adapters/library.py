@@ -409,6 +409,7 @@ class Synapse:
             model=cfg.model,
             api_key=cfg.api_key,
             max_tokens=cfg.max_tokens,
+            timeout_seconds=cfg.timeout_seconds,
         )
 
     # -- Internal: semantic memory factory -----------------------------------
@@ -458,6 +459,7 @@ class Synapse:
             thrashing_threshold=cfg.thrashing_threshold,
             auth=auth,
             confirm_callback=self._confirm_callback,
+            total_timeout_seconds=cfg.total_timeout_seconds,
         )
 
         if mode == PlanningMode.REACT:

@@ -12,10 +12,19 @@ logger = logging.getLogger(__name__)
 class OpenAIProvider:
     """LLM provider backed by OpenAI's API."""
 
-    def __init__(self, model: str = "gpt-4o", api_key: str = "", max_tokens: int = 4096):
+    def __init__(
+        self,
+        model: str = "gpt-4o",
+        api_key: str = "",
+        max_tokens: int = 4096,
+        timeout_seconds: int = 120,
+    ):
         self._model = model
         self._max_tokens = max_tokens
-        self._client = AsyncOpenAI(api_key=api_key) if api_key else AsyncOpenAI()
+        self._client = AsyncOpenAI(
+            api_key=api_key if api_key else None,
+            timeout=timeout_seconds,
+        )
 
     @property
     def model_id(self) -> str:
@@ -55,10 +64,31 @@ class OpenAIProvider:
         """
         result = []
         for msg in messages:
-            if msg.role == "user" and msg.content == "":
-                # Tool result placeholder — skip
+            if msg.role == "user" and msg.content == "" and not msg.tool_call_id:
+                # Legacy tool result placeholder — skip
                 continue
-            result.append({"role": msg.role, "content": msg.content})
+
+            entry: dict = {"role": msg.role, "content": msg.content}
+
+            # Assistant message with tool_calls
+            if msg.role == "assistant" and msg.tool_calls:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["input"], ensure_ascii=False),
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
+
+            # Tool result message
+            if msg.role == "tool" and msg.tool_call_id:
+                entry["tool_call_id"] = msg.tool_call_id
+
+            result.append(entry)
         return result
 
     def _convert_tools(self, tools: list[dict]) -> list[dict]:

@@ -6,8 +6,10 @@ from typing import Protocol, AsyncIterator
 
 @dataclass
 class Message:
-    role: str  # "system" | "user" | "assistant"
+    role: str  # "system" | "user" | "assistant" | "tool"
     content: str
+    tool_calls: list[dict] = field(default_factory=list)  # assistant tool calls
+    tool_call_id: str | None = None  # tool result id (role="tool")
 
 
 @dataclass

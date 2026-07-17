@@ -21,10 +21,15 @@ class OllamaProvider:
         base_url: str = "http://localhost:11434/v1",
         api_key: str = "ollama",
         max_tokens: int = 4096,
+        timeout_seconds: int = 120,
     ):
         self._model = model
         self._max_tokens = max_tokens
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self._client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout_seconds,
+        )
 
     @property
     def model_id(self) -> str:
@@ -71,7 +76,28 @@ class OllamaProvider:
         System messages are passed inline as a normal "system" role
         message, which Ollama's OpenAI-compatible endpoint supports.
         """
-        return [{"role": msg.role, "content": msg.content} for msg in messages]
+        result = []
+        for msg in messages:
+            entry: dict = {"role": msg.role, "content": msg.content}
+
+            if msg.role == "assistant" and msg.tool_calls:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["input"], ensure_ascii=False),
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
+
+            if msg.role == "tool" and msg.tool_call_id:
+                entry["tool_call_id"] = msg.tool_call_id
+
+            result.append(entry)
+        return result
 
     def _parse_response(self, response) -> LLMResponse:
         """Parse OpenAI-style chat completion into our LLMResponse format."""

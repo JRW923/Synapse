@@ -38,10 +38,19 @@ if _GOOGLE_AVAILABLE:
     class GoogleProvider:
         """LLM provider backed by Google's Gemini API."""
 
-        def __init__(self, model: str = "gemini-pro", api_key: str = "", max_tokens: int = 4096):
+        def __init__(
+            self,
+            model: str = "gemini-pro",
+            api_key: str = "",
+            max_tokens: int = 4096,
+            timeout_seconds: int = 120,
+        ):
             self._model = model
             self._max_tokens = max_tokens
-            self._client = genai.Client(api_key=api_key) if api_key else genai.Client()
+            self._client = genai.Client(
+                api_key=api_key if api_key else None,
+                http_options={"timeout": timeout_seconds * 1000},
+            )
 
         @property
         def model_id(self) -> str:
@@ -87,6 +96,29 @@ if _GOOGLE_AVAILABLE:
             for msg in messages:
                 if msg.role == "system":
                     continue
+
+                if msg.role == "assistant" and msg.tool_calls:
+                    # Assistant message with tool_calls — need to handle in a future update
+                    # For now, include the text content if any
+                    parts = []
+                    if msg.content:
+                        parts.append(genai_types.Part.from_text(text=msg.content))
+                    result.append(genai_types.Content(role="model", parts=parts))
+                    continue
+
+                if msg.role == "tool" and msg.tool_call_id:
+                    # Tool result — convert to function_response
+                    result.append(
+                        genai_types.Content(
+                            role="tool",
+                            parts=[genai_types.Part.from_function_response(
+                                name="",
+                                response={"result": msg.content},
+                            )],
+                        )
+                    )
+                    continue
+
                 if msg.role == "assistant":
                     role = "model"
                 elif msg.role == "user":

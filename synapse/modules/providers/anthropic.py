@@ -1,25 +1,28 @@
 """Anthropic LLM Provider implementation."""
 
 import logging
-import re
 from anthropic import AsyncAnthropic
 from synapse.protocols.llm import LLMResponse, LLMChunk, Message
 from synapse.core.exceptions import ProviderError
 
 logger = logging.getLogger(__name__)
 
-# Pattern to detect tool-result user messages produced by ReActPlanner
-# Format: [Tool {tool_use_id} {status}]: {output}\nError: {error}
-TOOL_RESULT_RE = re.compile(r'^\[Tool (\S+) (success|failed)\]:')
-
-
 class AnthropicProvider:
     """LLM provider backed by Anthropic's API."""
 
-    def __init__(self, model: str = "claude-sonnet-4-6", api_key: str = "", max_tokens: int = 4096):
+    def __init__(
+        self,
+        model: str = "claude-sonnet-4-6",
+        api_key: str = "",
+        max_tokens: int = 4096,
+        timeout_seconds: int = 120,
+    ):
         self._model = model
         self._max_tokens = max_tokens
-        self._client = AsyncAnthropic(api_key=api_key) if api_key else AsyncAnthropic()
+        self._client = AsyncAnthropic(
+            api_key=api_key if api_key else None,
+            timeout=timeout_seconds,
+        )
 
     @property
     def model_id(self) -> str:
@@ -70,40 +73,47 @@ class AnthropicProvider:
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
         """Convert internal Message to Anthropic API format, filtering system.
 
-        Detects tool-result messages (formatted as "[Tool <id> <status>]: ...")
-        and converts them to Anthropic's tool_result content block format.
+        Handles:
+        - tool messages (role="tool") → Anthropic tool_result blocks
+        - assistant messages with tool_calls → Anthropic tool_use blocks
+        - legacy [Tool xxx]: format for backward compatibility
         """
         result = []
         for msg in messages:
             if msg.role == "system":
                 continue
 
-            # Detect tool-result user messages from ReActPlanner (I1)
-            m = TOOL_RESULT_RE.match(msg.content)
-            if m and msg.role == "user":
-                tool_use_id = m.group(1)
-                # Extract actual result content after the prefix "[Tool {id} {status}]: "
-                prefix_end = msg.content.index("]: ") + 3
-                result_content = msg.content[prefix_end:]
-                # Strip trailing "\nError: ..." suffix
-                error_idx = result_content.rfind("\nError: ")
-                if error_idx != -1:
-                    result_content = result_content[:error_idx]
-
+            # New-format tool result message
+            if msg.role == "tool" and msg.tool_call_id:
                 result.append({
                     "role": "user",
                     "content": [
                         {
                             "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": result_content,
+                            "tool_use_id": msg.tool_call_id,
+                            "content": msg.content,
                         }
                     ],
                 })
                 continue
 
+            # New-format assistant message with tool_calls
+            if msg.role == "assistant" and msg.tool_calls:
+                content_blocks = []
+                if msg.content:
+                    content_blocks.append({"type": "text", "text": msg.content})
+                for tc in msg.tool_calls:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc["id"],
+                        "name": tc["name"],
+                        "input": tc["input"],
+                    })
+                result.append({"role": "assistant", "content": content_blocks})
+                continue
+
             if msg.role == "user" and msg.content == "":
-                # Tool result placeholder
+                # Legacy tool result placeholder
                 continue
             result.append({"role": msg.role, "content": msg.content})
         return result

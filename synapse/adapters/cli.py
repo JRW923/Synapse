@@ -324,49 +324,49 @@ def _check_api_key(config):
         print()
 
 
-def _make_confirm_callback(pause_event=None):
-    """Return an async callback that prompts the user for tool-call approval.
+def _make_confirm_callback(pause_event=None, status_holder=None):
+    """Return an async callback that prompts the user for tool-call approval."""
+    import sys as _sys
 
-    Uses ``run_in_executor`` so the blocking ``input()`` call does not
-    freeze the asyncio event loop (which would prevent Ctrl+C handling).
-    """
     async def _confirm(request):
+        # Pause Rich spinner if active
+        st = None
+        if status_holder is not None and len(status_holder) > 0:
+            st = status_holder[0]
+            if st is not None:
+                st.stop()
+
         if pause_event is not None:
-            pause_event.clear()  # 暂停 spinner
+            pause_event.clear()
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             reason = getattr(request, "reason", "requires approval")
             params = getattr(request, "tool_params", {})
 
-            # 先把 spinner 行清掉，避免 \r 残留覆盖确认提示
-            try:
-                from rich.console import Console
-                console = Console()
-                console.print(" " * 50, end="\r")  # 清除 spinner 行
-                console.print(f"\n[bold yellow]  需要授权:[/bold yellow] {request.tool_name}")
-                console.print(f"  [dim]原因: {reason}[/dim]")
-                console.print(f"  [dim]参数: {params}[/dim]")
+            # 用最简单的 stdout 输出确认提示，不依赖 Rich
+            _sys.stdout.write("\n" + "=" * 50 + "\n")
+            _sys.stdout.write(f"  需要授权: {request.tool_name}\n")
+            _sys.stdout.write(f"  原因: {reason}\n")
+            _sys.stdout.write(f"  参数: {params}\n")
+            _sys.stdout.write("  允许吗? [y/n]: ")
+            _sys.stdout.flush()
 
-                def _ask():
-                    return input("  允许吗? [y/n]: ")
+            def _ask():
+                try:
+                    return input("")
+                except EOFError:
+                    return "n"
 
-                answer = await loop.run_in_executor(None, _ask)
-                return answer.strip().lower().startswith("y")
-            except ImportError:
-                print(" " * 50, end="\r")
-                print(f"\n  需要授权: {request.tool_name}")
-                print(f"  原因: {reason}")
-                print(f"  参数: {params}")
-
-                def _ask_plain():
-                    return input("  允许吗? [y/n]: ")
-
-                answer = await loop.run_in_executor(None, _ask_plain)
-                return answer.strip().lower().startswith("y")
+            answer = await loop.run_in_executor(None, _ask)
+            _sys.stdout.write("\n")
+            _sys.stdout.flush()
+            return answer.strip().lower().startswith("y")
         finally:
             if pause_event is not None:
-                pause_event.set()  # 恢复 spinner
+                pause_event.set()
+            if st is not None:
+                st.start()
 
     return _confirm
 
@@ -558,6 +558,7 @@ def main():
         synapse = Synapse(**kwargs)  # type: ignore[arg-type]
 
         async def _exec():
+            print("Working...", flush=True)
             result = await synapse.run(task)
             return result
 
@@ -577,18 +578,22 @@ def main():
 
         from synapse.adapters.library import Synapse
 
+        # Mutable holder so the confirm callback can pause/resume the current spinner
+        status_holder: list = []
+
         synapse = Synapse(
             provider=config.provider.provider,
             model=config.provider.model,
             config_path=None,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
-            confirm_callback=_make_confirm_callback(),
+            confirm_callback=_make_confirm_callback(status_holder=status_holder),
         )
 
         try:
             from rich.console import Console
             from rich.markdown import Markdown
+            from rich.status import Status
             console = Console()
             use_rich = True
         except ImportError:
@@ -635,7 +640,28 @@ def main():
                     continue
 
                 if use_rich:
-                    console.print("[dim]Working...[/dim]")
+                    status = console.status("[dim]Working...[/dim]", spinner="dots")
+                    status.start()
+
+                    # Let confirm callback pause/resume this spinner
+                    status_holder[:] = [status]
+
+                    # Subscribe to tool call events to update spinner text
+                    event_bus = synapse._container.resolve(EventBus)
+                    if event_bus is not None:
+                        async def _on_progress(event):
+                            status.update(f"[dim]{event.message}[/dim]")
+
+                        async def _on_tool_started(event):
+                            status.update(f"[dim]Executing {event.tool_name}...[/dim]")
+
+                        async def _on_tool_completed(event):
+                            icon = "[OK]" if event.success else "[FAIL]"
+                            status.update(f"[dim]Tool {event.tool_name} {icon} ({event.duration_ms}ms)[/dim]")
+
+                        event_bus.subscribe("agent_progress", _on_progress)
+                        event_bus.subscribe("tool_call_started", _on_tool_started)
+                        event_bus.subscribe("tool_call_completed", _on_tool_completed)
                 else:
                     print("Working...")
 
@@ -643,10 +669,19 @@ def main():
                     result = await synapse.run(user_input, session=session)
                 except Exception as exc:
                     if use_rich:
+                        status.stop()
                         console.print(f"[bold red]Error:[/bold red] {exc}")
                     else:
                         print(f"Error: {exc}")
                     continue
+                finally:
+                    if use_rich:
+                        status.stop()
+                        status_holder[:] = []  # clear holder
+                        # Unsubscribe event handlers
+                        event_bus.unsubscribe("agent_progress", _on_progress)
+                        event_bus.unsubscribe("tool_call_started", _on_tool_started)
+                        event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
 
                 if use_rich:
                     status_color = "green" if result.status.value == "success" else "yellow"

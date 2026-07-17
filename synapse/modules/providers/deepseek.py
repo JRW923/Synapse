@@ -20,10 +20,11 @@ class DeepSeekProvider:
 
     def __init__(
         self,
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-pro",
         api_key: str = "",
         max_tokens: int = 4096,
         base_url: str = DEEPSEEK_BASE_URL,
+        timeout_seconds: int = 120,
     ):
         import os
         self._model = model
@@ -31,7 +32,11 @@ class DeepSeekProvider:
         self._base_url = base_url
         # If no key provided, try env vars (DEEPSEEK_API_KEY first, then OPENAI_API_KEY)
         resolved_key = api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-        self._client = AsyncOpenAI(api_key=resolved_key, base_url=base_url)
+        self._client = AsyncOpenAI(
+            api_key=resolved_key,
+            base_url=base_url,
+            timeout=timeout_seconds,
+        )
 
     @property
     def model_id(self) -> str:
@@ -75,13 +80,37 @@ class DeepSeekProvider:
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
         """Convert internal Message objects to OpenAI-compatible JSON dicts.
 
-        Filters out empty user messages (tool-result placeholders).
+        Handles:
+        - assistant messages with tool_calls → OpenAI tool_calls format
+        - tool messages → OpenAI tool role with tool_call_id
+        - empty user messages (legacy placeholders) are filtered out
         """
         result = []
         for msg in messages:
-            if msg.role == "user" and msg.content == "":
+            if msg.role == "user" and msg.content == "" and not msg.tool_call_id:
                 continue
-            result.append({"role": msg.role, "content": msg.content})
+
+            entry: dict = {"role": msg.role, "content": msg.content}
+
+            # Assistant message with tool_calls
+            if msg.role == "assistant" and msg.tool_calls:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["input"], ensure_ascii=False),
+                        },
+                    }
+                    for tc in msg.tool_calls
+                ]
+
+            # Tool result message
+            if msg.role == "tool" and msg.tool_call_id:
+                entry["tool_call_id"] = msg.tool_call_id
+
+            result.append(entry)
         return result
 
     def _parse_response(self, response) -> LLMResponse:

@@ -13,6 +13,7 @@ class EventType(str, Enum):
     AUTH_DECISION = "auth_decision"
     AGENT_ERROR = "agent_error"
     AGENT_COMPLETED = "agent_completed"
+    AGENT_PROGRESS = "agent_progress"
     THRASHING_DETECTED = "thrashing_detected"
     PLAN_CREATED = "plan_created"
     TASK_DECOMPOSED = "task_decomposed"
@@ -71,6 +72,14 @@ class AgentCompleted(BaseEvent):
     total_tokens: int
     tool_calls: int
     duration_ms: int
+
+
+@dataclass(kw_only=True)
+class AgentProgress(BaseEvent):
+    """Emitted at key steps in the agent loop for live progress display."""
+    event_type: str = EventType.AGENT_PROGRESS
+    phase: str  # "thinking" | "calling_llm" | "executing_tool" | "done"
+    message: str = ""
 
 
 @dataclass(kw_only=True)
