@@ -14,6 +14,9 @@ class EventType(str, Enum):
     AGENT_ERROR = "agent_error"
     AGENT_COMPLETED = "agent_completed"
     THRASHING_DETECTED = "thrashing_detected"
+    PLAN_CREATED = "plan_created"
+    TASK_DECOMPOSED = "task_decomposed"
+    MERGE_RESULT = "merge_result"
 
 
 @dataclass(kw_only=True)
@@ -75,3 +78,25 @@ class ThrashingDetected(BaseEvent):
     event_type: str = EventType.THRASHING_DETECTED
     file_path: str
     modification_count: int
+
+
+@dataclass(kw_only=True)
+class PlanCreated(BaseEvent):
+    event_type: str = EventType.PLAN_CREATED
+    task: str
+    plan_steps: list[dict] = field(default_factory=list)
+    reasoning: str = ""
+
+
+@dataclass(kw_only=True)
+class TaskDecomposed(BaseEvent):
+    event_type: str = EventType.TASK_DECOMPOSED
+    subtask_ids: list[str] = field(default_factory=list)
+    subtask_count: int = 0
+
+
+@dataclass(kw_only=True)
+class MergeResult(BaseEvent):
+    event_type: str = EventType.MERGE_RESULT
+    subtask_count: int = 0
+    merged_output: str = ""
