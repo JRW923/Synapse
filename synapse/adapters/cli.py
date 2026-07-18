@@ -65,58 +65,6 @@ from synapse.protocols.memory import MemoryStore
 from synapse.protocols.retriever import ContextRetriever
 from synapse.protocols.sandbox import Sandbox
 
-# ---- Tools ----------------------------------------------------------------
-from synapse.modules.tools.registry import DefaultToolRegistry
-from synapse.modules.tools.file_read import ReadTool
-from synapse.modules.tools.file_write import WriteTool
-from synapse.modules.tools.file_edit import EditTool
-from synapse.modules.tools.file_glob import GlobTool
-from synapse.modules.tools.search_grep import GrepTool
-from synapse.modules.tools.shell import ShellTool
-from synapse.modules.tools.git_ import GitTool
-
-# ---- Memory (Phase 1 + 2) --------------------------------------------------
-from synapse.modules.memory.session import SessionMemory
-from synapse.modules.memory.project import ProjectMemory
-from synapse.modules.memory.user import UserMemory
-
-# ---- Context (Phase 1 + 2) -------------------------------------------------
-from synapse.modules.context.retriever import BasicContextRetriever
-from synapse.modules.context.partitioner import ContextPartitioner
-from synapse.modules.context.compactor import ContextCompactor
-
-# ---- Security --------------------------------------------------------------
-from synapse.modules.security.sandbox import ProcessSandbox
-from synapse.modules.security.auth import ActionAuthorizer
-from synapse.modules.security.audit import AuditLogger
-
-# ---- Planning (Phase 1 + 2) -------------------------------------------------
-from synapse.modules.planning.react import ReActPlanner
-from synapse.modules.planning.plan_execute import PlanExecutePlanner
-from synapse.modules.planning.hierarchical import HierarchicalPlanner
-
-# ---- LLM Providers (all 5) --------------------------------------------------
-from synapse.modules.providers.anthropic import AnthropicProvider
-
-try:
-    from synapse.modules.providers.openai import OpenAIProvider
-except ImportError:  # pragma: no cover
-    OpenAIProvider = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.providers.deepseek import DeepSeekProvider
-except ImportError:  # pragma: no cover
-    DeepSeekProvider = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.providers.google import GoogleProvider
-except ImportError:  # pragma: no cover
-    GoogleProvider = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.providers.ollama import OllamaProvider
-except ImportError:  # pragma: no cover
-    OllamaProvider = None  # type: ignore[assignment]
 
 
 # ---- LayeredMemory (Phase 2) -----------------------------------------------
@@ -159,6 +107,28 @@ class LayeredMemory:
 
 def _create_provider(config):
     """Instantiate the LLM provider based on config.provider.provider."""
+    from synapse.modules.providers.anthropic import AnthropicProvider
+
+    try:
+        from synapse.modules.providers.openai import OpenAIProvider  # noqa: F811
+    except ImportError:
+        OpenAIProvider = None  # type: ignore[assignment]
+
+    try:
+        from synapse.modules.providers.deepseek import DeepSeekProvider
+    except ImportError:
+        DeepSeekProvider = None  # type: ignore[assignment]
+
+    try:
+        from synapse.modules.providers.google import GoogleProvider
+    except ImportError:
+        GoogleProvider = None  # type: ignore[assignment]
+
+    try:
+        from synapse.modules.providers.ollama import OllamaProvider
+    except ImportError:
+        OllamaProvider = None  # type: ignore[assignment]
+
     provider_name = config.provider.provider.lower()
     cfg = config.provider
 
@@ -202,6 +172,10 @@ def _create_provider(config):
 
 def _create_planner(config, auth):
     """Instantiate the planner based on config.planning.mode."""
+    from synapse.modules.planning.react import ReActPlanner
+    from synapse.modules.planning.plan_execute import PlanExecutePlanner
+    from synapse.modules.planning.hierarchical import HierarchicalPlanner
+
     mode = config.planning.mode.lower()
     cfg = config.planning
 
@@ -235,6 +209,24 @@ def _create_planner(config, auth):
 
 def build_container(config) -> Container:
     """Wire all Phase 1 + Phase 2 dependencies into the IoC container."""
+    from synapse.modules.tools.registry import DefaultToolRegistry
+    from synapse.modules.tools.file_read import ReadTool
+    from synapse.modules.tools.file_write import WriteTool
+    from synapse.modules.tools.file_edit import EditTool
+    from synapse.modules.tools.file_glob import GlobTool
+    from synapse.modules.tools.search_grep import GrepTool
+    from synapse.modules.tools.shell import ShellTool
+    from synapse.modules.tools.git_ import GitTool
+    from synapse.modules.memory.session import SessionMemory
+    from synapse.modules.memory.project import ProjectMemory
+    from synapse.modules.memory.user import UserMemory
+    from synapse.modules.context.retriever import BasicContextRetriever
+    from synapse.modules.context.partitioner import ContextPartitioner
+    from synapse.modules.context.compactor import ContextCompactor
+    from synapse.modules.security.sandbox import ProcessSandbox
+    from synapse.modules.security.auth import ActionAuthorizer
+    from synapse.modules.security.audit import AuditLogger
+
     c = Container()
 
     # Core infrastructure
