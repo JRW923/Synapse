@@ -719,7 +719,179 @@ def main():
         asyncio.run(_run_experiment(args))
         return
 
-    parser.print_help()
+    # No subcommand — launch main interface
+    asyncio.run(_main_interface())
+
+
+# ---- Main interface -------------------------------------------------------
+
+
+def _show_welcome(config, use_rich, console):
+    """Display welcome banner with project info."""
+    from synapse import __version__
+    cwd = str(Path.cwd())
+    provider = config.provider.provider
+    model = config.provider.model
+
+    if use_rich:
+        from rich.panel import Panel
+        from rich.table import Table
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style="bold cyan")
+        grid.add_column(style="dim")
+        grid.add_row("Version:", f"Synapse v{__version__}")
+        grid.add_row("Provider:", f"{provider} / {model}")
+        grid.add_row("Project:", cwd)
+        grid.add_row("Tools:", "read, write, edit, glob, grep, shell, git")
+        grid.add_row("Memory:", "session + project + user")
+        console.print()
+        console.print(Panel(grid, title="Synapse", border_style="cyan"))
+        console.print("[dim]输入任务开始工作，输入 /help 查看命令[/dim]\n")
+    else:
+        print(f"\n  Synapse v{__version__} · {provider}/{model}")
+        print(f"  {cwd}")
+        print(f"  输入任务开始工作，输入 /help 查看命令\n")
+
+
+def _show_help(console, use_rich):
+    """Display available commands."""
+    if use_rich:
+        from rich.table import Table
+        t = Table(title="可用命令")
+        t.add_column("命令", style="bold green")
+        t.add_column("说明")
+        t.add_row("/help", "显示此帮助")
+        t.add_row("/clear", "重置对话")
+        t.add_row("/model <name>", "切换模型 (如 deepseek-chat)")
+        t.add_row("/mode <name>", "切换规划模式 (react/plan_execute/hierarchical)")
+        t.add_row("/tools", "列出可用工具")
+        t.add_row("/exit, /quit", "退出")
+        console.print()
+        console.print(t)
+    else:
+        print("\n  命令: /help /clear /model /mode /tools /exit\n")
+
+
+async def _main_interface():
+    """Launch the main Synapse interface (synapse with no subcommand)."""
+    config = load_config()
+    provider = config.provider.provider
+    model = config.provider.model
+
+    try:
+        from rich.console import Console
+        console = Console()
+        use_rich = True
+    except ImportError:
+        console = None
+        use_rich = False
+
+    _show_welcome(config, use_rich, console)
+
+    from synapse.adapters.library import Synapse
+    from synapse.core.session import Session
+
+    synapse = Synapse(
+        provider=provider, model=model, config_path=None,
+        confirm_callback=_make_confirm_callback(),
+    )
+    session = Session()
+
+    while True:
+        try:
+            if use_rich:
+                user_input = console.input("[bold green]> [/bold green]")
+            else:
+                user_input = input("> ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye.")
+            break
+
+        user_input = user_input.strip()
+        if not user_input:
+            continue
+
+        # ---- / 命令处理 ----
+        if user_input.startswith("/"):
+            parts = user_input.split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1] if len(parts) > 1 else ""
+
+            if cmd in ("/exit", "/quit"):
+                print("Goodbye.")
+                break
+            elif cmd == "/help":
+                _show_help(console, use_rich)
+            elif cmd == "/clear":
+                session = Session()
+                if use_rich:
+                    console.print("[dim]对话已重置[/dim]\n")
+                else:
+                    print("对话已重置\n")
+            elif cmd == "/model" and arg:
+                synapse = Synapse(
+                    provider=provider, model=arg, config_path=None,
+                    confirm_callback=_make_confirm_callback(),
+                )
+                model = arg
+                if use_rich:
+                    console.print(f"[dim]模型已切换为 {arg}[/dim]\n")
+                else:
+                    print(f"模型已切换为 {arg}\n")
+            elif cmd == "/mode" and arg:
+                try:
+                    synapse = Synapse(
+                        provider=provider, model=model, config_path=None,
+                        confirm_callback=_make_confirm_callback(),
+                        mode=arg,
+                    )
+                    if use_rich:
+                        console.print(f"[dim]规划模式已切换为 {arg}[/dim]\n")
+                    else:
+                        print(f"规划模式已切换为 {arg}\n")
+                except Exception as e:
+                    if use_rich:
+                        console.print(f"[red]切换失败: {e}[/red]\n")
+                    else:
+                        print(f"切换失败: {e}\n")
+            elif cmd == "/tools":
+                tools = ["read", "write", "edit", "glob", "grep", "shell", "git"]
+                if use_rich:
+                    console.print(f"[dim]可用工具: {', '.join(tools)}[/dim]\n")
+                else:
+                    print(f"可用工具: {', '.join(tools)}\n")
+            else:
+                if use_rich:
+                    console.print(f"[red]未知命令: {cmd}，输入 /help 查看帮助[/red]\n")
+                else:
+                    print(f"未知命令: {cmd}，输入 /help 查看帮助\n")
+            continue
+
+        # ---- 普通任务 ----
+        if use_rich:
+            console.print("[dim]Working...[/dim]")
+        else:
+            print("Working...")
+
+        try:
+            result = await synapse.run(user_input, session=session)
+        except Exception as exc:
+            if use_rich:
+                console.print(f"[bold red]错误:[/bold red] {exc}")
+            else:
+                print(f"错误: {exc}")
+            continue
+
+        if use_rich:
+            from rich.markdown import Markdown
+            color = "green" if result.status.value == "success" else "yellow"
+            console.print(f"[dim]状态:[/dim] [{color}]{result.status.value}[/{color}]")
+            console.print(Markdown(result.output))
+            console.print()
+        else:
+            print(f"\n[状态: {result.status.value}]")
+            print(result.output)
+            print()
 
 
 # ---- Eval command handler -------------------------------------------------

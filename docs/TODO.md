@@ -122,4 +122,22 @@ _（暂无。后续如有暂不推进的需求，记录在此。）_
 
 ---
 
-*最后更新：2026-07-16*
+*最后更新：2026-07-18*
+---
+
+### H · CLI 主界面（Rich 增强型 REPL）
+
+**状态**：开发中
+
+输入 `synapse`（无子命令）进入增强型交互主界面，类似 Claude Code / pico。
+
+**方案选定**：Rich 增强型 REPL（欢迎横幅 + 项目信息 + `/` 命令系统 + 状态行）
+
+**要点**：
+- `synapse` 无参数直接进入主界面
+- 欢迎横幅显示版本/provider/model/项目路径/工具数
+- `/` 命令：help, clear, model, mode, tools, exit
+- 现有子命令（chat/run/serve/eval/experiment）保持不变
+- 用 Rich Panel/Table 美化输出
+
+**难度**：低（复用现有 Rich 依赖）
