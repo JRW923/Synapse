@@ -1022,26 +1022,35 @@ async def _main_interface():
     if not use_rich:
         print(f"Synapse v0.1.0 · {provider}/{model}")
 
-    from synapse.adapters.library import Synapse
     from synapse.core.session import Session
 
     # Mutable holders shared with the confirm callback.
     status_holder: list = []
     exiting: list = [False]
 
-    synapse = Synapse(
-        provider=provider, model=model, config_path=None,
-        confirm_callback=_make_confirm_callback(
-            status_holder=status_holder, exiting=exiting,
-        ),
-    )
-    session = Session()
-    last_status = ""
-
+    # Show the welcome banner immediately, before heavy imports.
     if use_rich:
         _show_welcome(console, config)
     else:
         print(f"输入任务开始工作，输入 /help 查看命令\n")
+
+    # Deferred — created on first user input.
+    _synapse: object = None
+    session = Session()
+    last_status = ""
+
+    def _get_synapse():
+        """Create (or return) the Synapse instance lazily."""
+        nonlocal _synapse
+        if _synapse is None:
+            from synapse.adapters.library import Synapse as _Synapse
+            _synapse = _Synapse(
+                provider=provider, model=model, config_path=None,
+                confirm_callback=_make_confirm_callback(
+                    status_holder=status_holder, exiting=exiting,
+                ),
+            )
+        return _synapse
 
     while True:
         try:
@@ -1106,11 +1115,8 @@ async def _main_interface():
                 else:
                     print(f"Session path: {session_dir}")
             elif cmd == "/model" and arg:
-                synapse = Synapse(
-                    provider=provider, model=arg, config_path=None,
-                    confirm_callback=_make_confirm_callback(status_holder=status_holder, exiting=exiting),
-                )
                 model = arg
+                _synapse = None  # force recreate with new model
                 prefix = f"[bright_cyan]>[/bright_cyan] [dim]Model -> {arg}[/dim]" if use_rich else f"Model -> {arg}"
                 if use_rich:
                     console.print(prefix)
@@ -1118,7 +1124,8 @@ async def _main_interface():
                     print(prefix)
             elif cmd == "/mode" and arg:
                 try:
-                    synapse = Synapse(
+                    from synapse.adapters.library import Synapse as _Synapse
+                    _synapse = _Synapse(
                         provider=provider, model=model, config_path=None,
                         confirm_callback=_make_confirm_callback(status_holder=status_holder, exiting=exiting),
                         mode=arg,
@@ -1142,6 +1149,8 @@ async def _main_interface():
             continue
 
         # ---- Task execution ----
+        synapse = _get_synapse()
+
         if use_rich:
             from rich.status import Status
             status = console.status("[dim]Thinking...[/dim]", spinner="dots")

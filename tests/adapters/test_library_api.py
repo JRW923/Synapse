@@ -24,7 +24,7 @@ async def test_library_api_basic():
     )
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
@@ -44,7 +44,7 @@ async def test_library_api_basic():
 
 def test_library_api_config_override():
     """**overrides passed to Synapse(...) take precedence over defaults."""
-    with patch("synapse.adapters.library.AnthropicProvider"):
+    with patch("synapse.modules.providers.anthropic.AnthropicProvider"):
         from synapse.adapters.library import Synapse
 
         synapse = Synapse(

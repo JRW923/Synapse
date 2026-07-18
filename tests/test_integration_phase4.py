@@ -44,7 +44,7 @@ async def test_http_tool_in_pipeline(httpx_mock):
     mock_llm = _make_mock_llm()
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
@@ -99,7 +99,7 @@ async def test_db_tool_select(tmp_path: Path):
     mock_llm = _make_mock_llm()
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
@@ -142,7 +142,7 @@ def test_external_tools_disabled_by_default():
     mock_llm = _make_mock_llm()
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
@@ -180,7 +180,7 @@ async def test_qdrant_memory_backend():
     mock_llm = _make_mock_llm()
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse

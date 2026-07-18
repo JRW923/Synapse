@@ -61,7 +61,7 @@ async def test_synapse_with_mcp_server():
     mock_client = _make_mock_client(fake_tools)
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         with patch(
@@ -109,7 +109,7 @@ async def test_synapse_with_mcp_server_optional():
     )
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse

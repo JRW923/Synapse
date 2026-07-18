@@ -107,7 +107,7 @@ async def test_mcp_tool_callable_via_agent():
     )
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         with patch(
@@ -180,7 +180,7 @@ async def test_mcp_tool_not_present_when_no_servers_configured():
     )
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
@@ -222,7 +222,7 @@ async def test_mcp_tool_error_propagates():
     )
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         with patch(
@@ -310,7 +310,7 @@ async def test_multiple_mcp_servers_integration():
     from unittest.mock import MagicMock
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         with patch(

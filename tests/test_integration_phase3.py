@@ -46,7 +46,7 @@ async def test_semantic_memory_pipeline():
     from synapse.protocols.memory import MemoryStore as MemoryStoreProto
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
@@ -108,7 +108,7 @@ async def test_semantic_memory_wrong_level_returns_empty():
     from synapse.protocols.memory import MemoryStore as _MSProto
 
     with patch(
-        "synapse.adapters.library.AnthropicProvider",
+        "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse

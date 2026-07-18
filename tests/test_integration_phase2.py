@@ -74,7 +74,7 @@ async def test_openai_provider_in_pipeline():
     # Mock provider class that returns the mock instance on construction
     MockProvider = MagicMock(return_value=mock_llm)
 
-    with patch("synapse.adapters.library.OpenAIProvider", MockProvider):
+    with patch("synapse.modules.providers.openai.OpenAIProvider", MockProvider):
         agent = Synapse(provider="openai", model="gpt-4o")
         result = await agent.run("Say hello from OpenAI")
 

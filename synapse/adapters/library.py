@@ -73,44 +73,13 @@ from synapse.modules.security.auth import ActionAuthorizer
 from synapse.modules.security.audit import AuditLogger
 from synapse.modules.security.injection import InjectionGuard
 
-# LLM Providers — imported at module level so tests can patch them.
-# Anthropic is the default and always required; others are optional.
-from synapse.modules.providers.anthropic import AnthropicProvider
-
-try:
-    from synapse.modules.providers.openai import OpenAIProvider
-except ImportError:  # pragma: no cover
-    OpenAIProvider = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.providers.deepseek import DeepSeekProvider
-except ImportError:  # pragma: no cover
-    DeepSeekProvider = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.providers.google import GoogleProvider
-except ImportError:  # pragma: no cover
-    GoogleProvider = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.providers.ollama import OllamaProvider
-except ImportError:  # pragma: no cover
-    OllamaProvider = None  # type: ignore[assignment]
-
-# Planners
+# Planners — lightweight (protocols only, no SDKs).
 from synapse.modules.planning.react import ReActPlanner
 from synapse.modules.planning.plan_execute import PlanExecutePlanner
 from synapse.modules.planning.hierarchical import HierarchicalPlanner
 
-# Eval — metrics collectors (Phase 3)
-from synapse.eval.metrics.process import ProcessMetrics
-from synapse.eval.metrics.quality import QualityMetrics
-from synapse.eval.metrics.efficiency import EfficiencyMetrics
-from synapse.eval.metrics.safety import SafetyMetrics
-
-# MCP — Model Context Protocol integration (Phase 5)
+# MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
-from synapse.modules.mcp.manager import McpManager
 
 
 # ---- LayeredMemory ---------------------------------------------------------
@@ -172,26 +141,37 @@ class LayeredMemory:
 
 
 def _resolve_provider(name: str):
-    """Return the provider class for *name*, resolved at call time."""
-    _providers: dict[str, str] = {
+    """Return the provider class for *name*, importing it on demand."""
+    _provider_modules: dict[str, str] = {
+        "anthropic": "synapse.modules.providers.anthropic",
+        "openai": "synapse.modules.providers.openai",
+        "deepseek": "synapse.modules.providers.deepseek",
+        "google": "synapse.modules.providers.google",
+        "ollama": "synapse.modules.providers.ollama",
+    }
+    _provider_classes: dict[str, str] = {
         "anthropic": "AnthropicProvider",
         "openai": "OpenAIProvider",
         "deepseek": "DeepSeekProvider",
         "google": "GoogleProvider",
         "ollama": "OllamaProvider",
     }
-    attr = _providers.get(name)
-    if attr is None:
-        raise ValueError(
-            f"Unknown provider '{name}'. "
-            f"Available: {', '.join(sorted(_providers))}"
-        )
-    cls = globals().get(attr)
-    if cls is None:
+    mod_name = _provider_modules.get(name)
+    cls_name = _provider_classes.get(name)
+    if mod_name is None or cls_name is None:
+        available = ", ".join(sorted(_provider_classes))
+        raise ValueError(f"Unknown provider '{name}'.  Available: {available}")
+
+    import importlib
+
+    try:
+        mod = importlib.import_module(mod_name)
+    except ImportError as exc:
         raise ImportError(
-            f"Provider '{name}' is not available — the required SDK is not installed."
-        )
-    return cls
+            f"Provider '{name}' is not available — the required SDK "
+            f"is not installed.  ({exc})"
+        ) from exc
+    return getattr(mod, cls_name)
 
 
 # ---- Synapse facade --------------------------------------------------------
@@ -344,9 +324,10 @@ class Synapse:
             registry.register(tool)
 
         # MCP — Connect external MCP servers and register their tools
-        mcp_manager: McpManager | None = None
+        mcp_manager = None
         if self._mcp_servers:
-            mcp_manager = McpManager(tool_registry=registry, event_bus=event_bus)
+            from synapse.modules.mcp.manager import McpManager as _McpManager
+            mcp_manager = _McpManager(tool_registry=registry, event_bus=event_bus)
             self._connect_mcp_servers_sync(mcp_manager, self._mcp_servers)
 
         c.register(ToolRegistry, registry)
@@ -383,10 +364,14 @@ class Synapse:
 
         # Eval — optionally wire metrics collectors to EventBus (Phase 3)
         if self._enable_eval:
-            c.register(ProcessMetrics, ProcessMetrics(bus=event_bus))
-            c.register(QualityMetrics, QualityMetrics(bus=event_bus))
-            c.register(EfficiencyMetrics, EfficiencyMetrics(bus=event_bus))
-            c.register(SafetyMetrics, SafetyMetrics(
+            from synapse.eval.metrics.process import ProcessMetrics as _PM
+            from synapse.eval.metrics.quality import QualityMetrics as _QM
+            from synapse.eval.metrics.efficiency import EfficiencyMetrics as _EM
+            from synapse.eval.metrics.safety import SafetyMetrics as _SM
+            c.register(_PM, _PM(bus=event_bus))
+            c.register(_QM, _QM(bus=event_bus))
+            c.register(_EM, _EM(bus=event_bus))
+            c.register(_SM, _SM(
                 bus=event_bus,
                 workspace_root=self._config.tools.workspace_root,
             ))
