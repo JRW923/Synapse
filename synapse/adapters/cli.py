@@ -28,8 +28,8 @@ if sys.platform == "win32":
         if ctrl_type != 0:  # CTRL_C_EVENT
             return 0
         now = _time.monotonic()
-        if now - _last_ctrl_c < 2.0:
-            _os._exit(0)
+        if now - _last_ctrl_c < 3.0:
+            _ctypes.windll.kernel32.ExitProcess(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
         _os.write(2, b"\n  Press Ctrl+C again to exit.\n")
@@ -43,7 +43,7 @@ else:
     def _unix_sigint_handler(_signum: int, _frame: object) -> None:
         global _last_ctrl_c, _ctrl_c_pressed
         now = _time.monotonic()
-        if now - _last_ctrl_c < 2.0:
+        if now - _last_ctrl_c < 3.0:
             _os._exit(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
@@ -365,14 +365,22 @@ def _check_api_key(config):
 def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
     """Return an async callback that prompts the user for tool-call approval.
 
-    If *exiting* is a list whose first element is ``True`` the callback
-    silently denies every request so the process can tear down cleanly.
+    Displays three options: ``[A]llow`` / ``[D]eny`` / ``[Y]es to all``.
+    *Yes to all* permanently allows future calls for the same tool name.
     """
     import sys as _sys
 
+    _auto_allowed: set[str] = set()
+
     async def _confirm(request):
-        # If we are shutting down, deny everything without any output.
-        if exiting is not None and len(existing) > 0 and existing[0]:
+        tool_name = getattr(request, "tool_name", "unknown")
+
+        # Permanent allow list.
+        if tool_name in _auto_allowed:
+            return True
+
+        # Shutting down — deny without prompt.
+        if exiting is not None and len(exiting) > 0 and exiting[0]:
             return False
 
         st = None
@@ -386,26 +394,24 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
 
         try:
             loop = asyncio.get_running_loop()
-            reason = getattr(request, "reason", "requires approval")
-            params = getattr(request, "tool_params", {})
 
-            _sys.stdout.write("\n" + "=" * 50 + "\n")
-            _sys.stdout.write(f"  需要授权: {request.tool_name}\n")
-            _sys.stdout.write(f"  原因: {reason}\n")
-            _sys.stdout.write(f"  参数: {params}\n")
-            _sys.stdout.write("  允许吗? [y/n]: ")
+            _sys.stdout.write(f"\n  Auth: {tool_name}  [A]llow / [D]eny / [Y]es to all: ")
             _sys.stdout.flush()
 
             def _ask():
                 try:
-                    return input("")
+                    return input("").strip().lower()
                 except EOFError:
-                    return "n"
+                    return "d"
 
             answer = await loop.run_in_executor(None, _ask)
-            _sys.stdout.write("\n")
-            _sys.stdout.flush()
-            return answer.strip().lower().startswith("y")
+
+            if answer == "y":
+                _auto_allowed.add(tool_name)
+                return True
+            if answer in ("a", ""):
+                return True
+            return False
         finally:
             if pause_event is not None:
                 pause_event.set()
