@@ -2,8 +2,54 @@
 
 import argparse
 import asyncio
+import os as _os
 import sys
+import time as _time
 from pathlib import Path
+
+# ── Two-step Ctrl+C (double-press to exit) ───────────────────────────
+# Python's ``signal.signal(SIGINT, ...)`` on Windows is unreliable
+# because ``GenerateConsoleCtrlEvent`` / ``os.kill`` can terminate the
+# process before the handler fires.  We register a console control
+# handler ourselves via ``SetConsoleCtrlHandler``, which is called
+# *before* Python and *before* the OS default handler.  Returning TRUE
+# suppresses the "Terminate batch job (Y/N)?" prompt entirely.
+_last_ctrl_c: float = 0.0
+_ctrl_c_pressed: bool = False  # set by Ctrl+C handler, cleared by main loop
+
+if sys.platform == "win32":
+    import ctypes as _ctypes
+
+    _HANDLER = _ctypes.WINFUNCTYPE(_ctypes.c_int, _ctypes.c_uint)
+
+    @_HANDLER
+    def _win_ctrl_handler(ctrl_type: int) -> int:
+        global _last_ctrl_c, _ctrl_c_pressed
+        if ctrl_type != 0:  # CTRL_C_EVENT
+            return 0
+        now = _time.monotonic()
+        if now - _last_ctrl_c < 2.0:
+            _os._exit(0)
+        _last_ctrl_c = now
+        _ctrl_c_pressed = True
+        _os.write(2, b"\n  Press Ctrl+C again to exit.\n")
+        return 1  # TRUE — suppress OS prompt.
+
+    _ctypes.windll.kernel32.SetConsoleCtrlHandler(_win_ctrl_handler, 1)
+else:
+    # Unix (Linux / macOS): use signal.SIGINT for double-tap exit.
+    import signal as _signal
+
+    def _unix_sigint_handler(_signum: int, _frame: object) -> None:
+        global _last_ctrl_c, _ctrl_c_pressed
+        now = _time.monotonic()
+        if now - _last_ctrl_c < 2.0:
+            _os._exit(0)
+        _last_ctrl_c = now
+        _ctrl_c_pressed = True
+        _os.write(2, b"\n  Press Ctrl+C again to exit.\n")
+
+    _signal.signal(_signal.SIGINT, _unix_sigint_handler)
 
 from synapse.config import load_config
 from synapse.protocols.mcp import McpServerConfig
@@ -324,12 +370,19 @@ def _check_api_key(config):
         print()
 
 
-def _make_confirm_callback(pause_event=None, status_holder=None):
-    """Return an async callback that prompts the user for tool-call approval."""
+def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
+    """Return an async callback that prompts the user for tool-call approval.
+
+    If *exiting* is a list whose first element is ``True`` the callback
+    silently denies every request so the process can tear down cleanly.
+    """
     import sys as _sys
 
     async def _confirm(request):
-        # Pause Rich spinner if active
+        # If we are shutting down, deny everything without any output.
+        if exiting is not None and len(existing) > 0 and existing[0]:
+            return False
+
         st = None
         if status_holder is not None and len(status_holder) > 0:
             st = status_holder[0]
@@ -344,7 +397,6 @@ def _make_confirm_callback(pause_event=None, status_holder=None):
             reason = getattr(request, "reason", "requires approval")
             params = getattr(request, "tool_params", {})
 
-            # 用最简单的 stdout 输出确认提示，不依赖 Rich
             _sys.stdout.write("\n" + "=" * 50 + "\n")
             _sys.stdout.write(f"  需要授权: {request.tool_name}\n")
             _sys.stdout.write(f"  原因: {reason}\n")
@@ -527,6 +579,14 @@ def main():
         help="Number of runs per config (default: 5)",
     )
 
+    setup_parser = sub.add_parser("setup", help="Install launcher scripts for clean Ctrl+C")
+    setup_parser.add_argument(
+        "--dir",
+        default=None,
+        metavar="PATH",
+        help="Directory for launcher scripts (default: ~/.local/bin)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "version":
@@ -562,7 +622,10 @@ def main():
             result = await synapse.run(task)
             return result
 
-        result = asyncio.run(_exec())
+        try:
+            result = asyncio.run(_exec())
+        except KeyboardInterrupt:
+            return
         print(f"\n[Status: {result.status.value}]")
         print(result.output)
         return
@@ -693,7 +756,10 @@ def main():
                     print(result.output)
                     print()
 
-        asyncio.run(_chat())
+        try:
+            asyncio.run(_chat())
+        except KeyboardInterrupt:
+            pass
         return
 
     if args.command == "serve":
@@ -712,174 +778,242 @@ def main():
         return
 
     if args.command == "eval":
-        asyncio.run(_run_eval(args))
+        try:
+            asyncio.run(_run_eval(args))
+        except KeyboardInterrupt:
+            pass
         return
 
     if args.command == "experiment":
-        asyncio.run(_run_experiment(args))
+        try:
+            asyncio.run(_run_experiment(args))
+        except KeyboardInterrupt:
+            pass
+        return
+
+    if args.command == "setup":
+        _run_setup(args)
         return
 
     # No subcommand — launch main interface
-    asyncio.run(_main_interface())
+    try:
+        asyncio.run(_main_interface())
+    except KeyboardInterrupt:
+        pass
 
 
 # ---- Main interface -------------------------------------------------------
 
-#: Synapse logo — two cerebral hemispheres connected by a synaptic bridge,
-#: with code flowing through the connection. Represents the agent bridging
-#: human intent (left) and machine execution (right).
-_SYNAPSE_LOGO_LINES = [
-    # Left hemisphere (neural network)
-    "  [bright_cyan]   .-''''''''''-.[/bright_cyan]     [cyan]┌──────────────────────────────┐[/cyan]",
-    "  [bright_cyan]  /  [bold]o[/bold]   O  [bold]o[/bold]  \\ [/bright_cyan]   [cyan]│[/cyan] [bold yellow]  S Y N A P S E[/bold yellow]         [cyan]│[/cyan]",
-    "  [bright_cyan] |     [bold]*[/bold]        | [/bright_cyan]  [cyan]│[/cyan] [dim]connecting ideas into code[/dim] [cyan]│[/cyan]",
-    "  [bright_cyan] |  \\__[bold magenta]***[/bold magenta]__/  | [/bright_cyan]  [cyan]└──────────────────────────────┘[/cyan]",
-    "  [bright_cyan]  \\  [bold magenta]| | |[/bold magenta]  / [/bright_cyan]",
-    "  [bright_cyan]   '---[bold magenta]*[/bold magenta]---'[/bright_cyan]       [green]File    Edit   Search   Git   Run[/green]",
-    # Synaptic bridge
-    "      [bold yellow]  ~[/bold yellow]   [bold bright_yellow]~~[/bold bright_yellow]   [bold yellow]~[/bold yellow]",
-    "    [bold bright_yellow]  ~~~  ~~~  ~~~[/bold bright_yellow]",
-    "      [bold yellow]  ~   ~~   ~[/bold yellow]",
-    # Right hemisphere (code/terminal) — literal brackets escaped
-    "  [bright_cyan]   .-''''''''''-.[/bright_cyan]     [bright_green]def[/bright_green] [bold]agent[/bold][dim](task, ctx):[/dim]",
-    "  [bright_cyan]  /  [dim]\\[ ] \\[ ][/dim]  \\ [/bright_cyan]   [dim]    tools.run(task)[/dim]",
-    "  [bright_cyan] |   [dim]\\<\\> \\<\\> \\<\\>[/dim]   | [/bright_cyan]  [dim]    return result[/dim]",
-    "  [bright_cyan]  \\  [dim]\\[ ][/dim]  / [/bright_cyan]    [bright_black]# synapse v0.1.0[/bright_black]",
-    "  [bright_cyan]   '-----------'[/bright_cyan]",
-]
+
+#: Synapse ASCII art — brain hemispheres with synaptic stem.
+_WELCOME_ART = (
+    r"         ,--..__..--,",
+    r"       /    ..    .. \\",
+    r"      /  ,'  ``  ',  \\",
+    r"     (  (  o    o  )  )",
+    r"      \  `.  ..  .'  /",
+    r"       \    `--'    /",
+    r"        `..______..'",
+    r"           │    │",
+    r"      ─────┘    └─────",
+)
+
+_WELCOME_NAME = "Synapse"
+_WELCOME_SUBTITLE = "connecting ideas into code"
+_WELCOME_STATUS = "ready"
+
+
+def _middle(text: str, limit: int) -> str:
+    """Truncate with ellipsis in the middle if too long."""
+    text = str(text).replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    if limit <= 3:
+        return text[:limit]
+    left = (limit - 3) // 2
+    right = limit - 3 - left
+    return text[:left] + "..." + text[-right:]
 
 
 def _show_welcome(console, config):
-    """Full-screen dashboard with logo, project info, and system status."""
+    """pico-style boxed welcome banner with Rich colour accents."""
     from synapse import __version__
+    from rich.text import Text
+
     provider = config.provider.provider
     model = config.provider.model
     cwd = str(Path.cwd())
 
-    try:
-        console.clear()
-    except Exception:
-        pass
+    # 宽度沿用 Console 创建时检测到的值（已在 _main_interface 用 OS API 设置）。
+    width = max(getattr(console, "width", None) or 80, 40)
+    inner = width - 4
+    gap = 3
+    left_w = (inner - gap) // 2
+    right_w = inner - gap - left_w
 
-    import shutil
-    import datetime
-    term_w = min(shutil.get_terminal_size().columns, 110)
+    def _print_plain(text: str, **kwargs) -> None:
+        console.print(text, **kwargs)
 
-    # ---- Logo ----
-    for line in _SYNAPSE_LOGO_LINES:
-        console.print(line)
-    console.print()
+    def _b(char: str = "=") -> str:
+        return f"+{char * (width - 2)}+"
 
-    # ---- Dashboard grid ----
-    sep = f"  [bright_black]{'=' * (term_w - 2)}[/bright_black]"
-    console.print(sep)
+    def _centered(body: str) -> str:
+        """Center *body* in the box.  Leading/trailing whitespace is stripped
+        so that the visible content is centred, not the raw string."""
+        stripped = body.strip()
+        if not stripped:
+            return f"| {'':<{inner}} |"
+        return f"| {_middle(stripped, inner).center(inner)} |"
 
-    # Row 1: Project + Provider
-    from rich.table import Table
-    info = Table.grid(padding=(0, 3))
-    info.add_column(ratio=1)
-    info.add_column(ratio=1)
-    info.add_column(ratio=1)
+    def _pair_texts(l_label: str, l_val: str, r_label: str, r_val: str):
+        l_vis = f"{l_label:<9} {l_val}"
+        r_vis = f"{r_label:<9} {r_val}"
+        l_pad = _middle(l_vis, left_w).ljust(left_w)
+        r_pad = _middle(r_vis, right_w).ljust(right_w)
+        return l_pad, r_pad
 
-    info.add_row(
-        f"[bold bright_cyan]Project[/bold bright_cyan]\n[dim]{cwd}[/dim]",
-        f"[bold bright_magenta]Provider[/bold bright_magenta]\n[cyan]{provider}[/cyan] [dim]/ {model}[/dim]",
-        f"[bold bright_green]Version[/bold bright_green]\n[dim]Synapse v{__version__}[/dim]",
+    def _print_pair(l_label: str, l_val: str, r_label: str, r_val: str) -> None:
+        """Two-column row.  Labels are bright-magenta; values use default style
+        (forced via ``Text`` to prevent any bleed or Rich re-interpretation)."""
+        l_pad, r_pad = _pair_texts(l_label, l_val, r_label, r_val)
+        console.print(
+            "| ",
+            Text(l_pad[:9], style="bold bright_magenta"),
+            Text(l_pad[9:], style="default"),
+            " " * gap,
+            Text(r_pad[:9], style="bold bright_magenta"),
+            Text(r_pad[9:], style="default"),
+            " |",
+            sep="",
+        )
+
+    # ── render ────────────────────────────────────────────────────────
+    _print_plain(_b("="), style="bright_black")
+    for art_line in _WELCOME_ART:
+        _print_plain(_centered(art_line), style="bright_cyan")
+    # Name · subtitle · status on one line
+    tagline_plain = f"{_WELCOME_NAME}  ·  {_WELCOME_SUBTITLE}  ·  {_WELCOME_STATUS}"
+    tagline_body = _middle(tagline_plain, inner).center(inner)
+    tagline_rich = (
+        tagline_body
+        .replace(_WELCOME_NAME, f"[bold bright_cyan]{_WELCOME_NAME}[/bold bright_cyan]")
+        .replace(_WELCOME_SUBTITLE, f"[dim italic]{_WELCOME_SUBTITLE}[/dim italic]")
+        .replace(_WELCOME_STATUS, f"[dim green]{_WELCOME_STATUS}[/dim green]")
     )
-    console.print("  ", end="")
-    console.print(info)
+    _print_plain(f"| {tagline_rich} |")
+    _print_plain(_b("-"), style="bright_black")
+    _print_plain(f"| {'':<{inner}} |")
 
-    # Row 2: Tools + Memory + Planning
-    info2 = Table.grid(padding=(0, 3))
-    info2.add_column(ratio=1)
-    info2.add_column(ratio=1)
-    info2.add_column(ratio=1)
-
-    tools_str = "[green]read[/green] [green]write[/green] [green]edit[/green] [green]glob[/green]\n[green]grep[/green] [green]shell[/green] [green]git[/green]"
-    mem_str = "[bright_cyan]session[/bright_cyan] [dim](in-memory)[/dim]\n[bright_cyan]project[/bright_cyan] [dim](.synapse/)[/dim]\n[bright_cyan]user[/bright_cyan] [dim](~/.synapse/)[/dim]"
-    plan_str = "[yellow]react[/yellow] [dim](default)[/dim]\n[yellow]plan_execute[/yellow] [dim](complex)[/dim]\n[yellow]hierarchical[/yellow] [dim](large)[/dim]"
-
-    info2.add_row(
-        f"[bold green]Tools[/bold green]\n{tools_str}",
-        f"[bold bright_cyan]Memory[/bold bright_cyan]\n{mem_str}",
-        f"[bold yellow]Planning[/bold yellow]\n{plan_str}",
+    # Workspace row
+    ws_full = f"WORKSPACE  {cwd}"
+    ws_body = _middle(ws_full, inner)
+    console.print(
+        "| ",
+        Text(ws_body[:9], style="bold bright_magenta"),
+        Text(ws_body[9:].ljust(inner - 9), style="default"),
+        " |",
+        sep="",
     )
-    console.print("  ", end="")
-    console.print(info2)
 
-    # Row 3: Security + Time
-    sec_str = "[bright_red]sandbox[/bright_red] [dim](enforced)[/dim]  [bright_red]auth[/bright_red] [dim](action-time)[/dim]\n[bright_red]audit[/bright_red] [dim](JSONL+HMAC)[/dim]  [bright_red]injection[/bright_red] [dim](annotated)[/dim]"
-    time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    _print_pair("MODEL", model, "VERSION", f"v{__version__}")
+    _print_pair("PROVIDER", provider, "PLANNING", config.planning.mode)
 
-    info3 = Table.grid(padding=(0, 3))
-    info3.add_column(ratio=2)
-    info3.add_column(ratio=1)
-    info3.add_row(
-        f"[bold bright_red]Security[/bold bright_red]\n{sec_str}",
-        f"[bold bright_black]Session[/bold bright_black]\n[dim]{time_str}[/dim]",
-    )
-    console.print("  ", end="")
-    console.print(info3)
-
-    console.print(sep)
-    console.print()
-
-
-
-async def _confirm_exit(console, use_rich) -> bool:
-    """Ask user to confirm exit. Returns True if confirmed."""
-    if use_rich:
-        try:
-            ans = console.input("  [bold yellow]确认退出? [y/N]: [/bold yellow]")
-        except (EOFError, KeyboardInterrupt):
-            return True  # double Ctrl+C = force quit
-        return ans.strip().lower() == "y"
-    else:
-        try:
-            ans = input("确认退出? [y/N]: ")
-        except (EOFError, KeyboardInterrupt):
-            return True
-        return ans.strip().lower() == "y"
-
-
-def _show_status(console, session_msg_count: int, last_status: str):
-    """Print a compact status line after each response."""
-    label = f"{session_msg_count} msgs" if session_msg_count else "new"
-    color = "green" if last_status == "success" else "yellow"
-    import shutil
-    width = min(shutil.get_terminal_size().columns, 110)
-    bar = "=" * (width - 2)
-    console.print(f"  [dim]{bar}[/dim]")
-    console.print(f"  [[color]{last_status}[/color]] [bright_black]{label}[/bright_black]")
+    _print_plain(f"| {'':<{inner}} |")
+    _print_plain(_centered("type /help for commands"), style="dim")
+    _print_plain(_b("="), style="bright_black")
 
 
 def _show_help(console):
-    """Display available commands in a clean table."""
+    """Display available commands — pico style."""
     from rich.table import Table
-    t = Table(show_header=False, box=None, padding=(0, 2))
-    t.add_column(style="bold cyan")
-    t.add_column(style="dim")
-    t.add_row("/help", "显示此帮助")
-    t.add_row("/clear", "重置对话")
-    t.add_row("/model <name>", "切换模型 (deepseek-chat / deepseek-v4-pro)")
-    t.add_row("/mode <name>", "切换规划模式 (react / plan_execute / hierarchical)")
-    t.add_row("/tools", "列出可用工具")
-    t.add_row("/exit, /quit", "退出")
     console.print()
-    console.print("  [bold]可用命令[/bold]")
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_column(style="bold bright_cyan")
+    t.add_column(style="dim")
+    t.add_row("/help", "Show this help")
+    t.add_row("/memory", "View working memory")
+    t.add_row("/session", "Show session path")
+    t.add_row("/reset", "Clear session state")
+    t.add_row("/model <name>", "Switch model")
+    t.add_row("/mode <name>", "Switch planning mode (react / plan_execute / hierarchical)")
+    t.add_row("/tools", "List available tools")
+    t.add_row("/exit, /quit", "Exit")
     console.print(t)
     console.print()
 
 
+# ---- Setup command --------------------------------------------------------
+
+
+def _run_setup(args) -> None:
+    """Create launcher scripts that bypass pyenv .bat shims on Windows.
+
+    ``synapse setup`` generates two files:
+
+    * ``synapse.cmd`` — CMD launcher (Ctrl+C still shows prompt; CMD limitation)
+    * ``synapse.ps1`` — PowerShell launcher (Ctrl+C works cleanly)
+
+    On Unix, generates a plain shell script.
+    """
+    python_exe = sys.executable
+    dest = Path(args.dir) if args.dir else Path.home() / ".local" / "bin"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    if sys.platform == "win32":
+        _write_launcher(dest / "synapse.cmd", (
+            "@echo off\r\n"
+            "REM Synapse launcher — bypasses pyenv .bat shims.\r\n"
+            f"\"{python_exe}\" -m synapse %*\r\n"
+        ))
+        _write_launcher(dest / "synapse.ps1", (
+            "# Synapse launcher for PowerShell.\r\n"
+            f"& \"{python_exe}\" -m synapse @args\r\n"
+        ))
+    else:
+        _write_launcher(dest / "synapse", (
+            "#!/usr/bin/env bash\n"
+            "# Synapse launcher.\n"
+            f'exec "{python_exe}" -m synapse "$@"\n'
+        ), executable=True)
+
+    print(f"Launchers written to {dest}")
+    print()
+    if sys.platform == "win32":
+        print("Next steps:")
+        print(f"  1. Add to user PATH (restart after):")
+        print(f'     [Environment]::SetEnvironmentVariable(')
+        print(f'         "PATH", "{dest};" +')
+        print(f'         [Environment]::GetEnvironmentVariable("PATH","User"),')
+        print(f'         "User")')
+        print(f"  2. PowerShell alias (restart shell after):")
+        print(f'     New-Item -ItemType Directory -Force (Split-Path $PROFILE)')
+        print(f'     Add-Content $PROFILE \\"function synapse {{ & \\"{python_exe}\\" -m synapse @args }}\\"')
+        print(f"  3. Use 'synapse' from PowerShell for clean Ctrl+C handling")
+
+
+def _write_launcher(path: Path, content: str, executable: bool = False) -> None:
+    path.write_text(content, encoding="utf-8")
+    if executable:
+        path.chmod(0o755)
+
+
 async def _main_interface():
     """Launch the main Synapse interface (synapse with no subcommand)."""
+    global _ctrl_c_pressed
     config = load_config()
     provider = config.provider.provider
     model = config.provider.model
 
     try:
         from rich.console import Console
-        console = Console()
+        import shutil as _shutil
+        _cols = _shutil.get_terminal_size((80, 24)).columns
+        try:
+            import os as _os
+            _cols = _os.get_terminal_size().columns
+        except Exception:
+            pass
+        console = Console(force_terminal=True, width=_cols)
         use_rich = True
     except ImportError:
         console = None
@@ -887,20 +1021,24 @@ async def _main_interface():
 
     if not use_rich:
         print(f"Synapse v0.1.0 · {provider}/{model}")
-        print("pip install rich 以获得更好的终端体验\n")
 
     from synapse.adapters.library import Synapse
     from synapse.core.session import Session
 
+    # Mutable holders shared with the confirm callback.
+    status_holder: list = []
+    exiting: list = [False]
+
     synapse = Synapse(
         provider=provider, model=model, config_path=None,
-        confirm_callback=_make_confirm_callback(),
+        confirm_callback=_make_confirm_callback(
+            status_holder=status_holder, exiting=exiting,
+        ),
     )
     session = Session()
     last_status = ""
 
     if use_rich:
-        import shutil
         _show_welcome(console, config)
     else:
         print(f"输入任务开始工作，输入 /help 查看命令\n")
@@ -908,22 +1046,31 @@ async def _main_interface():
     while True:
         try:
             if use_rich:
-                user_input = console.input("  [bold bright_cyan]>>[/bold bright_cyan] ")
+                user_input = console.input("  [bold bright_cyan]synapse>[/bold bright_cyan] ")
             else:
-                user_input = input(">> ")
+                user_input = input("synapse> ")
         except EOFError:
-            if await _confirm_exit(console, use_rich):
-                break
-            continue
+            # Ctrl+C may cause a spurious EOF on some console hosts.
+            if _ctrl_c_pressed:
+                _ctrl_c_pressed = False
+                continue
+            exiting[0] = True
+            break
         except KeyboardInterrupt:
-            if await _confirm_exit(console, use_rich):
-                break
-            if use_rich:
-                console.print("[dim](cancelled)[/dim]")
-            continue
+            # KeyboardInterrupt may still fire if Python's own handler runs
+            # despite our SetConsoleCtrlHandler returning TRUE.
+            if _ctrl_c_pressed:
+                _ctrl_c_pressed = False
+                continue
+            exiting[0] = True
+            break
 
         user_input = user_input.strip()
+        # Ignore blank lines, but also check for Ctrl+C flag (may produce
+        # an empty string on some terminals after the handler fires).
         if not user_input:
+            if _ctrl_c_pressed:
+                _ctrl_c_pressed = False
             continue
 
         # ---- / 命令处理 ----
@@ -933,24 +1080,38 @@ async def _main_interface():
             arg = parts[1] if len(parts) > 1 else ""
 
             if cmd in ("/exit", "/quit"):
-                if await _confirm_exit(console, use_rich):
-                    break
-                continue
+                exiting[0] = True
+                break
             elif cmd == "/help":
                 _show_help(console)
-            elif cmd == "/clear":
+            elif cmd in ("/reset", "/clear"):
                 session = Session()
                 if use_rich:
-                    console.print("[dim]  对话已重置[/dim]\n")
+                    console.print("[dim]Session cleared.[/dim]")
                 else:
-                    print("对话已重置\n")
+                    print("Session cleared.")
+            elif cmd == "/memory":
+                if use_rich:
+                    console.print(f"[dim]Session: {len(session.messages)} messages[/dim]")
+                    console.print(f"[dim]Provider: {provider}/{model}[/dim]")
+                    console.print(f"[dim]Workspace: {Path.cwd()}[/dim]")
+                else:
+                    print(f"Session: {len(session.messages)} messages")
+                    print(f"Provider: {provider}/{model}")
+                    print(f"Workspace: {Path.cwd()}")
+            elif cmd == "/session":
+                session_dir = Path.cwd() / ".synapse" / "sessions"
+                if use_rich:
+                    console.print(f"[dim]Session path: {session_dir}[/dim]")
+                else:
+                    print(f"Session path: {session_dir}")
             elif cmd == "/model" and arg:
                 synapse = Synapse(
                     provider=provider, model=arg, config_path=None,
-                    confirm_callback=_make_confirm_callback(),
+                    confirm_callback=_make_confirm_callback(status_holder=status_holder, exiting=exiting),
                 )
                 model = arg
-                prefix = f"[bright_cyan]>[/bright_cyan] [dim]模型 → {arg}[/dim]" if use_rich else f"模型已切换为 {arg}"
+                prefix = f"[bright_cyan]>[/bright_cyan] [dim]Model -> {arg}[/dim]" if use_rich else f"Model -> {arg}"
                 if use_rich:
                     console.print(prefix)
                 else:
@@ -959,54 +1120,83 @@ async def _main_interface():
                 try:
                     synapse = Synapse(
                         provider=provider, model=model, config_path=None,
-                        confirm_callback=_make_confirm_callback(),
+                        confirm_callback=_make_confirm_callback(status_holder=status_holder, exiting=exiting),
                         mode=arg,
                     )
-                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]模式 → {arg}[/dim]" if use_rich else f"模式已切换为 {arg}"
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode -> {arg}[/dim]" if use_rich else f"Mode -> {arg}"
                     if use_rich:
                         console.print(prefix)
                     else:
                         print(prefix)
                 except Exception as e:
-                    console.print(f"[red]切换失败: {e}[/red]") if use_rich else print(f"切换失败: {e}")
+                    console.print(f"[red]Failed: {e}[/red]") if use_rich else print(f"Failed: {e}")
             elif cmd == "/tools":
                 tools = ["read", "write", "edit", "glob", "grep", "shell", "git"]
-                msg = f"[bright_cyan]>[/bright_cyan] [dim]{', '.join(tools)}[/dim]" if use_rich else f"可用工具: {', '.join(tools)}"
+                msg = f"[bright_cyan]>[/bright_cyan] [dim]{', '.join(tools)}[/dim]" if use_rich else f"Tools: {', '.join(tools)}"
                 if use_rich:
                     console.print(msg)
                 else:
                     print(msg)
             else:
-                console.print(f"[red]未知命令: {cmd}[/red]") if use_rich else print(f"未知命令: {cmd}")
+                console.print(f"[red]Unknown: {cmd}[/red]") if use_rich else print(f"Unknown: {cmd}")
             continue
 
-        # ---- 普通任务 ----
+        # ---- Task execution ----
         if use_rich:
-            console.print("[bright_black]  ...[/bright_black]")
-            from rich.live import Live
-            from rich.text import Text
-        else:
-            print("Working...")
+            from rich.status import Status
+            status = console.status("[dim]Thinking...[/dim]", spinner="dots")
+            status.start()
+            status_holder[:] = [status]
+
+            event_bus = synapse._container.resolve(EventBus)
+            if event_bus is not None:
+                async def _on_progress(event):
+                    status.update(f"[dim]{event.message}[/dim]")
+                async def _on_tool_started(event):
+                    status.update(f"[dim]{event.tool_name} ...[/dim]")
+                async def _on_tool_completed(event):
+                    icon = "ok" if event.success else "FAIL"
+                    status.update(f"[dim]{event.tool_name} [{icon}] ({event.duration_ms}ms)[/dim]")
+                event_bus.subscribe("agent_progress", _on_progress)
+                event_bus.subscribe("tool_call_started", _on_tool_started)
+                event_bus.subscribe("tool_call_completed", _on_tool_completed)
 
         try:
             result = await synapse.run(user_input, session=session)
             last_status = result.status.value
+        except asyncio.CancelledError:
+            # Ctrl+C during task — let the outer KeyboardInterrupt handler deal
+            # with it, just clean up spinner and exit the loop.
+            exiting[0] = True
+            break
         except Exception as exc:
             if use_rich:
-                console.print(f"[bold red]  错误:[/bold red] {exc}")
+                status.stop()
+                console.print(f"  [bold red]{type(exc).__name__}:[/bold red] {exc}")
             else:
-                print(f"错误: {exc}")
+                print(f"Error: {exc}")
             continue
+        finally:
+            if use_rich:
+                try:
+                    status.stop()
+                except Exception:
+                    pass
+                status_holder[:] = []
+                if event_bus is not None:
+                    try:
+                        event_bus.unsubscribe("agent_progress", _on_progress)
+                        event_bus.unsubscribe("tool_call_started", _on_tool_started)
+                        event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
+                    except Exception:
+                        pass
 
         if use_rich:
             from rich.markdown import Markdown
             console.print(Markdown(result.output))
-            _show_status(console, len(session.messages), last_status)
-            console.print()
         else:
-            print(f"\n[状态: {result.status.value}]")
+            print(f"\n[Status: {result.status.value}]")
             print(result.output)
-            print()
 
 
 # ---- Eval command handler -------------------------------------------------

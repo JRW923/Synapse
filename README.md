@@ -14,12 +14,60 @@ set DEEPSEEK_API_KEY=sk-xxx        # Windows CMD
 # $env:DEEPSEEK_API_KEY = "sk-xxx" # PowerShell
 # export DEEPSEEK_API_KEY=sk-xxx   # Linux/macOS
 
-# Start chatting
+# Launch the main interface
+synapse
+
+# Or start a chat session
 synapse chat
 
 # Or run a single task
 synapse run "Create a hello.py that prints Hello World"
 ```
+
+> **Windows users**: after install, run `synapse setup` to create launcher scripts
+> that bypass pyenv `.bat` shims.  Use **PowerShell** for clean Ctrl+C handling
+> (CMD shows a "Terminate batch job" prompt that cannot be suppressed from Python).
+
+## Main Interface
+
+```
++====================================================================+
+|         ,--..__..--,                                              |
+|       /    ..    .. \                                             |
+|      /  ,'  ``  ',  \                                             |
+|     (  (  o    o  )  )                                            |
+|      \  `.  ..  .'  /                                             |
+|       \    `--'    /                                              |
+|        `..______..'                                               |
+|           │    │                                                   |
+|      ─────┘    └─────                                             |
+|   Synapse · connecting ideas into code · ready                    |
+|--------------------------------------------------------------------|
+|                                                                    |
+| WORKSPACE  /path/to/project                                        |
+| MODEL     claude-sonnet-4-6          VERSION  v0.1.0               |
+| PROVIDER  anthropic                  PLANNING react                |
+|                                                                    |
+|                  type /help for commands                           |
++====================================================================+
+  synapse> _
+```
+
+**In-REPL commands**:
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show all commands |
+| `/memory` | View working memory |
+| `/session` | Show session path |
+| `/reset` | Clear session state |
+| `/model <name>` | Switch model |
+| `/mode <name>` | Switch planning mode (react / plan_execute / hierarchical) |
+| `/tools` | List available tools |
+| `/exit` | Exit Synapse |
+
+**Ctrl+C behaviour**: press once for hint, press again within 2 seconds to exit
+(no traceback, no prompt — clean exit).
 
 ## Configuration
 
@@ -52,15 +100,21 @@ All available env vars:
 ## Commands
 
 ```bash
-synapse chat              # Interactive REPL session
-synapse run "task"        # Execute a single task
-synapse serve             # Start HTTP API server (port 8000)
-synapse eval <benchmark>  # Run evaluation benchmark
-synapse experiment ...    # Run A/B experiment
-synapse version           # Show version
+synapse                    # Launch the main REPL interface
+synapse setup              # Install launcher scripts (run once after pip install)
+synapse chat               # Interactive chat session
+synapse run "task"         # Execute a single task
+synapse serve              # Start HTTP API server (port 8000)
+synapse eval <benchmark>   # Run evaluation benchmark
+synapse experiment ...     # Run A/B experiment
+synapse version            # Show version
 ```
 
-**Chat controls**: `/clear` to reset session, `/exit` or `Ctrl+C` to quit.
+**Ctrl+C handling on Windows**: `synapse setup` creates `~/.local/bin/synapse.ps1`
+and `synapse.cmd` that call `python.exe` directly.  Use **PowerShell** for clean
+double-tap Ctrl+C (first press warns, second exits).  CMD always shows a
+"Terminate batch job" prompt on Ctrl+C — this is a CMD limitation, not a
+Synapse bug.
 
 **Run options**:
 
