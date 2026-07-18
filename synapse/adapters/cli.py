@@ -725,24 +725,32 @@ def main():
 
 # ---- Main interface -------------------------------------------------------
 
-
-#: Synapse ASCII logo — a stylized neuron with synaptic connections.
-#: Each line is printed separately so Rich markup does not get confused
-#: by backslashes (Rich treats \[ as literal-bracket escape).
+#: Synapse logo — two cerebral hemispheres connected by a synaptic bridge,
+#: with code flowing through the connection. Represents the agent bridging
+#: human intent (left) and machine execution (right).
 _SYNAPSE_LOGO_LINES = [
-    "        [bold cyan]    *[/bold cyan]",
-    "       [bold cyan]   / \\ [/bold cyan]        [dim]+==================================+[/dim]",
-    "      [bold cyan]  /   \\ [/bold cyan]       [dim]|  +-+ ++ +-+ ++ +-+ +-+ +-+  |[/dim]",
-    "     [bold cyan] *-----*[/bold cyan]       [dim]|  +-+ +|+ | | +|+ |+  +-+ +-+  |[/dim]",
-    "      [bold cyan]\\     / [/bold cyan]       [dim]|  +-+ +++ +-+ +++ +-+ ++ +-+  |[/dim]",
-    "       [bold cyan]\\   / [/bold cyan]        [dim]+==================================+[/dim]",
-    "        [bold cyan]\\ / [/bold cyan]            [bold]connecting ideas into code[/bold]",
-    "         [bold cyan]*[/bold cyan]",
+    # Left hemisphere (neural network)
+    "  [bright_cyan]   .-''''''''''-.[/bright_cyan]     [cyan]┌──────────────────────────────┐[/cyan]",
+    "  [bright_cyan]  /  [bold]o[/bold]   O  [bold]o[/bold]  \\ [/bright_cyan]   [cyan]│[/cyan] [bold yellow]  S Y N A P S E[/bold yellow]         [cyan]│[/cyan]",
+    "  [bright_cyan] |     [bold]*[/bold]        | [/bright_cyan]  [cyan]│[/cyan] [dim]connecting ideas into code[/dim] [cyan]│[/cyan]",
+    "  [bright_cyan] |  \\__[bold magenta]***[/bold magenta]__/  | [/bright_cyan]  [cyan]└──────────────────────────────┘[/cyan]",
+    "  [bright_cyan]  \\  [bold magenta]| | |[/bold magenta]  / [/bright_cyan]",
+    "  [bright_cyan]   '---[bold magenta]*[/bold magenta]---'[/bright_cyan]       [green]File    Edit   Search   Git   Run[/green]",
+    # Synaptic bridge
+    "      [bold yellow]  ~[/bold yellow]   [bold bright_yellow]~~[/bold bright_yellow]   [bold yellow]~[/bold yellow]",
+    "    [bold bright_yellow]  ~~~  ~~~  ~~~[/bold bright_yellow]",
+    "      [bold yellow]  ~   ~~   ~[/bold yellow]",
+    # Right hemisphere (code/terminal) — literal brackets escaped
+    "  [bright_cyan]   .-''''''''''-.[/bright_cyan]     [bright_green]def[/bright_green] [bold]agent[/bold][dim](task, ctx):[/dim]",
+    "  [bright_cyan]  /  [dim]\\[ ] \\[ ][/dim]  \\ [/bright_cyan]   [dim]    tools.run(task)[/dim]",
+    "  [bright_cyan] |   [dim]\\<\\> \\<\\> \\<\\>[/dim]   | [/bright_cyan]  [dim]    return result[/dim]",
+    "  [bright_cyan]  \\  [dim]\\[ ][/dim]  / [/bright_cyan]    [bright_black]# synapse v0.1.0[/bright_black]",
+    "  [bright_cyan]   '-----------'[/bright_cyan]",
 ]
 
 
 def _show_welcome(console, config):
-    """Display the Synapse welcome screen with logo and status bar."""
+    """Full-screen dashboard with logo, project info, and system status."""
     from synapse import __version__
     provider = config.provider.provider
     model = config.provider.model
@@ -752,54 +760,97 @@ def _show_welcome(console, config):
         console.clear()
     except Exception:
         pass
+
+    import shutil
+    import datetime
+    term_w = min(shutil.get_terminal_size().columns, 110)
+
+    # ---- Logo ----
     for line in _SYNAPSE_LOGO_LINES:
         console.print(line)
     console.print()
 
-    # Separator
-    import shutil
-    width = min(shutil.get_terminal_size().columns, 100)
-    bar = "=" * (width - 2)
-    console.print(f"  [dim cyan]{bar}[/dim cyan]")
+    # ---- Dashboard grid ----
+    sep = f"  [bright_black]{'=' * (term_w - 2)}[/bright_black]"
+    console.print(sep)
 
-    # Info line
-    console.print(
-        f"  [bold white]Synapse[/bold white] "
-        f"[dim]v{__version__}[/dim]  "
-        f"[bright_black]|[/bright_black]  "
-        f"[cyan]{provider}/{model}[/cyan]"
+    # Row 1: Project + Provider
+    from rich.table import Table
+    info = Table.grid(padding=(0, 3))
+    info.add_column(ratio=1)
+    info.add_column(ratio=1)
+    info.add_column(ratio=1)
+
+    info.add_row(
+        f"[bold bright_cyan]Project[/bold bright_cyan]\n[dim]{cwd}[/dim]",
+        f"[bold bright_magenta]Provider[/bold bright_magenta]\n[cyan]{provider}[/cyan] [dim]/ {model}[/dim]",
+        f"[bold bright_green]Version[/bold bright_green]\n[dim]Synapse v{__version__}[/dim]",
     )
-    console.print(f"  [dim]{cwd}[/dim]")
-    console.print(f"  [dim cyan]{bar}[/dim cyan]")
+    console.print("  ", end="")
+    console.print(info)
+
+    # Row 2: Tools + Memory + Planning
+    info2 = Table.grid(padding=(0, 3))
+    info2.add_column(ratio=1)
+    info2.add_column(ratio=1)
+    info2.add_column(ratio=1)
+
+    tools_str = "[green]read[/green] [green]write[/green] [green]edit[/green] [green]glob[/green]\n[green]grep[/green] [green]shell[/green] [green]git[/green]"
+    mem_str = "[bright_cyan]session[/bright_cyan] [dim](in-memory)[/dim]\n[bright_cyan]project[/bright_cyan] [dim](.synapse/)[/dim]\n[bright_cyan]user[/bright_cyan] [dim](~/.synapse/)[/dim]"
+    plan_str = "[yellow]react[/yellow] [dim](default)[/dim]\n[yellow]plan_execute[/yellow] [dim](complex)[/dim]\n[yellow]hierarchical[/yellow] [dim](large)[/dim]"
+
+    info2.add_row(
+        f"[bold green]Tools[/bold green]\n{tools_str}",
+        f"[bold bright_cyan]Memory[/bold bright_cyan]\n{mem_str}",
+        f"[bold yellow]Planning[/bold yellow]\n{plan_str}",
+    )
+    console.print("  ", end="")
+    console.print(info2)
+
+    # Row 3: Security + Time
+    sec_str = "[bright_red]sandbox[/bright_red] [dim](enforced)[/dim]  [bright_red]auth[/bright_red] [dim](action-time)[/dim]\n[bright_red]audit[/bright_red] [dim](JSONL+HMAC)[/dim]  [bright_red]injection[/bright_red] [dim](annotated)[/dim]"
+    time_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    info3 = Table.grid(padding=(0, 3))
+    info3.add_column(ratio=2)
+    info3.add_column(ratio=1)
+    info3.add_row(
+        f"[bold bright_red]Security[/bold bright_red]\n{sec_str}",
+        f"[bold bright_black]Session[/bold bright_black]\n[dim]{time_str}[/dim]",
+    )
+    console.print("  ", end="")
+    console.print(info3)
+
+    console.print(sep)
     console.print()
 
-    # Tips
-    tips = (
-        "[bright_black]  /help[/bright_black] commands  "
-        "[bright_black]|[/bright_black]  "
-        "[bright_black]/clear[/bright_black] reset  "
-        "[bright_black]|[/bright_black]  "
-        "[bright_black]/model[/bright_black] switch  "
-        "[bright_black]|[/bright_black]  "
-        "[bright_black]Ctrl+C[/bright_black] exit"
-    )
-    console.print(tips)
-    console.print()
+
+
+async def _confirm_exit(console, use_rich) -> bool:
+    """Ask user to confirm exit. Returns True if confirmed."""
+    if use_rich:
+        try:
+            ans = console.input("  [bold yellow]确认退出? [y/N]: [/bold yellow]")
+        except (EOFError, KeyboardInterrupt):
+            return True  # double Ctrl+C = force quit
+        return ans.strip().lower() == "y"
+    else:
+        try:
+            ans = input("确认退出? [y/N]: ")
+        except (EOFError, KeyboardInterrupt):
+            return True
+        return ans.strip().lower() == "y"
 
 
 def _show_status(console, session_msg_count: int, last_status: str):
-    """Print a one-line status bar after each response."""
-    width = min(shutil.get_terminal_size().columns, 100)
-    bar = "─" * (width - 4)
-    msg_label = f"{session_msg_count} msgs" if session_msg_count else "new"
-    status_color = "green" if last_status == "success" else "yellow"
+    """Print a compact status line after each response."""
+    label = f"{session_msg_count} msgs" if session_msg_count else "new"
+    color = "green" if last_status == "success" else "yellow"
+    import shutil
+    width = min(shutil.get_terminal_size().columns, 110)
+    bar = "=" * (width - 2)
     console.print(f"  [dim]{bar}[/dim]")
-    console.print(
-        f"  [[status_color]{last_status}[/status_color]] "
-        f"[bright_black]{msg_label}[/bright_black]"
-        f"  [bright_black]·[/bright_black]  "
-        f"[bright_black]输入任务或 /help[/bright_black]"
-    )
+    console.print(f"  [[color]{last_status}[/color]] [bright_black]{label}[/bright_black]")
 
 
 def _show_help(console):
@@ -857,12 +908,19 @@ async def _main_interface():
     while True:
         try:
             if use_rich:
-                user_input = console.input("  [bold bright_cyan]>[/bold bright_cyan] ")
+                user_input = console.input("  [bold bright_cyan]>>[/bold bright_cyan] ")
             else:
-                user_input = input("> ")
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye.")
-            break
+                user_input = input(">> ")
+        except EOFError:
+            if await _confirm_exit(console, use_rich):
+                break
+            continue
+        except KeyboardInterrupt:
+            if await _confirm_exit(console, use_rich):
+                break
+            if use_rich:
+                console.print("[dim](cancelled)[/dim]")
+            continue
 
         user_input = user_input.strip()
         if not user_input:
@@ -875,8 +933,9 @@ async def _main_interface():
             arg = parts[1] if len(parts) > 1 else ""
 
             if cmd in ("/exit", "/quit"):
-                print("Goodbye.")
-                break
+                if await _confirm_exit(console, use_rich):
+                    break
+                continue
             elif cmd == "/help":
                 _show_help(console)
             elif cmd == "/clear":
