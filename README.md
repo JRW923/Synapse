@@ -24,10 +24,6 @@ synapse chat
 synapse run "Create a hello.py that prints Hello World"
 ```
 
-> **Windows users**: after install, run `synapse setup` to create launcher scripts
-> that bypass pyenv `.bat` shims.  Use **PowerShell** for clean Ctrl+C handling
-> (CMD shows a "Terminate batch job" prompt that cannot be suppressed from Python).
-
 ## Main Interface
 
 ```
@@ -65,9 +61,6 @@ synapse run "Create a hello.py that prints Hello World"
 | `/mode <name>` | Switch planning mode (react / plan_execute / hierarchical) |
 | `/tools` | List available tools |
 | `/exit` | Exit Synapse |
-
-**Ctrl+C behaviour**: press once for hint, press again within 2 seconds to exit
-(no traceback, no prompt — clean exit).
 
 ## Configuration
 
@@ -109,12 +102,6 @@ synapse eval <benchmark>   # Run evaluation benchmark
 synapse experiment ...     # Run A/B experiment
 synapse version            # Show version
 ```
-
-**Ctrl+C handling on Windows**: `synapse setup` creates `~/.local/bin/synapse.ps1`
-and `synapse.cmd` that call `python.exe` directly.  Use **PowerShell** for clean
-double-tap Ctrl+C (first press warns, second exits).  CMD always shows a
-"Terminate batch job" prompt on Ctrl+C — this is a CMD limitation, not a
-Synapse bug.
 
 **Run options**:
 
