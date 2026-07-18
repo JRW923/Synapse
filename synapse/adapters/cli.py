@@ -726,50 +726,98 @@ def main():
 # ---- Main interface -------------------------------------------------------
 
 
-def _show_welcome(config, use_rich, console):
-    """Display welcome banner with project info."""
+#: Synapse ASCII logo — a stylized neuron with synaptic connections.
+#: Each line is printed separately so Rich markup does not get confused
+#: by backslashes (Rich treats \[ as literal-bracket escape).
+_SYNAPSE_LOGO_LINES = [
+    "        [bold cyan]    *[/bold cyan]",
+    "       [bold cyan]   / \\ [/bold cyan]        [dim]+==================================+[/dim]",
+    "      [bold cyan]  /   \\ [/bold cyan]       [dim]|  +-+ ++ +-+ ++ +-+ +-+ +-+  |[/dim]",
+    "     [bold cyan] *-----*[/bold cyan]       [dim]|  +-+ +|+ | | +|+ |+  +-+ +-+  |[/dim]",
+    "      [bold cyan]\\     / [/bold cyan]       [dim]|  +-+ +++ +-+ +++ +-+ ++ +-+  |[/dim]",
+    "       [bold cyan]\\   / [/bold cyan]        [dim]+==================================+[/dim]",
+    "        [bold cyan]\\ / [/bold cyan]            [bold]connecting ideas into code[/bold]",
+    "         [bold cyan]*[/bold cyan]",
+]
+
+
+def _show_welcome(console, config):
+    """Display the Synapse welcome screen with logo and status bar."""
     from synapse import __version__
-    cwd = str(Path.cwd())
     provider = config.provider.provider
     model = config.provider.model
+    cwd = str(Path.cwd())
 
-    if use_rich:
-        from rich.panel import Panel
-        from rich.table import Table
-        grid = Table.grid(padding=(0, 2))
-        grid.add_column(style="bold cyan")
-        grid.add_column(style="dim")
-        grid.add_row("Version:", f"Synapse v{__version__}")
-        grid.add_row("Provider:", f"{provider} / {model}")
-        grid.add_row("Project:", cwd)
-        grid.add_row("Tools:", "read, write, edit, glob, grep, shell, git")
-        grid.add_row("Memory:", "session + project + user")
-        console.print()
-        console.print(Panel(grid, title="Synapse", border_style="cyan"))
-        console.print("[dim]输入任务开始工作，输入 /help 查看命令[/dim]\n")
-    else:
-        print(f"\n  Synapse v{__version__} · {provider}/{model}")
-        print(f"  {cwd}")
-        print(f"  输入任务开始工作，输入 /help 查看命令\n")
+    try:
+        console.clear()
+    except Exception:
+        pass
+    for line in _SYNAPSE_LOGO_LINES:
+        console.print(line)
+    console.print()
+
+    # Separator
+    import shutil
+    width = min(shutil.get_terminal_size().columns, 100)
+    bar = "=" * (width - 2)
+    console.print(f"  [dim cyan]{bar}[/dim cyan]")
+
+    # Info line
+    console.print(
+        f"  [bold white]Synapse[/bold white] "
+        f"[dim]v{__version__}[/dim]  "
+        f"[bright_black]|[/bright_black]  "
+        f"[cyan]{provider}/{model}[/cyan]"
+    )
+    console.print(f"  [dim]{cwd}[/dim]")
+    console.print(f"  [dim cyan]{bar}[/dim cyan]")
+    console.print()
+
+    # Tips
+    tips = (
+        "[bright_black]  /help[/bright_black] commands  "
+        "[bright_black]|[/bright_black]  "
+        "[bright_black]/clear[/bright_black] reset  "
+        "[bright_black]|[/bright_black]  "
+        "[bright_black]/model[/bright_black] switch  "
+        "[bright_black]|[/bright_black]  "
+        "[bright_black]Ctrl+C[/bright_black] exit"
+    )
+    console.print(tips)
+    console.print()
 
 
-def _show_help(console, use_rich):
-    """Display available commands."""
-    if use_rich:
-        from rich.table import Table
-        t = Table(title="可用命令")
-        t.add_column("命令", style="bold green")
-        t.add_column("说明")
-        t.add_row("/help", "显示此帮助")
-        t.add_row("/clear", "重置对话")
-        t.add_row("/model <name>", "切换模型 (如 deepseek-chat)")
-        t.add_row("/mode <name>", "切换规划模式 (react/plan_execute/hierarchical)")
-        t.add_row("/tools", "列出可用工具")
-        t.add_row("/exit, /quit", "退出")
-        console.print()
-        console.print(t)
-    else:
-        print("\n  命令: /help /clear /model /mode /tools /exit\n")
+def _show_status(console, session_msg_count: int, last_status: str):
+    """Print a one-line status bar after each response."""
+    width = min(shutil.get_terminal_size().columns, 100)
+    bar = "─" * (width - 4)
+    msg_label = f"{session_msg_count} msgs" if session_msg_count else "new"
+    status_color = "green" if last_status == "success" else "yellow"
+    console.print(f"  [dim]{bar}[/dim]")
+    console.print(
+        f"  [[status_color]{last_status}[/status_color]] "
+        f"[bright_black]{msg_label}[/bright_black]"
+        f"  [bright_black]·[/bright_black]  "
+        f"[bright_black]输入任务或 /help[/bright_black]"
+    )
+
+
+def _show_help(console):
+    """Display available commands in a clean table."""
+    from rich.table import Table
+    t = Table(show_header=False, box=None, padding=(0, 2))
+    t.add_column(style="bold cyan")
+    t.add_column(style="dim")
+    t.add_row("/help", "显示此帮助")
+    t.add_row("/clear", "重置对话")
+    t.add_row("/model <name>", "切换模型 (deepseek-chat / deepseek-v4-pro)")
+    t.add_row("/mode <name>", "切换规划模式 (react / plan_execute / hierarchical)")
+    t.add_row("/tools", "列出可用工具")
+    t.add_row("/exit, /quit", "退出")
+    console.print()
+    console.print("  [bold]可用命令[/bold]")
+    console.print(t)
+    console.print()
 
 
 async def _main_interface():
@@ -786,7 +834,9 @@ async def _main_interface():
         console = None
         use_rich = False
 
-    _show_welcome(config, use_rich, console)
+    if not use_rich:
+        print(f"Synapse v0.1.0 · {provider}/{model}")
+        print("pip install rich 以获得更好的终端体验\n")
 
     from synapse.adapters.library import Synapse
     from synapse.core.session import Session
@@ -796,11 +846,18 @@ async def _main_interface():
         confirm_callback=_make_confirm_callback(),
     )
     session = Session()
+    last_status = ""
+
+    if use_rich:
+        import shutil
+        _show_welcome(console, config)
+    else:
+        print(f"输入任务开始工作，输入 /help 查看命令\n")
 
     while True:
         try:
             if use_rich:
-                user_input = console.input("[bold green]> [/bold green]")
+                user_input = console.input("  [bold bright_cyan]>[/bold bright_cyan] ")
             else:
                 user_input = input("> ")
         except (EOFError, KeyboardInterrupt):
@@ -821,11 +878,11 @@ async def _main_interface():
                 print("Goodbye.")
                 break
             elif cmd == "/help":
-                _show_help(console, use_rich)
+                _show_help(console)
             elif cmd == "/clear":
                 session = Session()
                 if use_rich:
-                    console.print("[dim]对话已重置[/dim]\n")
+                    console.print("[dim]  对话已重置[/dim]\n")
                 else:
                     print("对话已重置\n")
             elif cmd == "/model" and arg:
@@ -834,10 +891,11 @@ async def _main_interface():
                     confirm_callback=_make_confirm_callback(),
                 )
                 model = arg
+                prefix = f"[bright_cyan]>[/bright_cyan] [dim]模型 → {arg}[/dim]" if use_rich else f"模型已切换为 {arg}"
                 if use_rich:
-                    console.print(f"[dim]模型已切换为 {arg}[/dim]\n")
+                    console.print(prefix)
                 else:
-                    print(f"模型已切换为 {arg}\n")
+                    print(prefix)
             elif cmd == "/mode" and arg:
                 try:
                     synapse = Synapse(
@@ -845,48 +903,46 @@ async def _main_interface():
                         confirm_callback=_make_confirm_callback(),
                         mode=arg,
                     )
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]模式 → {arg}[/dim]" if use_rich else f"模式已切换为 {arg}"
                     if use_rich:
-                        console.print(f"[dim]规划模式已切换为 {arg}[/dim]\n")
+                        console.print(prefix)
                     else:
-                        print(f"规划模式已切换为 {arg}\n")
+                        print(prefix)
                 except Exception as e:
-                    if use_rich:
-                        console.print(f"[red]切换失败: {e}[/red]\n")
-                    else:
-                        print(f"切换失败: {e}\n")
+                    console.print(f"[red]切换失败: {e}[/red]") if use_rich else print(f"切换失败: {e}")
             elif cmd == "/tools":
                 tools = ["read", "write", "edit", "glob", "grep", "shell", "git"]
+                msg = f"[bright_cyan]>[/bright_cyan] [dim]{', '.join(tools)}[/dim]" if use_rich else f"可用工具: {', '.join(tools)}"
                 if use_rich:
-                    console.print(f"[dim]可用工具: {', '.join(tools)}[/dim]\n")
+                    console.print(msg)
                 else:
-                    print(f"可用工具: {', '.join(tools)}\n")
+                    print(msg)
             else:
-                if use_rich:
-                    console.print(f"[red]未知命令: {cmd}，输入 /help 查看帮助[/red]\n")
-                else:
-                    print(f"未知命令: {cmd}，输入 /help 查看帮助\n")
+                console.print(f"[red]未知命令: {cmd}[/red]") if use_rich else print(f"未知命令: {cmd}")
             continue
 
         # ---- 普通任务 ----
         if use_rich:
-            console.print("[dim]Working...[/dim]")
+            console.print("[bright_black]  ...[/bright_black]")
+            from rich.live import Live
+            from rich.text import Text
         else:
             print("Working...")
 
         try:
             result = await synapse.run(user_input, session=session)
+            last_status = result.status.value
         except Exception as exc:
             if use_rich:
-                console.print(f"[bold red]错误:[/bold red] {exc}")
+                console.print(f"[bold red]  错误:[/bold red] {exc}")
             else:
                 print(f"错误: {exc}")
             continue
 
         if use_rich:
             from rich.markdown import Markdown
-            color = "green" if result.status.value == "success" else "yellow"
-            console.print(f"[dim]状态:[/dim] [{color}]{result.status.value}[/{color}]")
             console.print(Markdown(result.output))
+            _show_status(console, len(session.messages), last_status)
             console.print()
         else:
             print(f"\n[状态: {result.status.value}]")
