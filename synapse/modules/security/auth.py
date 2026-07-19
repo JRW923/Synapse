@@ -33,7 +33,7 @@ class ActionAuthorizer:
         "ls", "echo", "cat", "head", "tail", "wc", "pwd", "env",
         "git", "python", "python3", "pip", "npm", "node", "cargo",
         "go", "pytest", "mypy", "ruff", "black",
-        "curl", "wget", "mkdir", "find", "type", "dir",
+        "curl", "wget", "mkdir", "find", "type", "dir", "del", "rm",
     ]
 
     def __init__(
