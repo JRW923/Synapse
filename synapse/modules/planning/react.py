@@ -65,17 +65,64 @@ class ReActPlanner:
             return await obj
         return obj
 
+    @staticmethod
+    def _repair_session(messages: list[Message]) -> list[Message]:
+        """Ensure every assistant ``tool_calls`` has matching tool-result messages.
+
+        Without this, switching models or resuming an interrupted session
+        can cause API errors (e.g. DeepSeek 400 "insufficient tool messages").
+        Missing tool results are patched with a placeholder message so the
+        message list stays structurally valid for every provider.
+        """
+        # Collect all tool_call_ids that need results
+        pending_ids: dict[str, int] = {}  # id → message index
+        for i, msg in enumerate(messages):
+            if msg.role == "assistant" and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tc_id = tc.get("id", "")
+                    if tc_id:
+                        pending_ids[tc_id] = i
+
+        # Remove ids that already have a matching tool result
+        for msg in messages:
+            if msg.role == "tool" and msg.tool_call_id:
+                pending_ids.pop(msg.tool_call_id, None)
+
+        if not pending_ids:
+            return list(messages)
+
+        # Patch missing tool results — insert right after the assistant that
+        # declared them so ordering stays valid.
+        import copy
+        repaired: list[Message] = []
+        # Group missing ids by assistant position
+        by_pos: dict[int, list[str]] = {}
+        for tc_id, pos in pending_ids.items():
+            by_pos.setdefault(pos, []).append(tc_id)
+
+        for i, msg in enumerate(messages):
+            repaired.append(copy.copy(msg))
+            if i in by_pos:
+                for tc_id in by_pos[i]:
+                    repaired.append(Message(
+                        role="tool",
+                        content="[interrupted — result lost]",
+                        tool_call_id=tc_id,
+                    ))
+        return repaired
+
     async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
         start_time = time.time()
         metrics = ExecutionMetrics()
         file_touch_counts: dict[str, int] = {}
 
-        # Build initial messages — reuse session history if available
+        # Build initial messages — reuse session history if available.
+        # Repair incomplete tool chains first (critical for model switching).
         system_prompt = self._build_system_prompt(context)
         if session.messages:
-            # 已有历史：追加新任务
-            messages = list(session.messages)
-            messages.append(Message(role="user", content=task))
+            repaired = self._repair_session(session.messages)
+            repaired.append(Message(role="user", content=task))
+            messages = repaired
         else:
             messages = [
                 Message(role="system", content=system_prompt),
@@ -325,8 +372,8 @@ class ReActPlanner:
 
         metrics.duration_ms = int((time.time() - start_time) * 1000)
 
-        # 保存消息历史到 Session，下次对话可继续
-        session.messages = messages
+        # Repair before persisting — prevents broken tool chains from being saved.
+        session.messages = self._repair_session(messages)
 
         await event_bus.emit(AgentCompleted(
             session_id=session.id,

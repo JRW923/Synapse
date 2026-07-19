@@ -1419,6 +1419,11 @@ async def _main_interface(config_path: str | None = None):
                         entry = avail[idx]
                         provider, model = entry.provider, entry.model
                         _synapse = None
+                        n_msgs = len(session.messages)
+                        if n_msgs:
+                            hint = f"[dim]Session preserved ({n_msgs} messages).[/dim]"
+                            if use_rich: console.print(hint)
+                            else: print(f"Session preserved ({n_msgs} messages).")
             elif cmd == "/provider":
                 if not arg:
                     avail, _ = _available_models(config)
