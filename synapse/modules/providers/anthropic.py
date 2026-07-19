@@ -37,21 +37,6 @@ class AnthropicProvider:
         system_prompt = self._extract_system(messages)
         converted = self._convert_messages(messages)
 
-        # DEBUG: dump message structure to stderr for troubleshooting
-        import sys as _sys, json as _json
-        _debug = []
-        for m in converted:
-            role = m.get("role", "?")
-            content = m.get("content", "")
-            if isinstance(content, list):
-                types = [b.get("type", "?") for b in content]
-                ids = [b.get("id", b.get("tool_use_id", "")) for b in content]
-                _debug.append(f"  [{role}] types={types} ids={ids}")
-            else:
-                _debug.append(f"  [{role}] text={str(content)[:60]}")
-        _sys.stderr.write(f"[DEBUG] anthropic messages ({len(converted)}):\n" + "\n".join(_debug) + "\n")
-        _sys.stderr.flush()
-
         try:
             kwargs = {
                 "model": self._model,

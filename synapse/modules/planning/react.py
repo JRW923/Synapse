@@ -91,6 +91,10 @@ class ReActPlanner:
         if not pending_ids:
             return list(messages)
 
+        import sys as _sys
+        _sys.stderr.write(f"[DEBUG] _repair_session: fixing {len(pending_ids)} missing tool results: {list(pending_ids.keys())}\n")
+        _sys.stderr.flush()
+
         # Patch missing tool results — insert right after the assistant that
         # declared them so ordering stays valid.
         import copy
