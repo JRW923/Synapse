@@ -1,7 +1,9 @@
 """DeepSeek LLM Provider implementation.
 
-DeepSeek uses an OpenAI-compatible API, so we use the OpenAI SDK
-configured with DeepSeek's base URL (https://api.deepseek.com/v1).
+For ``deepseek-chat`` this uses the OpenAI-compatible endpoint at
+``api.deepseek.com/v1``.  ``deepseek-v4-*`` models are routed through
+the Anthropic protocol at ``api.deepseek.com/anthropic`` (handled in
+``_resolve_provider`` in library.py).
 """
 
 import json

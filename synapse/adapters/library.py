@@ -140,12 +140,19 @@ class LayeredMemory:
 # Resolved lazily so that tests can patch module-level names after import.
 
 
-def _resolve_provider(name: str, custom_providers: list | None = None):
+def _resolve_provider(name: str, custom_providers: list | None = None, model: str = ""):
     """Return *(provider_class, base_url_override)* for *name*.
 
-    For built-in providers the base_url is ``None`` (use the default).
-    For custom providers it returns the custom ``base_url``.
+    Handles model-aware routing: ``deepseek-v4-*`` models use the Anthropic
+    protocol against ``api.deepseek.com/anthropic``, while ``deepseek-chat``
+    keeps the OpenAI-compatible ``api.deepseek.com/v1``.
     """
+    # DeepSeek v4 models → Anthropic protocol on the Anthropic-compatible endpoint
+    if name == "deepseek" and model.startswith("deepseek-v4"):
+        import importlib
+        mod = importlib.import_module("synapse.modules.providers.anthropic")
+        return getattr(mod, "AnthropicProvider"), "https://api.deepseek.com/anthropic"
+
     _provider_modules: dict[str, str] = {
         "anthropic": "synapse.modules.providers.anthropic",
         "openai": "synapse.modules.providers.openai",
@@ -163,13 +170,11 @@ def _resolve_provider(name: str, custom_providers: list | None = None):
 
     # Check custom providers first
     base_url = None
-    protocol: str | None = None
     if custom_providers:
         for cp in custom_providers:
             if cp.name == name:
                 protocol = getattr(cp, "protocol", "openai") or "openai"
                 base_url = cp.base_url
-                # Map protocol to a built-in provider for the SDK class
                 if protocol == "anthropic":
                     name = "anthropic"
                 else:
@@ -411,7 +416,7 @@ class Synapse:
         provider_name = self._config.provider.provider.lower()
         cfg = self._config.provider
 
-        provider_cls, base_url = _resolve_provider(provider_name, cfg.custom_providers)
+        provider_cls, base_url = _resolve_provider(provider_name, cfg.custom_providers, cfg.model)
         kwargs: dict = dict(
             model=cfg.model,
             api_key=cfg.api_key,
