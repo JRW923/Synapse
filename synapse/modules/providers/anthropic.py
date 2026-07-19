@@ -37,20 +37,6 @@ class AnthropicProvider:
         system_prompt = self._extract_system(messages)
         converted = self._convert_messages(messages)
 
-        # DEBUG: check for duplicate tool_result IDs
-        import sys as _sd
-        for _mi, _m in enumerate(converted):
-            _c = _m.get("content","")
-            if isinstance(_c, list):
-                _ids = [b.get("tool_use_id","") for b in _c if b.get("type")=="tool_result"]
-                if len(_ids) != len(set(_ids)):
-                    _sd.stderr.write(f"[DEBUG] DUPLICATE tool_result ids in msg {_mi}: {_ids}\n")
-                    _sd.stderr.flush()
-                _tids = [b.get("id","") for b in _c if b.get("type")=="tool_use"]
-                if len(_tids) != len(set(_tids)):
-                    _sd.stderr.write(f"[DEBUG] DUPLICATE tool_use ids in msg {_mi}: {_tids}\n")
-                    _sd.stderr.flush()
-
         try:
             kwargs = {
                 "model": self._model,
@@ -106,24 +92,22 @@ class AnthropicProvider:
             # (required by Anthropic: all tool_results for an assistant's
             #  tool_uses must appear in the immediately-following message).
             if msg.role == "tool" and msg.tool_call_id:
+                block = {
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": msg.content,
+                }
                 if (result and isinstance(result[-1], dict)
                         and result[-1].get("role") == "user"
                         and isinstance(result[-1].get("content"), list)):
-                    result[-1]["content"].append({
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": msg.content,
-                    })
+                    # Skip if this tool_use_id already has a result in the merged message
+                    existing_ids = {b.get("tool_use_id") for b in result[-1]["content"]}
+                    if msg.tool_call_id not in existing_ids:
+                        result[-1]["content"].append(block)
                 else:
                     result.append({
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id,
-                                "content": msg.content,
-                            }
-                        ],
+                        "content": [block],
                     })
                 continue
 
