@@ -1022,48 +1022,42 @@ def _available_models(config):
     return avail, unavail
 
 
-def _pick_model(entries, use_rich=True) -> int | None:
-    """Interactive arrow-key selector.  Returns the chosen index or None on Esc."""
+def _pick_model(console, entries) -> int | None:
+    """Interactive arrow-key selector using Rich Live display. Returns index or None."""
     n = len(entries)
     if n == 0:
         return None
     idx = 0
+    from rich.text import Text
+    from rich.live import Live
 
     def _render():
-        buf = "\x1b[?25l"  # hide cursor
-        buf += "\n  [dim]Use ↑↓ to move, Enter to select, Esc to cancel[/dim]\n"
+        lines = [Text("  Use ↑↓ to move, Enter to select, Esc to cancel", style="dim")]
         for i, (label, _) in enumerate(entries):
+            line = Text(f"  {'>' if i == idx else ' '} {label}")
             if i == idx:
-                buf += f"\r\x1b[K  \x1b[1;36m> {label}\x1b[0m\n"
-            else:
-                buf += f"\r\x1b[K   {label}\n"
-        buf += f"\x1b[{n + 2}A"  # move cursor back up
-        _os.write(1, buf.encode())
-        _os.write(2, b"")  # flush
+                line.stylize("bold bright_cyan")
+            lines.append(line)
+        return Text("\n").join(lines)
 
-    _render()
-    try:
+    console.print()  # blank line before picker
+    with Live(_render(), console=console, refresh_per_second=30, transient=True) as live:
         while True:
             key = _get_key()
             if key == "up" and idx > 0:
                 idx -= 1
-                _render()
+                live.update(_render())
             elif key == "down" and idx < n - 1:
                 idx += 1
-                _render()
+                live.update(_render())
             elif key in ("enter", "\r", "\n", " "):
-                _os.write(1, b"\x1b[?25h\n")  # show cursor
                 return idx
-            elif key == "\x1b":  # Esc
-                _os.write(1, b"\x1b[?25h\n")
+            elif key == "\x1b":
                 return None
             elif key.isdigit():
                 num = int(key)
                 if 1 <= num <= n:
-                    _os.write(1, b"\x1b[?25h\n")
                     return num - 1
-    finally:
-        _os.write(1, b"\x1b[?25h")  # ensure cursor visible
 
 
 # ---- First-run wizard -----------------------------------------------------
@@ -1420,7 +1414,7 @@ async def _main_interface(config_path: str | None = None):
                             cur_idx = i
                         extra = getattr(e, "base_url", "")
                         pick_entries.append((label, (e.provider, e.model, extra)))
-                    idx = _pick_model(pick_entries)
+                    idx = _pick_model(console, pick_entries)
                     if idx is not None:
                         entry = avail[idx]
                         provider, model = entry.provider, entry.model
