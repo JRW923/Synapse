@@ -6,10 +6,10 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 class WriteTool:
     name = "write"
-    description = "Write content to a file, overwriting if it exists."
+    description = "Create or overwrite a file with new content. Use to generate code, save results, or create config files."
     parameters = ToolSchema(
         name="write",
-        description="Write a file",
+        description="Create or overwrite a file. Provide absolute path and full content. Creates parent directories if needed.",
         parameters={
             "type": "object",
             "properties": {

@@ -7,10 +7,10 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 class GrepTool:
     name = "grep"
-    description = "Search file contents with a regex pattern using ripgrep."
+    description = "Search file contents with regex (ripgrep). Find function definitions, imports, error messages, or any text pattern."
     parameters = ToolSchema(
         name="grep",
-        description="Search code with regex",
+        description="Search file contents with regex. Use to find where a function/class/import is used, locate error messages, or discover code patterns.",
         parameters={
             "type": "object",
             "properties": {

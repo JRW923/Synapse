@@ -6,10 +6,10 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 class ReadTool:
     name = "read"
-    description = "Read the contents of a file at the given path."
+    description = "Read the contents of a file. Use to inspect code, configs, logs, or any text file."
     parameters = ToolSchema(
         name="read",
-        description="Read a file",
+        description="Read a file's contents. Shows line numbers. Use to examine code, check results, or verify file state.",
         parameters={
             "type": "object",
             "properties": {

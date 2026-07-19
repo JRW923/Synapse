@@ -6,10 +6,10 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 class GlobTool:
     name = "glob"
-    description = "Find files matching a glob pattern."
+    description = "Find files by name pattern (e.g., **/*.py for all Python files, **/*test* for test files)."
     parameters = ToolSchema(
         name="glob",
-        description="Find files by glob pattern",
+        description="Find files matching a glob pattern. Use to explore project structure, locate specific file types.",
         parameters={
             "type": "object",
             "properties": {

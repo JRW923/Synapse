@@ -6,10 +6,10 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 class EditTool:
     name = "edit"
-    description = "Replace an exact string in a file with another string."
+    description = "Replace a specific string in a file. Use for targeted edits: fix bugs, rename symbols, update configs."
     parameters = ToolSchema(
         name="edit",
-        description="Edit a file by exact string replacement",
+        description="Replace old_string with new_string in a file. Both must match exactly (including whitespace). Use for targeted changes.",
         parameters={
             "type": "object",
             "properties": {
