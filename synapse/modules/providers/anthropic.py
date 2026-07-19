@@ -38,9 +38,6 @@ class AnthropicProvider:
         converted = self._convert_messages(messages)
 
         try:
-            import sys as _s4
-            _s4.stderr.write(f"[DEBUG] Anthropic chat: model={self._model} base={self._client.base_url}\n")
-            _s4.stderr.flush()
             kwargs = {
                 "model": self._model,
                 "messages": converted,
