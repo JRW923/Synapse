@@ -252,8 +252,6 @@ class ReActPlanner:
                                 tool_name, tool_input, risk_level, session.id,
                             )
                             decision = self.auth.authorize(auth_req)
-                            import sys as _sd5
-                            _sd5.stderr.write(f"[TRACE] auth decision: allowed={decision.allowed} confirm={decision.requires_confirmation}\n"); _sd5.stderr.flush()
 
                             # Hard deny
                             if not decision.allowed:
@@ -281,8 +279,6 @@ class ReActPlanner:
                             # Requires user confirmation → ask if callback available
                             if decision.requires_confirmation and self._confirm is not None:
                                 approved = await self._confirm(auth_req)
-                                import sys as _sd4
-                                _sd4.stderr.write(f"[TRACE] auth confirm result: approved={approved}\n"); _sd4.stderr.flush()
                                 if not approved:
                                     result = type("TR", (), {
                                         "success": False,
@@ -305,10 +301,7 @@ class ReActPlanner:
                                     tool_results.append((tc["id"], result))
                                     continue
 
-                    import sys as _sd3
-                    _sd3.stderr.write(f"[TRACE] about to execute tool: {tool_name}\n"); _sd3.stderr.flush()
                     result = await tool.execute(tool_input, sandbox=sandbox)
-                    _sd3.stderr.write(f"[TRACE] tool executed: {tool_name} success={result.success}\n"); _sd3.stderr.flush()
                 except KeyError:
                     result = type("TR", (), {
                         "success": False, "output": "", "error": f"Unknown tool: {tool_name}",
