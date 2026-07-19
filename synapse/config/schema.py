@@ -84,7 +84,8 @@ class ToolsConfig(BaseModel):
         "read", "write", "edit", "glob", "grep", "shell", "git"
     ])
     allowlist_commands: list[str] = Field(default_factory=lambda: [
-        "ls", "git", "pytest", "python", "pip", "npm", "cargo", "go", "node"
+        "ls", "git", "pytest", "python", "pip", "npm", "cargo", "go", "node",
+        "curl", "wget", "mkdir", "find", "cat", "echo", "type", "dir",
     ])
     workspace_root: str = "."
 
