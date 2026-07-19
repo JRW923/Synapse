@@ -91,10 +91,6 @@ class ReActPlanner:
         if not pending_ids:
             return list(messages)
 
-        import sys as _sys
-        _sys.stderr.write(f"[DEBUG] _repair_session: fixing {len(pending_ids)} missing tool results: {list(pending_ids.keys())}\n")
-        _sys.stderr.flush()
-
         # Patch missing tool results — insert right after the assistant that
         # declared them so ordering stays valid.
         import copy
@@ -147,6 +143,7 @@ class ReActPlanner:
         ))
 
         thrash_stop = False
+        tool_results: list = []  # accumulates results from executed tool calls
 
         for iteration in range(1, self.max_iterations + 1):
             # Check total timeout budget
@@ -232,7 +229,7 @@ class ReActPlanner:
             # Execute each tool call
             self._log(f"Executing {len(response.tool_calls)} tool(s): "
                       f"{[tc['name'] + '(' + str(list(tc['input'].keys())) + ')' for tc in response.tool_calls]}")
-            tool_results = []
+            tool_results.clear()
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_input = tc["input"]
@@ -343,24 +340,24 @@ class ReActPlanner:
             if thrash_stop:
                 break
 
-                duration_ms = int((time.time() - t0) * 1000)
-                status_icon = "[OK]" if result.success else "[FAIL]"
-                self._log(
-                    f"  {status_icon} {tool_name}: {'OK' if result.success else 'FAILED'} "
-                    f"({duration_ms}ms)"
-                    f"{' - ' + result.error if not result.success else ''}"
-                )
-                await event_bus.emit(ToolCallCompleted(
-                    session_id=session.id,
-                    tool_name=tool_name,
-                    success=result.success,
-                    duration_ms=duration_ms,
-                    files_touched=result.metadata.files_touched,
-                ))
+            duration_ms = int((time.time() - t0) * 1000)
+            status_icon = "[OK]" if result.success else "[FAIL]"
+            self._log(
+                f"  {status_icon} {tool_name}: {'OK' if result.success else 'FAILED'} "
+                f"({duration_ms}ms)"
+                f"{' - ' + result.error if not result.success else ''}"
+            )
+            await event_bus.emit(ToolCallCompleted(
+                session_id=session.id,
+                tool_name=tool_name,
+                success=result.success,
+                duration_ms=duration_ms,
+                files_touched=result.metadata.files_touched,
+            ))
 
-                tool_results.append((tc["id"], result))
+            tool_results.append((tc["id"], result))
 
-            # Feed tool results back as tool messages (OpenAI Function Calling format)
+            # Feed tool results back as tool messages
             for tool_id, result in tool_results:
                 content = result.output if result.success else f"Error: {result.error}"
                 messages.append(Message(
