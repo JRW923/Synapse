@@ -6,10 +6,13 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 class ShellTool:
     name = "shell"
-    description = "Execute a shell command in a subprocess."
+    description = (
+        "Run a shell command (curl, wget, mkdir, find, ls, cat, echo, python, git, etc.). "
+        "Use curl to fetch web pages and APIs for real-time information."
+    )
     parameters = ToolSchema(
         name="shell",
-        description="Execute a shell command",
+        description="Run a shell command. Available commands include: curl (HTTP requests), wget (download), mkdir, find, ls, cat, echo, python, git, and more.",
         parameters={
             "type": "object",
             "properties": {
