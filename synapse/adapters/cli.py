@@ -595,7 +595,7 @@ def main():
 
     if args.command == "run":
         task = " ".join(args.task)
-        config = load_config()
+        config, _ = load_config()
         _check_api_key(config)
 
         from synapse.adapters.library import Synapse
@@ -630,7 +630,7 @@ def main():
         return
 
     if args.command == "chat":
-        config = load_config()
+        config, _ = load_config()
         if args.provider:
             config.provider.provider = args.provider
         if args.model:
@@ -834,7 +834,7 @@ def _middle(text: str, limit: int) -> str:
     return text[:left] + "..." + text[-right:]
 
 
-def _show_welcome(console, config):
+def _show_welcome(console, config, config_path: str = ""):
     """pico-style boxed welcome banner with Rich colour accents."""
     from synapse import __version__
     from rich.text import Text
@@ -916,6 +916,10 @@ def _show_welcome(console, config):
 
     _print_pair("MODEL", model, "VERSION", f"v{__version__}")
     _print_pair("PROVIDER", provider, "PLANNING", config.planning.mode)
+    if config_path:
+        _print_plain(
+            f"|  [dim]config  {config_path}[/dim]{' ' * (inner - len('config  ' + config_path))} |"
+        )
 
     _print_plain(f"| {'':<{inner}} |")
     _print_plain(_centered("type /help for commands"), style="dim")
@@ -943,11 +947,20 @@ def _show_help(console):
 
 
 def _available_models(config):
-    """Return (available, unavailable) model entries based on API key presence."""
+    """Return (available, unavailable) model entries based on API key presence.
+
+    Checks, in order: the entry's own api_key, the env var for that provider,
+    and finally ``config.provider.api_key`` (for entries of the same provider).
+    """
     avail: list = []
     unavail: list = []
+    main_key = config.provider.api_key
+    main_provider = config.provider.provider
     for entry in config.provider.models:
         key = _effective_api_key(entry)
+        # fall back to the main config's api_key for same-provider entries
+        if not key and entry.provider == main_provider:
+            key = main_key
         if key or entry.provider == "ollama":
             avail.append(entry)
         else:
@@ -1013,7 +1026,7 @@ def _write_launcher(path: Path, content: str, executable: bool = False) -> None:
 async def _main_interface():
     """Launch the main Synapse interface (synapse with no subcommand)."""
     global _ctrl_c_pressed
-    config = load_config()
+    config, config_source = load_config()
     provider = config.provider.provider
     model = config.provider.model
 
@@ -1043,7 +1056,7 @@ async def _main_interface():
 
     # Show the welcome banner immediately, before heavy imports.
     if use_rich:
-        _show_welcome(console, config)
+        _show_welcome(console, config, config_source)
     else:
         print(f"输入任务开始工作，输入 /help 查看命令\n")
 

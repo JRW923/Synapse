@@ -6,9 +6,14 @@ import yaml
 from synapse.config.schema import SynapseConfig
 
 
-def load_config(config_path: str | None = None) -> SynapseConfig:
-    """Load config from YAML file, with env var overrides."""
+def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
+    """Load config from YAML file, with env var overrides.
+
+    Returns ``(config, source)`` where *source* is the path that was loaded
+    (or ``"defaults"`` if no file was found).
+    """
     config = SynapseConfig()
+    source = "defaults"
 
     if config_path:
         path = Path(config_path)
@@ -21,6 +26,7 @@ def load_config(config_path: str | None = None) -> SynapseConfig:
         raw = yaml.safe_load(path.read_text())
         if raw:
             config = SynapseConfig.model_validate(raw)
+            source = str(path)
 
     # Environment variable overrides
     if os.environ.get("SYNAPSE_PROVIDER"):
@@ -39,4 +45,4 @@ def load_config(config_path: str | None = None) -> SynapseConfig:
         val = os.environ["SYNAPSE_SANDBOX"].lower()
         config.security.sandbox_enabled = val not in ("0", "false", "off")
 
-    return config
+    return config, source

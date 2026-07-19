@@ -280,7 +280,7 @@ class Synapse:
         model: str | None,
         overrides: dict[str, Any],
     ):
-        config = load_config(config_path)
+        config, _ = load_config(config_path)
 
         # Explicit positional arguments
         config.provider.provider = provider
