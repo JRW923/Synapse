@@ -1032,9 +1032,10 @@ def _pick_model(console, entries) -> int | None:
     from rich.live import Live
 
     def _render():
-        lines = [Text("  Use ↑↓ to move, Enter to select, Esc to cancel", style="dim")]
+        lines = [Text("  Use arrow keys to move, Enter to select, Esc to cancel", style="dim")]
         for i, (label, _) in enumerate(entries):
-            line = Text(f"  {'>' if i == idx else ' '} {label}")
+            cursor = ">" if i == idx else " "
+            line = Text.from_markup(f"  {cursor} {label}")
             if i == idx:
                 line.stylize("bold bright_cyan")
             lines.append(line)
@@ -1412,8 +1413,9 @@ async def _main_interface(config_path: str | None = None):
                         if e.provider == provider and e.model == model:
                             label += " [dim](current)[/dim]"
                             cur_idx = i
-                        extra = getattr(e, "base_url", "")
-                        pick_entries.append((label, (e.provider, e.model, extra)))
+                        if e.provider == "ollama":
+                            label += " [dim](needs local server)[/dim]"
+                        pick_entries.append((label, (e.provider, e.model)))
                     idx = _pick_model(console, pick_entries)
                     if idx is not None:
                         entry = avail[idx]
