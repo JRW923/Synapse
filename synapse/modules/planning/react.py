@@ -401,6 +401,7 @@ class ReActPlanner:
             "To create or modify files, call the 'write' or 'edit' tool directly. "
             "To read files, use 'read'. To search code, use 'grep' or 'glob'. "
             "To run commands, use 'shell'. "
+            "To search the web for real-time information, use shell + curl. "
             "Always provide absolute paths when using file tools."
         )
         blocks.append(tools_instruction)
