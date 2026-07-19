@@ -1004,7 +1004,7 @@ def _available_models(config):
         key = _effective_api_key(entry)
         if not key and entry.provider == main_provider:
             key = main_key
-        if key or entry.provider == "ollama":
+        if key:
             avail.append(entry)
         else:
             unavail.append(entry)
@@ -1413,8 +1413,6 @@ async def _main_interface(config_path: str | None = None):
                         if e.provider == provider and e.model == model:
                             label += " [dim](current)[/dim]"
                             cur_idx = i
-                        if e.provider == "ollama":
-                            label += " [dim](needs local server)[/dim]"
                         pick_entries.append((label, (e.provider, e.model)))
                     idx = _pick_model(console, pick_entries)
                     if idx is not None:
