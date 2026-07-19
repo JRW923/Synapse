@@ -52,6 +52,7 @@ else:
     _signal.signal(_signal.SIGINT, _unix_sigint_handler)
 
 from synapse.config import load_config
+from synapse.config.schema import _effective_api_key
 from synapse.protocols.mcp import McpServerConfig
 from synapse.core.container import Container
 from synapse.core.agent import Agent
@@ -932,12 +933,26 @@ def _show_help(console):
     t.add_row("/memory", "View working memory")
     t.add_row("/session", "Show session path")
     t.add_row("/reset", "Clear session state")
-    t.add_row("/model <name>", "Switch model")
-    t.add_row("/mode <name>", "Switch planning mode (react / plan_execute / hierarchical)")
+    t.add_row("/model [name]", "Show or switch model")
+    t.add_row("/provider [name]", "Show or switch provider (anthropic/openai/deepseek/google/ollama)")
+    t.add_row("/mode [name]", "Show or switch planning mode (react / plan_execute / hierarchical)")
     t.add_row("/tools", "List available tools")
     t.add_row("/exit, /quit", "Exit")
     console.print(t)
     console.print()
+
+
+def _available_models(config):
+    """Return (available, unavailable) model entries based on API key presence."""
+    avail: list = []
+    unavail: list = []
+    for entry in config.provider.models:
+        key = _effective_api_key(entry)
+        if key or entry.provider == "ollama":
+            avail.append(entry)
+        else:
+            unavail.append(entry)
+    return avail, unavail
 
 
 # ---- Setup command --------------------------------------------------------
@@ -1043,7 +1058,10 @@ async def _main_interface():
         if _synapse is None:
             from synapse.adapters.library import Synapse as _Synapse
             _synapse = _Synapse(
-                provider=provider, model=model, config_path=None,
+                provider=provider,
+                model=model,
+                mode=config.planning.mode,
+                config_path=None,
                 confirm_callback=_make_confirm_callback(
                     status_holder=status_holder, exiting=exiting,
                 ),
@@ -1116,29 +1134,95 @@ async def _main_interface():
                     console.print(f"[dim]Session path: {session_dir}[/dim]")
                 else:
                     print(f"Session path: {session_dir}")
-            elif cmd == "/model" and arg:
-                model = arg
-                _synapse = None  # force recreate with new model
-                prefix = f"[bright_cyan]>[/bright_cyan] [dim]Model -> {arg}[/dim]" if use_rich else f"Model -> {arg}"
+            elif cmd == "/model":
+                if arg:
+                    # Switch model — must be in the available list.
+                    avail, _ = _available_models(config)
+                    candidates = [e for e in avail if e.model == arg or f"{e.provider}/{e.model}" == arg]
+                    if not candidates:
+                        if use_rich:
+                            console.print(f"[red]'{arg}' is not available (no API key configured).[/red]")
+                            console.print("[dim]Use /model alone to see available models.[/dim]")
+                        else:
+                            print(f"'{arg}' is not available (no API key configured). Use /model to list.")
+                    else:
+                        entry = candidates[0]
+                        provider = entry.provider
+                        model = entry.model
+                        _synapse = None
+                        prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
+                        if use_rich:
+                            console.print(prefix)
+                        else:
+                            print(prefix)
+                else:
+                    # Show current + available models.
+                    avail, unavail = _available_models(config)
+                    if use_rich:
+                        console.print(f"[bright_cyan]>[/bright_cyan] [bold]{provider}/{model}[/bold] [dim](current)[/dim]")
+                        if avail:
+                            avail_lines = [
+                                f"  [green]{e.provider}/{e.model}[/green]"
+                                for e in avail if not (e.provider == provider and e.model == model)
+                            ]
+                            if avail_lines:
+                                console.print("[dim]Available:[/dim]")
+                                for line in avail_lines:
+                                    console.print(line)
+                        if unavail:
+                            console.print("[dim]Unconfigured (set API key to enable):[/dim]")
+                            for e in unavail:
+                                console.print(f"  [bright_black]{e.provider}/{e.model}[/bright_black]")
+                    else:
+                        print(f"Current: {provider}/{model}")
+                        for e in avail:
+                            print(f"  {e.provider}/{e.model}" if not (e.provider == provider and e.model == model) else f"* {e.provider}/{e.model}")
+            elif cmd == "/provider":
+                if not arg:
+                    avail, _ = _available_models(config)
+                    providers_set = sorted({e.provider for e in avail})
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model} (current)[/dim]" if use_rich else f"{provider}/{model} (current)"
+                    if use_rich:
+                        console.print(prefix)
+                        if providers_set:
+                            console.print(f"[dim]Available providers: {', '.join(providers_set)}[/dim]")
+                    else:
+                        print(prefix)
+                        if providers_set:
+                            print(f"Available providers: {', '.join(providers_set)}")
+                else:
+                    new_provider = arg.lower()
+                    avail, _ = _available_models(config)
+                    provider_set = {e.provider for e in avail}
+                    if new_provider not in provider_set:
+                        if use_rich:
+                            console.print(f"[red]'{new_provider}' is not available (no API key).[/red]")
+                        else:
+                            print(f"'{new_provider}' is not available (no API key).")
+                    else:
+                        provider = new_provider
+                        # Pick the first model for this provider
+                        for e in avail:
+                            if e.provider == provider:
+                                model = e.model
+                                break
+                        _synapse = None
+                        prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
+                        if use_rich:
+                            console.print(prefix)
+                        else:
+                            print(prefix)
+            elif cmd == "/mode":
+                if not arg:
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode: {config.planning.mode}[/dim]" if use_rich else f"Mode: {config.planning.mode}"
+                else:
+                    config.planning.mode = arg
+                    _synapse = None
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode -> {arg}[/dim]" if use_rich else f"Mode -> {arg}"
                 if use_rich:
                     console.print(prefix)
                 else:
                     print(prefix)
-            elif cmd == "/mode" and arg:
-                try:
-                    from synapse.adapters.library import Synapse as _Synapse
-                    _synapse = _Synapse(
-                        provider=provider, model=model, config_path=None,
-                        confirm_callback=_make_confirm_callback(status_holder=status_holder, exiting=exiting),
-                        mode=arg,
-                    )
-                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode -> {arg}[/dim]" if use_rich else f"Mode -> {arg}"
-                    if use_rich:
-                        console.print(prefix)
-                    else:
-                        print(prefix)
-                except Exception as e:
-                    console.print(f"[red]Failed: {e}[/red]") if use_rich else print(f"Failed: {e}")
             elif cmd == "/tools":
                 tools = ["read", "write", "edit", "glob", "grep", "shell", "git"]
                 msg = f"[bright_cyan]>[/bright_cyan] [dim]{', '.join(tools)}[/dim]" if use_rich else f"Tools: {', '.join(tools)}"
