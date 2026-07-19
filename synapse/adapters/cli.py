@@ -427,6 +427,12 @@ def main():
         prog="synapse",
         description="Synapse — Connecting ideas into code",
     )
+    parser.add_argument(
+        "--config", "-c",
+        default=None,
+        metavar="PATH",
+        help="Path to synapse.yaml (default: auto-detect from CWD upward, then ~/.synapse/)",
+    )
     sub = parser.add_subparsers(dest="command")
 
     run_parser = sub.add_parser("run", help="Execute a task")
@@ -796,7 +802,7 @@ def main():
 
     # No subcommand — launch main interface
     try:
-        asyncio.run(_main_interface())
+        asyncio.run(_main_interface(args.config))
     except KeyboardInterrupt:
         pass
 
@@ -1023,10 +1029,10 @@ def _write_launcher(path: Path, content: str, executable: bool = False) -> None:
         path.chmod(0o755)
 
 
-async def _main_interface():
+async def _main_interface(config_path: str | None = None):
     """Launch the main Synapse interface (synapse with no subcommand)."""
     global _ctrl_c_pressed
-    config, config_source = load_config()
+    config, config_source = load_config(config_path)
     provider = config.provider.provider
     model = config.provider.model
 
