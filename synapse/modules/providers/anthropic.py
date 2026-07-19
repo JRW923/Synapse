@@ -81,42 +81,36 @@ class AnthropicProvider:
           to appear in the immediately-following user message)
         - assistant messages with tool_calls → Anthropic tool_use blocks
         """
-        import itertools
-
-        # Group consecutive tool messages so they land in one user message.
-        merged: list = []
+        result = []
         for msg in messages:
             if msg.role == "system":
                 continue
-            if msg.role == "tool" and msg.tool_call_id and merged and merged[-1].get("role") == "user" and isinstance(merged[-1].get("content"), list):
-                # Append to the previous user tool_result message
-                merged[-1]["content"].append({
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id,
-                    "content": msg.content,
-                })
-                continue
-            merged.append(msg)
 
-        result = []
-        for msg in merged:
-            if isinstance(msg, dict):
-                # Already converted by the merge pass
-                result.append(msg)
-                continue
-
-            # tool message → user message with tool_result block(s)
+            # tool message → user message with tool_result block(s).
+            # If the previous entry is already a user-tool_result, append to it
+            # so that consecutive tool messages merge into one user message
+            # (required by Anthropic: all tool_results for an assistant's
+            #  tool_uses must appear in the immediately-following message).
             if msg.role == "tool" and msg.tool_call_id:
-                result.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": msg.tool_call_id,
-                            "content": msg.content,
-                        }
-                    ],
-                })
+                if (result and isinstance(result[-1], dict)
+                        and result[-1].get("role") == "user"
+                        and isinstance(result[-1].get("content"), list)):
+                    result[-1]["content"].append({
+                        "type": "tool_result",
+                        "tool_use_id": msg.tool_call_id,
+                        "content": msg.content,
+                    })
+                else:
+                    result.append({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": msg.content,
+                            }
+                        ],
+                    })
                 continue
 
             # assistant message with tool_calls → tool_use blocks
