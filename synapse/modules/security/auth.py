@@ -33,7 +33,7 @@ class ActionAuthorizer:
         "ls", "echo", "cat", "head", "tail", "wc", "pwd", "env",
         "git", "python", "python3", "pip", "npm", "node", "cargo",
         "go", "pytest", "mypy", "ruff", "black",
-        "curl", "wget", "mkdir", "find", "type", "dir", "cmd",
+        "curl", "wget", "mkdir", "find", "type", "dir",
     ]
 
     def __init__(
@@ -132,5 +132,5 @@ class ActionAuthorizer:
     def _is_allowlisted(self, command: str) -> bool:
         if not command.strip():
             return False
-        base = command.strip().split()[0]
-        return base in self.ALWAYS_ALLOWED_COMMANDS
+        words = command.strip().split()
+        return any(w in self.ALWAYS_ALLOWED_COMMANDS for w in words)
