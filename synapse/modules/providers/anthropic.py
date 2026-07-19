@@ -37,21 +37,10 @@ class AnthropicProvider:
         system_prompt = self._extract_system(messages)
         converted = self._convert_messages(messages)
 
-        # DEBUG: show full converted message structure
-        import sys as _s2, json as _j2
-        _d = []
-        for _i, _m in enumerate(converted):
-            _r = _m.get("role","?")
-            _c = _m.get("content","")
-            if isinstance(_c, list):
-                _ts = [b.get("type","?")+"("+b.get("id",b.get("tool_use_id",""))+")" for b in _c]
-                _d.append(f"  [{_i}] {_r}: {_ts}")
-            else:
-                _d.append(f"  [{_i}] {_r}: {str(_c)[:50]}")
-        _s2.stderr.write(f"[DEBUG] anthropic call msgs={len(converted)}:\n"+"\n".join(_d)+"\n")
-        _s2.stderr.flush()
-
         try:
+            import sys as _s4
+            _s4.stderr.write(f"[DEBUG] Anthropic chat: model={self._model} base={self._client.base_url}\n")
+            _s4.stderr.flush()
             kwargs = {
                 "model": self._model,
                 "messages": converted,
