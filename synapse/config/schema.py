@@ -9,6 +9,16 @@ class ModelEntry(BaseModel):
     provider: str = ""       # anthropic | openai | deepseek | google | ollama
     model: str = ""          # e.g. claude-sonnet-4-6
     api_key: str = ""        # leave empty → check env var
+    base_url: str = ""       # override the default API endpoint (custom providers)
+
+
+class CustomProvider(BaseModel):
+    """A user-defined provider with its own base URL and models."""
+    name: str = ""           # provider name shown in /provider
+    base_url: str = ""       # API endpoint
+    api_key: str = ""        # API key
+    protocol: str = "openai"  # "openai" or "anthropic" (API style)
+    models: list[str] = Field(default_factory=list)  # e.g. ["my-model-1", "my-model-2"]
 
 
 # ---- built-in defaults — API keys empty; fill in or set env vars -----------
@@ -64,6 +74,8 @@ class ProviderConfig(BaseModel):
     # Pre-configured models shown by /model.  Add entries to ~/.synapse/config.yaml
     # to fill in api_key values (or set the corresponding env var).
     models: list[ModelEntry] = Field(default_factory=_default_models)
+    # User-defined providers with custom base URLs.
+    custom_providers: list[CustomProvider] = Field(default_factory=list)
 
 
 class ToolsConfig(BaseModel):

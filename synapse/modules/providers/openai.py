@@ -18,13 +18,14 @@ class OpenAIProvider:
         api_key: str = "",
         max_tokens: int = 4096,
         timeout_seconds: int = 120,
+        base_url: str = "",
     ):
         self._model = model
         self._max_tokens = max_tokens
-        self._client = AsyncOpenAI(
-            api_key=api_key if api_key else None,
-            timeout=timeout_seconds,
-        )
+        kwargs = dict(api_key=api_key if api_key else None, timeout=timeout_seconds)
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = AsyncOpenAI(**kwargs)
 
     @property
     def model_id(self) -> str:

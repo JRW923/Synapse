@@ -943,8 +943,8 @@ def _show_help(console):
     t.add_row("/memory", "View working memory")
     t.add_row("/session", "Show session path")
     t.add_row("/reset", "Clear session state")
-    t.add_row("/model [name]", "Show or switch model")
-    t.add_row("/provider [name]", "Show or switch provider (anthropic/openai/deepseek/google/ollama)")
+    t.add_row("/model [name|num]", "Show or switch model (use number for quick select)")
+    t.add_row("/provider [name]", "Show or switch provider")
     t.add_row("/mode [name]", "Show or switch planning mode (react / plan_execute / hierarchical)")
     t.add_row("/tools", "List available tools")
     t.add_row("/exit, /quit", "Exit")
@@ -955,22 +955,34 @@ def _show_help(console):
 def _available_models(config):
     """Return (available, unavailable) model entries based on API key presence.
 
-    Checks, in order: the entry's own api_key, the env var for that provider,
-    and finally ``config.provider.api_key`` (for entries of the same provider).
+    Merges built-in presets with user-defined custom providers.
     """
+    from synapse.config.schema import ModelEntry
     avail: list = []
     unavail: list = []
     main_key = config.provider.api_key
     main_provider = config.provider.provider
+
+    # Built-in presets
     for entry in config.provider.models:
         key = _effective_api_key(entry)
-        # fall back to the main config's api_key for same-provider entries
         if not key and entry.provider == main_provider:
             key = main_key
         if key or entry.provider == "ollama":
             avail.append(entry)
         else:
             unavail.append(entry)
+
+    # Custom providers → synthetic ModelEntry objects
+    for cp in config.provider.custom_providers:
+        key = cp.api_key or main_key
+        for model_name in cp.models:
+            entry = ModelEntry(provider=cp.name, model=model_name, api_key=cp.api_key, base_url=cp.base_url)
+            if key or cp.api_key:
+                avail.append(entry)
+            else:
+                unavail.append(entry)
+
     return avail, unavail
 
 
@@ -1287,47 +1299,62 @@ async def _main_interface(config_path: str | None = None):
                     print(f"Session path: {session_dir}")
             elif cmd == "/model":
                 if arg:
-                    # Switch model — must be in the available list.
+                    # arg can be a number (index) or a model name
                     avail, _ = _available_models(config)
-                    candidates = [e for e in avail if e.model == arg or f"{e.provider}/{e.model}" == arg]
-                    if not candidates:
-                        if use_rich:
-                            console.print(f"[red]'{arg}' is not available (no API key configured).[/red]")
-                            console.print("[dim]Use /model alone to see available models.[/dim]")
+                    if arg.isdigit():
+                        idx = int(arg) - 1
+                        if 0 <= idx < len(avail):
+                            entry = avail[idx]
+                            provider = entry.provider
+                            model = entry.model
+                            _synapse = None
+                            prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
+                            if use_rich:
+                                console.print(prefix)
+                            else:
+                                print(prefix)
                         else:
-                            print(f"'{arg}' is not available (no API key configured). Use /model to list.")
+                            if use_rich:
+                                console.print(f"[red]Invalid number. Use /model to see options (1-{len(avail)}).[/red]")
+                            else:
+                                print(f"Invalid number. Use /model to see options (1-{len(avail)}).")
                     else:
-                        entry = candidates[0]
-                        provider = entry.provider
-                        model = entry.model
-                        _synapse = None
-                        prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
-                        if use_rich:
-                            console.print(prefix)
+                        candidates = [e for e in avail if e.model == arg or f"{e.provider}/{e.model}" == arg]
+                        if not candidates:
+                            if use_rich:
+                                console.print(f"[red]'{arg}' is not available.[/red]")
+                                console.print("[dim]Use /model alone to see available models.[/dim]")
+                            else:
+                                print(f"'{arg}' is not available. Use /model to list.")
                         else:
-                            print(prefix)
+                            entry = candidates[0]
+                            provider = entry.provider
+                            model = entry.model
+                            _synapse = None
+                            prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
+                            if use_rich:
+                                console.print(prefix)
+                            else:
+                                print(prefix)
                 else:
-                    # Show current + available models.
+                    # Show current + numbered available models.
                     avail, unavail = _available_models(config)
                     if use_rich:
                         console.print(f"[bright_cyan]>[/bright_cyan] [bold]{provider}/{model}[/bold] [dim](current)[/dim]")
                         if avail:
-                            avail_lines = [
-                                f"  [green]{e.provider}/{e.model}[/green]"
-                                for e in avail if not (e.provider == provider and e.model == model)
-                            ]
-                            if avail_lines:
-                                console.print("[dim]Available:[/dim]")
-                                for line in avail_lines:
-                                    console.print(line)
+                            console.print("[dim]Available (type /model <number> or <name>):[/dim]")
+                            for i, e in enumerate(avail, 1):
+                                mark = " [dim](current)[/dim]" if (e.provider == provider and e.model == model) else ""
+                                base = f" [dim]({e.base_url})[/dim]" if getattr(e, "base_url", "") else ""
+                                console.print(f"  [bold bright_cyan]{i}.[/bold bright_cyan] [green]{e.provider}/{e.model}[/green]{base}{mark}")
                         if unavail:
                             console.print("[dim]Unconfigured (set API key to enable):[/dim]")
                             for e in unavail:
                                 console.print(f"  [bright_black]{e.provider}/{e.model}[/bright_black]")
                     else:
                         print(f"Current: {provider}/{model}")
-                        for e in avail:
-                            print(f"  {e.provider}/{e.model}" if not (e.provider == provider and e.model == model) else f"* {e.provider}/{e.model}")
+                        for i, e in enumerate(avail, 1):
+                            print(f"  {i}. {e.provider}/{e.model}" if not (e.provider == provider and e.model == model) else f"* {i}. {e.provider}/{e.model}")
             elif cmd == "/provider":
                 if not arg:
                     avail, _ = _available_models(config)

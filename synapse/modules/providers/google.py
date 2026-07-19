@@ -44,12 +44,16 @@ if _GOOGLE_AVAILABLE:
             api_key: str = "",
             max_tokens: int = 4096,
             timeout_seconds: int = 120,
+            base_url: str = "",
         ):
             self._model = model
             self._max_tokens = max_tokens
+            kwargs = dict(api_key=api_key if api_key else None)
+            if base_url:
+                kwargs["base_url"] = base_url
             self._client = genai.Client(
-                api_key=api_key if api_key else None,
                 http_options={"timeout": timeout_seconds * 1000},
+                **kwargs,
             )
 
         @property
