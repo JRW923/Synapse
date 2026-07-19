@@ -357,7 +357,7 @@ class ReActPlanner:
 
             tool_results.append((tc["id"], result))
 
-            # Feed tool results back as tool messages
+            # Feed tool results back as tool messages (after all tools executed)
             for tool_id, result in tool_results:
                 content = result.output if result.success else f"Error: {result.error}"
                 messages.append(Message(
