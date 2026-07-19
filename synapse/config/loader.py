@@ -12,9 +12,10 @@ def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
     Lookup order (when *config_path* is ``None``):
 
     1. ``./synapse.yaml``
-    2. Walk up the directory tree for ``synapse.yaml`` (like ``.git``)
-    3. ``~/.synapse/config.yaml``
-    4. Built-in defaults
+    2. Walk up the directory tree from CWD for ``synapse.yaml`` (like ``.git``)
+    3. Check the synapse package's parent directory (handles ``pip install -e .``)
+    4. ``~/.synapse/config.yaml``
+    5. Built-in defaults
 
     Returns ``(config, source)`` where *source* is the path that was loaded
     (or ``"defaults"`` if no file was found).
@@ -39,6 +40,20 @@ def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
                 if next_parent == parent:  # reached root
                     break
                 parent = next_parent
+
+            # Not found via CWD walk — try the package install directory.
+            # Works when the project was installed with ``pip install -e .``
+            # because then the package lives at ``<project>/synapse/``.
+            if found is None:
+                try:
+                    import synapse
+                    pkg_root = Path(synapse.__file__).resolve().parent.parent
+                    candidate = pkg_root / "synapse.yaml"
+                    if candidate.exists():
+                        found = candidate
+                except Exception:
+                    pass
+
             if found is not None:
                 path = found
             else:
