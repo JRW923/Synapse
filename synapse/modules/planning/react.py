@@ -337,6 +337,8 @@ class ReActPlanner:
                     thrash_stop = True
                     break
 
+                tool_results.append((tc["id"], result))
+
             if thrash_stop:
                 break
 
@@ -354,8 +356,6 @@ class ReActPlanner:
                 duration_ms=duration_ms,
                 files_touched=result.metadata.files_touched,
             ))
-
-            tool_results.append((tc["id"], result))
 
             # Feed tool results back as tool messages (after all tools executed)
             for tool_id, result in tool_results:
