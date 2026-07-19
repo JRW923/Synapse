@@ -358,6 +358,9 @@ class ReActPlanner:
             tool_results.append((tc["id"], result))
 
             # Feed tool results back as tool messages (after all tools executed)
+            import sys as _s3
+            _s3.stderr.write(f"[DEBUG] tool_results count={len(tool_results)} ids={[r[0][:20] for r in tool_results]}\n")
+            _s3.stderr.flush()
             for tool_id, result in tool_results:
                 content = result.output if result.success else f"Error: {result.error}"
                 messages.append(Message(
