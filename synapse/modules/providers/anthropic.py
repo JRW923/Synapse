@@ -76,15 +76,36 @@ class AnthropicProvider:
 
         Handles:
         - tool messages (role="tool") → Anthropic tool_result blocks
+        - consecutive tool messages are merged into one user message
+          (Anthropic requires ALL tool_results for an assistant's tool_uses
+          to appear in the immediately-following user message)
         - assistant messages with tool_calls → Anthropic tool_use blocks
-        - legacy [Tool xxx]: format for backward compatibility
         """
-        result = []
+        import itertools
+
+        # Group consecutive tool messages so they land in one user message.
+        merged: list = []
         for msg in messages:
             if msg.role == "system":
                 continue
+            if msg.role == "tool" and msg.tool_call_id and merged and merged[-1].get("role") == "user" and isinstance(merged[-1].get("content"), list):
+                # Append to the previous user tool_result message
+                merged[-1]["content"].append({
+                    "type": "tool_result",
+                    "tool_use_id": msg.tool_call_id,
+                    "content": msg.content,
+                })
+                continue
+            merged.append(msg)
 
-            # New-format tool result message
+        result = []
+        for msg in merged:
+            if isinstance(msg, dict):
+                # Already converted by the merge pass
+                result.append(msg)
+                continue
+
+            # tool message → user message with tool_result block(s)
             if msg.role == "tool" and msg.tool_call_id:
                 result.append({
                     "role": "user",
@@ -98,7 +119,7 @@ class AnthropicProvider:
                 })
                 continue
 
-            # New-format assistant message with tool_calls
+            # assistant message with tool_calls → tool_use blocks
             if msg.role == "assistant" and msg.tool_calls:
                 content_blocks = []
                 if msg.content:
@@ -114,7 +135,6 @@ class AnthropicProvider:
                 continue
 
             if msg.role == "user" and msg.content == "":
-                # Legacy tool result placeholder
                 continue
             result.append({"role": msg.role, "content": msg.content})
         return result
