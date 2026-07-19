@@ -620,3 +620,88 @@ CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
 | Tests | 172 |
 | 交互模式 | CLI run / CLI chat / Library API / HTTP Server |
 
+---
+
+## 2026-07-18 · CLI 主界面重构 & 启动优化
+
+### [ux] pico v3 风格主界面
+
+参考本地 `D:\File\pythonproject\pico` 的 v3 分支，将 `synapse` 无参主界面改造为 pico 风格：
+
+- **框式欢迎横幅**：`+===+` 边框 + 大脑半球 ASCII 艺术 + 单行 tagline（Synapse · subtitle · ready）
+- **两列信息行**：MODEL / VERSION / PROVIDER / PLANNING 标签用 `bright_magenta` 着色
+- **提示符**：`synapse> `（对标 pico 的 `pico> `）
+- **命令系统**：新增 `/memory`、`/session`，`/reset` 作为 `/clear` 别名
+- **Rich 色彩**：标签 `bright_magenta`、艺术 `bright_cyan`、边框 `bright_black`、副标题 `dim italic`、状态 `dim green`
+- **自适应宽度**：用 `os.get_terminal_size()` 检测终端列宽，动态计算边框和列宽
+
+### [ux] 双击 Ctrl+C 退出
+
+- **Windows**：`SetConsoleCtrlHandler` 注册回调，返回 `TRUE` 阻止 CMD 的 `Terminate batch job` 弹窗。第一次按 Ctrl+C 提示 `Press Ctrl+C again to exit.`，3 秒内再按直接 `ExitProcess(0)` 静默退出
+- **Unix**：`signal.SIGINT` handler 实现同样双击逻辑
+- **退出路径**：`/exit`、Ctrl+C、Ctrl+D 全部静默退出，`exiting` 标志阻止授权回调弹出多余提示
+
+**根因**：pyenv-win 的 `.bat` shim 导致 CMD 在批处理层面拦截 Ctrl+C。最终方案是在 PowerShell 中用 `synapse.ps1` 直接调 `python.exe` 全路径
+
+### [ux] 授权提示改进
+
+- 三选项：`[A]llow / [D]eny / [Y]es to all`
+- `[Y]es to all` 将该工具名加入永久白名单，同 session 不再询问
+- 不再显示原因和参数
+
+### [perf] 启动优化
+
+三次递进优化：
+
+1. `library.py`：provider 类改为 `importlib.import_module()` 惰性加载，eval/MCP 按需导入
+2. `cli.py`：所有 tools/memory/context/security/planning/provider 模块级 import 移入函数内（`build_container`、`_create_provider`、`_create_planner`）
+3. `_main_interface`：Synapse 实例创建延迟到首次用户输入（`_get_synapse()`），欢迎横幅秒出
+
+**效果**：模块导入从 ~72s 降到 ~100ms
+
+### [chore] `synapse setup` 命令
+
+- 自动检测 `sys.executable` 全路径
+- 在 `~/.local/bin/` 生成 `synapse.cmd`（CMD）+ `synapse.ps1`（PowerShell）启动器
+- 打印 PATH 配置和 PowerShell alias 指引
+
+### [feat] `synapse/__main__.py`
+
+支持 `python -m synapse` 直接启动
+
+### 当前状态
+
+| 指标 | 数值 |
+|------|------|
+| Commits | 65 |
+| Tests | 174 |
+
+---
+
+## 2026-07-19 · Token 经济性优化
+
+### [feat] Thrashing Early-Stop
+
+- 新增 `max_thrashing_events` 配置项（`PlanningConfig`，默认 2）
+- `ReActPlanner` 在 thrashing 事件超过阈值后主动终止循环，输出受影响的文件列表
+- 用 `thrash_stop` 标志跳出外层 `for iteration` 循环
+
+### [feat] Context Budget 接入 Agent
+
+- `ContextPartitioner` 和 `ContextCompactor` 注册到 IoC 容器
+- `Agent._build_context` 在获取 context 后调用 `partitioner.partition(context, budget)` 裁剪超限区块
+- 移除过时的 "Partitioner and compactor are currently standalone" 注释
+
+### [feat] Token 预算控制
+
+- 新增 `max_tokens_per_task` 配置项（`PlanningConfig`，默认 200,000）
+- `ReActPlanner` 每次 LLM 调用后检查累计 token：80% 时发出 `AgentProgress` 警告事件，100% 时终止并返回 `PARTIAL`
+- `/memory` 命令新增显示 `Est. tokens: {est} / {budget}`
+
+### 当前状态
+
+| 指标 | 数值 |
+|------|------|
+| Commits | 66 |
+| Tests | 174 |
+
