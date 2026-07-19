@@ -9,6 +9,13 @@ from synapse.config.schema import SynapseConfig
 def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
     """Load config from YAML file, with env var overrides.
 
+    Lookup order (when *config_path* is ``None``):
+
+    1. ``./synapse.yaml``
+    2. Walk up the directory tree for ``synapse.yaml`` (like ``.git``)
+    3. ``~/.synapse/config.yaml``
+    4. Built-in defaults
+
     Returns ``(config, source)`` where *source* is the path that was loaded
     (or ``"defaults"`` if no file was found).
     """
@@ -20,7 +27,22 @@ def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
     else:
         path = Path("synapse.yaml")
         if not path.exists():
-            path = Path.home() / ".synapse" / "config.yaml"
+            # Walk up the tree to find a project-level synapse.yaml
+            found: Path | None = None
+            parent = Path.cwd().resolve()
+            while True:
+                candidate = parent / "synapse.yaml"
+                if candidate.exists():
+                    found = candidate
+                    break
+                next_parent = parent.parent
+                if next_parent == parent:  # reached root
+                    break
+                parent = next_parent
+            if found is not None:
+                path = found
+            else:
+                path = Path.home() / ".synapse" / "config.yaml"
 
     if path.exists():
         raw = yaml.safe_load(path.read_text())
