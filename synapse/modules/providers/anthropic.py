@@ -81,55 +81,46 @@ class AnthropicProvider:
           to appear in the immediately-following user message)
         - assistant messages with tool_calls → Anthropic tool_use blocks
         """
-        result = []
+        # Step 1 — build intermediate list, grouping consecutive tool messages.
+        tmp: list[dict] = []
         for msg in messages:
             if msg.role == "system":
                 continue
-
-            # tool message → user message with tool_result block(s).
-            # If the previous entry is already a user-tool_result, append to it
-            # so that consecutive tool messages merge into one user message
-            # (required by Anthropic: all tool_results for an assistant's
-            #  tool_uses must appear in the immediately-following message).
             if msg.role == "tool" and msg.tool_call_id:
-                block = {
-                    "type": "tool_result",
-                    "tool_use_id": msg.tool_call_id,
-                    "content": msg.content,
-                }
-                if (result and isinstance(result[-1], dict)
-                        and result[-1].get("role") == "user"
-                        and isinstance(result[-1].get("content"), list)):
-                    # Skip if this tool_use_id already has a result in the merged message
-                    existing_ids = {b.get("tool_use_id") for b in result[-1]["content"]}
-                    if msg.tool_call_id not in existing_ids:
-                        result[-1]["content"].append(block)
+                block = {"type": "tool_result", "tool_use_id": msg.tool_call_id, "content": msg.content}
+                if (tmp and tmp[-1].get("role") == "user"
+                        and isinstance(tmp[-1].get("content"), list)):
+                    tmp[-1]["content"].append(block)
                 else:
-                    result.append({
-                        "role": "user",
-                        "content": [block],
-                    })
+                    tmp.append({"role": "user", "content": [block]})
                 continue
 
-            # assistant message with tool_calls → tool_use blocks
             if msg.role == "assistant" and msg.tool_calls:
-                content_blocks = []
+                blocks = []
                 if msg.content:
-                    content_blocks.append({"type": "text", "text": msg.content})
+                    blocks.append({"type": "text", "text": msg.content})
                 for tc in msg.tool_calls:
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc["id"],
-                        "name": tc["name"],
-                        "input": tc["input"],
-                    })
-                result.append({"role": "assistant", "content": content_blocks})
+                    blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["input"]})
+                tmp.append({"role": "assistant", "content": blocks})
                 continue
 
             if msg.role == "user" and msg.content == "":
                 continue
-            result.append({"role": msg.role, "content": msg.content})
-        return result
+            tmp.append({"role": msg.role, "content": msg.content})
+
+        # Step 2 — deduplicate tool_result IDs within each merged user message.
+        for entry in tmp:
+            c = entry.get("content")
+            if isinstance(c, list) and c and c[0].get("type") == "tool_result":
+                seen: set[str] = set()
+                deduped = []
+                for block in c:
+                    tid = block.get("tool_use_id", "")
+                    if tid and tid not in seen:
+                        seen.add(tid)
+                        deduped.append(block)
+                entry["content"] = deduped
+        return tmp
 
     def _parse_response(self, response) -> LLMResponse:
         """Parse Anthropic response into our LLMResponse format."""
