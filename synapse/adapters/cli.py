@@ -263,11 +263,11 @@ def build_container(config) -> Container:
     retriever = BasicContextRetriever()
     c.register(ContextRetriever, retriever)
 
-    # Context budget management (Phase 2)
+    # Context budget management
     partitioner = ContextPartitioner()
     compactor = ContextCompactor()
-    # Partitioner and compactor are currently standalone — they will be
-    # integrated into the Agent context pipeline in a future task.
+    c.register(ContextPartitioner, partitioner)
+    c.register(ContextCompactor, compactor)
 
     # Security
     sandbox = ProcessSandbox()
@@ -1098,12 +1098,16 @@ async def _main_interface():
                 else:
                     print("Session cleared.")
             elif cmd == "/memory":
+                est = session.estimated_tokens if session.messages else 0
+                budget = config.planning.max_tokens_per_task
                 if use_rich:
-                    console.print(f"[dim]Session: {len(session.messages)} messages[/dim]")
+                    console.print(f"[dim]Messages: {len(session.messages)}[/dim]")
+                    console.print(f"[dim]Est. tokens: {est} / {budget}[/dim]")
                     console.print(f"[dim]Provider: {provider}/{model}[/dim]")
                     console.print(f"[dim]Workspace: {Path.cwd()}[/dim]")
                 else:
-                    print(f"Session: {len(session.messages)} messages")
+                    print(f"Messages: {len(session.messages)}")
+                    print(f"Est. tokens: {est} / {budget}")
                     print(f"Provider: {provider}/{model}")
                     print(f"Workspace: {Path.cwd()}")
             elif cmd == "/session":

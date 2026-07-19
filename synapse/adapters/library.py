@@ -344,9 +344,11 @@ class Synapse:
         retriever = BasicContextRetriever()
         c.register(ContextRetriever, retriever)
 
-        # Context budget management (Phase 2)
+        # Context budget management
         partitioner = ContextPartitioner()
         compactor = ContextCompactor()
+        c.register(ContextPartitioner, partitioner)
+        c.register(ContextCompactor, compactor)
 
         # Security
         sandbox = ProcessSandbox()
@@ -442,6 +444,8 @@ class Synapse:
         react = ReActPlanner(
             max_iterations=cfg.max_iterations,
             thrashing_threshold=cfg.thrashing_threshold,
+            max_thrashing_events=cfg.max_thrashing_events,
+            max_tokens_per_task=cfg.max_tokens_per_task,
             auth=auth,
             confirm_callback=self._confirm_callback,
             total_timeout_seconds=cfg.total_timeout_seconds,

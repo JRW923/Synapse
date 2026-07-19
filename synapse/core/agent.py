@@ -6,7 +6,7 @@ from synapse.protocols.llm import LLMProvider
 from synapse.protocols.planner import Planner, AgentResult
 from synapse.protocols.tool import ToolRegistry
 from synapse.protocols.memory import MemoryStore, MemoryLevel, MemoryEntry, MemoryMetadata
-from synapse.protocols.retriever import ContextRetriever, ContextSource, Context
+from synapse.protocols.retriever import ContextRetriever, ContextSource, Context, ContextBudget
 from synapse.protocols.sandbox import Sandbox
 from synapse.core.events import EventBus
 
@@ -43,6 +43,20 @@ class Agent:
             except KeyError:
                 pass
 
+        # Optional context budget management
+        self._partitioner: object | None = None
+        self._compactor: object | None = None
+        try:
+            from synapse.modules.context.partitioner import ContextPartitioner
+            self._partitioner = container.resolve(ContextPartitioner)
+        except (KeyError, ImportError):
+            pass
+        try:
+            from synapse.modules.context.compactor import ContextCompactor
+            self._compactor = container.resolve(ContextCompactor)
+        except (KeyError, ImportError):
+            pass
+
     async def run(self, task: str, session: Session) -> AgentResult:
         # 1. Build context
         context = await self._build_context(task)
@@ -68,23 +82,29 @@ class Agent:
         return result
 
     async def _build_context(self, task: str):
-        """Assemble context from retriever + memory."""
+        """Assemble context from retriever + memory, then apply budget."""
         import asyncio
         from pathlib import Path
         try:
-            return await asyncio.wait_for(
+            context = await asyncio.wait_for(
                 self.retriever.retrieve(
                     task=task,
                     project_root=Path.cwd(),
                     tools=self.tools,
                     memory=self.memory,
                 ),
-                timeout=5,  # context 构建不应超过 5 秒
+                timeout=5,
             )
         except asyncio.TimeoutError:
-            # 大型目录下 grep/glob 可能很慢，返回空上下文比卡死好
             from synapse.protocols.retriever import Context
-            return Context()
+            context = Context()
+
+        # Apply budget if context is large and trimmer is available.
+        if self._partitioner is not None:
+            budget = ContextBudget()
+            context = self._partitioner.partition(context, budget)  # type: ignore[union-attr]
+
+        return context
 
     async def _persist_memory(self, session: Session, task: str, result: AgentResult) -> None:
         """Store task summary as session memory."""

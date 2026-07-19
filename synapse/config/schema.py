@@ -28,7 +28,9 @@ class PlanningConfig(BaseModel):
     """Planner configuration."""
     mode: str = "react"  # react | plan_execute | hierarchical
     max_iterations: int = 50
-    thrashing_threshold: int = 3
+    thrashing_threshold: int = 3         # file touch count to detect thrashing
+    max_thrashing_events: int = 2        # stop when this many thrashing events fire
+    max_tokens_per_task: int = 200_000   # stop task when total tokens exceed this
     total_timeout_seconds: int = 300
 
 

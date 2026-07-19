@@ -34,10 +34,14 @@ class ReActPlanner:
     mode = PlanningMode.REACT
 
     def __init__(self, max_iterations: int = 50, thrashing_threshold: int = 3,
+                 max_thrashing_events: int = 2,
+                 max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
                  verbose: bool = True):
         self.max_iterations = max_iterations
         self.thrashing_threshold = thrashing_threshold
+        self.max_thrashing_events = max_thrashing_events
+        self.max_tokens_per_task = max_tokens_per_task
         self.auth = auth  # ActionAuthorizer or None
         self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
         self.total_timeout_seconds = total_timeout_seconds
@@ -91,6 +95,8 @@ class ReActPlanner:
             message=f"Analyzing task with {len(tool_schemas)} tools available"
         ))
 
+        thrash_stop = False
+
         for iteration in range(1, self.max_iterations + 1):
             # Check total timeout budget
             elapsed = time.time() - start_time
@@ -128,6 +134,27 @@ class ReActPlanner:
                     self._log(f"LLM call attempt {attempt + 1} failed: {e}, retrying...")
             metrics.tokens_input += response.usage.get("input", 0)
             metrics.tokens_output += response.usage.get("output", 0)
+            total_tokens = metrics.tokens_input + metrics.tokens_output
+
+            # Token budget: 80 % warn, 100 % stop.
+            if self.max_tokens_per_task > 0:
+                ratio = total_tokens / self.max_tokens_per_task
+                if ratio >= 0.8 and ratio < 1.0:
+                    await event_bus.emit(AgentProgress(
+                        session_id=session.id, phase="token_budget",
+                        message=(
+                            f"Token budget at {int(ratio * 100)}% "
+                            f"({total_tokens}/{self.max_tokens_per_task})"
+                        ),
+                    ))
+                elif ratio >= 1.0:
+                    final_output = (
+                        f"Token budget exhausted "
+                        f"({total_tokens}/{self.max_tokens_per_task}). "
+                        f"Stopping to control costs."
+                    )
+                    result_status = ResultStatus.PARTIAL
+                    break
 
             self._log(
                 f"LLM responded: content={len(response.content)} chars, "
@@ -247,6 +274,23 @@ class ReActPlanner:
                             modification_count=file_touch_counts[f],
                         ))
                         metrics.thrashing_events += 1
+
+                # Early-stop: too many thrashing events → abort the whole task.
+                if metrics.thrashing_events >= self.max_thrashing_events:
+                    thrash_files = sorted(
+                        {f for f, c in file_touch_counts.items()
+                         if c >= self.thrashing_threshold}
+                    )
+                    final_output = (
+                        f"Thrashing detected on: {', '.join(thrash_files)}. "
+                        f"Stopping to prevent wasted tokens."
+                    )
+                    result_status = ResultStatus.PARTIAL
+                    thrash_stop = True
+                    break
+
+            if thrash_stop:
+                break
 
                 duration_ms = int((time.time() - t0) * 1000)
                 status_icon = "[OK]" if result.success else "[FAIL]"
