@@ -7,6 +7,42 @@ import sys
 import time as _time
 from pathlib import Path
 
+# Platform-specific key-input helpers for interactive selection
+if sys.platform == "win32":
+    import msvcrt as _msvcrt
+
+    def _get_key() -> str:
+        b = _msvcrt.getch()
+        if b in (b"\xe0", b"\x00"):  # arrow-key prefix
+            b2 = _msvcrt.getch()
+            if b2 == b"H": return "up"
+            if b2 == b"P": return "down"
+            return ""
+        try:
+            return b.decode("utf-8").lower()
+        except UnicodeDecodeError:
+            return ""
+else:
+    import termios as _termios
+    import tty as _tty
+
+    def _get_key() -> str:
+        fd = sys.stdin.fileno()
+        old = _termios.tcgetattr(fd)
+        try:
+            _tty.setraw(fd)
+            b = _os.read(fd, 3)
+        finally:
+            _termios.tcsetattr(fd, _termios.TCSADRAIN, old)
+        if b == b"\x1b[A": return "up"
+        if b == b"\x1b[B": return "down"
+        if b in (b"\r", b"\n"): return "enter"
+        if b == b"\x7f": return "backspace"
+        try:
+            return b.decode("utf-8").lower()
+        except UnicodeDecodeError:
+            return ""
+
 # ── Two-step Ctrl+C (double-press to exit) ───────────────────────────
 # Python's ``signal.signal(SIGINT, ...)`` on Windows is unreliable
 # because ``GenerateConsoleCtrlEvent`` / ``os.kill`` can terminate the
@@ -986,6 +1022,50 @@ def _available_models(config):
     return avail, unavail
 
 
+def _pick_model(entries, use_rich=True) -> int | None:
+    """Interactive arrow-key selector.  Returns the chosen index or None on Esc."""
+    n = len(entries)
+    if n == 0:
+        return None
+    idx = 0
+
+    def _render():
+        buf = "\x1b[?25l"  # hide cursor
+        buf += "\n  [dim]Use ↑↓ to move, Enter to select, Esc to cancel[/dim]\n"
+        for i, (label, _) in enumerate(entries):
+            if i == idx:
+                buf += f"\r\x1b[K  \x1b[1;36m> {label}\x1b[0m\n"
+            else:
+                buf += f"\r\x1b[K   {label}\n"
+        buf += f"\x1b[{n + 2}A"  # move cursor back up
+        _os.write(1, buf.encode())
+        _os.write(2, b"")  # flush
+
+    _render()
+    try:
+        while True:
+            key = _get_key()
+            if key == "up" and idx > 0:
+                idx -= 1
+                _render()
+            elif key == "down" and idx < n - 1:
+                idx += 1
+                _render()
+            elif key in ("enter", "\r", "\n", " "):
+                _os.write(1, b"\x1b[?25h\n")  # show cursor
+                return idx
+            elif key == "\x1b":  # Esc
+                _os.write(1, b"\x1b[?25h\n")
+                return None
+            elif key.isdigit():
+                num = int(key)
+                if 1 <= num <= n:
+                    _os.write(1, b"\x1b[?25h\n")
+                    return num - 1
+    finally:
+        _os.write(1, b"\x1b[?25h")  # ensure cursor visible
+
+
 # ---- First-run wizard -----------------------------------------------------
 
 
@@ -1299,62 +1379,52 @@ async def _main_interface(config_path: str | None = None):
                     print(f"Session path: {session_dir}")
             elif cmd == "/model":
                 if arg:
-                    # arg can be a number (index) or a model name
                     avail, _ = _available_models(config)
                     if arg.isdigit():
                         idx = int(arg) - 1
                         if 0 <= idx < len(avail):
                             entry = avail[idx]
-                            provider = entry.provider
-                            model = entry.model
+                            provider, model = entry.provider, entry.model
                             _synapse = None
                             prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
-                            if use_rich:
-                                console.print(prefix)
-                            else:
-                                print(prefix)
+                            if use_rich: console.print(prefix)
+                            else: print(prefix)
                         else:
-                            if use_rich:
-                                console.print(f"[red]Invalid number. Use /model to see options (1-{len(avail)}).[/red]")
-                            else:
-                                print(f"Invalid number. Use /model to see options (1-{len(avail)}).")
+                            if use_rich: console.print(f"[red]Invalid number (1-{len(avail)}).[/red]")
+                            else: print(f"Invalid number (1-{len(avail)}).")
                     else:
                         candidates = [e for e in avail if e.model == arg or f"{e.provider}/{e.model}" == arg]
-                        if not candidates:
-                            if use_rich:
-                                console.print(f"[red]'{arg}' is not available.[/red]")
-                                console.print("[dim]Use /model alone to see available models.[/dim]")
-                            else:
-                                print(f"'{arg}' is not available. Use /model to list.")
-                        else:
+                        if candidates:
                             entry = candidates[0]
-                            provider = entry.provider
-                            model = entry.model
+                            provider, model = entry.provider, entry.model
                             _synapse = None
                             prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
-                            if use_rich:
-                                console.print(prefix)
-                            else:
-                                print(prefix)
+                            if use_rich: console.print(prefix)
+                            else: print(prefix)
+                        else:
+                            if use_rich: console.print(f"[red]'{arg}' is not available.[/red]")
+                            else: print(f"'{arg}' is not available.")
                 else:
-                    # Show current + numbered available models.
                     avail, unavail = _available_models(config)
-                    if use_rich:
-                        console.print(f"[bright_cyan]>[/bright_cyan] [bold]{provider}/{model}[/bold] [dim](current)[/dim]")
-                        if avail:
-                            console.print("[dim]Available (type /model <number> or <name>):[/dim]")
-                            for i, e in enumerate(avail, 1):
-                                mark = " [dim](current)[/dim]" if (e.provider == provider and e.model == model) else ""
-                                base = f" [dim]({e.base_url})[/dim]" if getattr(e, "base_url", "") else ""
-                                console.print(f"  [bold bright_cyan]{i}.[/bold bright_cyan] [green]{e.provider}/{e.model}[/green]{base}{mark}")
-                        if unavail:
-                            console.print("[dim]Unconfigured (set API key to enable):[/dim]")
-                            for e in unavail:
-                                console.print(f"  [bright_black]{e.provider}/{e.model}[/bright_black]")
-                    else:
-                        print(f"Current: {provider}/{model}")
-                        for i, e in enumerate(avail, 1):
-                            print(f"  {i}. {e.provider}/{e.model}" if not (e.provider == provider and e.model == model) else f"* {i}. {e.provider}/{e.model}")
+                    if not avail:
+                        if use_rich: console.print("[red]No models available. Set an API key first.[/red]")
+                        else: print("No models available. Set an API key first.")
+                        continue
+                    # Build entries for interactive picker
+                    cur_idx = 0
+                    pick_entries = []
+                    for i, e in enumerate(avail):
+                        label = f"{e.provider}/{e.model}"
+                        if e.provider == provider and e.model == model:
+                            label += " [dim](current)[/dim]"
+                            cur_idx = i
+                        extra = getattr(e, "base_url", "")
+                        pick_entries.append((label, (e.provider, e.model, extra)))
+                    idx = _pick_model(pick_entries)
+                    if idx is not None:
+                        entry = avail[idx]
+                        provider, model = entry.provider, entry.model
+                        _synapse = None
             elif cmd == "/provider":
                 if not arg:
                     avail, _ = _available_models(config)
