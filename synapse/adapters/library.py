@@ -41,6 +41,11 @@ except ImportError:  # pragma: no cover
     HTTPTool = None  # type: ignore[assignment]
 
 try:
+    from synapse.modules.tools.web_search import WebSearchTool
+except ImportError:  # pragma: no cover
+    WebSearchTool = None  # type: ignore[assignment]
+
+try:
     from synapse.modules.tools.db import DBTool
 except ImportError:  # pragma: no cover
     DBTool = None  # type: ignore[assignment]
@@ -510,6 +515,10 @@ class Synapse:
             ShellTool(),
             GitTool(),
         ]
+
+        # Web search is always available (DuckDuckGo, no API key required).
+        if WebSearchTool is not None:
+            tools.append(WebSearchTool())
 
         if self._enable_external_tools:
             if HTTPTool is not None:

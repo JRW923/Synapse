@@ -432,7 +432,7 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
         try:
             loop = asyncio.get_running_loop()
 
-            _sys.stdout.write(f"\n  Auth: {tool_name}  [A]llow / [D]eny / [Y]es to all: ")
+            _sys.stdout.write(f"\n  [auth] {tool_name}  (a)llow / (d)eny / (y)es to all: ")
             _sys.stdout.flush()
 
             def _ask():
@@ -843,25 +843,79 @@ def main():
         pass
 
 
+# ---- Slash-command autocomplete ------------------------------------------
+
+#: (command, description) shown in the completion menu, in display order.
+_SLASH_COMMANDS: tuple = (
+    ("/help",     "Show this help"),
+    ("/memory",   "View working memory"),
+    ("/session",  "Show session path"),
+    ("/reset",    "Clear session state"),
+    ("/model",    "Show or switch model"),
+    ("/provider", "Show or switch provider"),
+    ("/mode",     "Switch planning mode"),
+    ("/tools",    "List available tools"),
+    ("/exit",     "Exit"),
+    ("/quit",     "Exit"),
+)
+_COMPLETION_LIMIT = 6  # max entries shown in the dropdown
+
+
+def _make_prompt_session():
+    """Build a prompt_toolkit session with slash-command completion, or None."""
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import Completer, Completion
+        from prompt_toolkit.formatted_text import HTML
+    except ImportError:
+        return None
+
+    class _SlashCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if not text.startswith("/"):
+                return
+            word = text.lstrip("/").lower()
+            # Exact-prefix filter, preserve declared order.
+            matches = [(c, d) for c, d in _SLASH_COMMANDS
+                       if c.lstrip("/").startswith(word)]
+            for cmd, desc in matches[:_COMPLETION_LIMIT]:
+                yield Completion(
+                    cmd,
+                    start_position=-len(text),
+                    display=cmd,
+                    display_meta=desc,
+                )
+
+    return PromptSession(completer=_SlashCompleter())
+
+
 # ---- Main interface -------------------------------------------------------
 
 
-#: Synapse ASCII art — brain hemispheres with synaptic stem.
+#: Synapse ASCII art — solid brain with synaptic stem.
 _WELCOME_ART = (
-    r"         ,--..__..--,",
-    r"       /    ..    .. \\",
-    r"      /  ,'  ``  ',  \\",
-    r"     (  (  o    o  )  )",
-    r"      \  `.  ..  .'  /",
-    r"       \    `--'    /",
-    r"        `..______..'",
-    r"           │    │",
-    r"      ─────┘    └─────",
+    r"        .-=========-.",
+    r"     .-'  #########  '-.",
+    r"    /   ###  o o  ###   \\",
+    r"   |   ####   ~   ####   |",
+    r"   |   #####     #####   |",
+    r"    \\  '###########'   /",
+    r"     '-.  '##### '   .-'",
+    r"        '-.__| |__.-'",
+    r"            |   |",
+    r"         ---+   +---",
 )
 
 _WELCOME_NAME = "Synapse"
 _WELCOME_SUBTITLE = "connecting ideas into code"
-_WELCOME_STATUS = "ready"
+_WELCOME_STATUS = "* ready"
+
+#: Brand palette — single place to tweak the CLI look.
+_BRAND = "bright_cyan"          # primary accent (art, name, prompt)
+_LABEL = "bold bright_cyan"     # field labels in the banner (same blue family)
+_BORDER = "cyan"                # box border — same blue tone as the art
+_HINT = "dim"                   # secondary text / hints
 
 
 def _middle(text: str, limit: int) -> str:
@@ -888,102 +942,113 @@ def _show_welcome(console, config, config_path: str = ""):
     # 宽度沿用 Console 创建时检测到的值（已在 _main_interface 用 OS API 设置）。
     width = max(getattr(console, "width", None) or 80, 40)
     inner = width - 4
-    gap = 3
+    gap = 4
+    # Label column: icon (2 cells) + label text; values take the rest.
+    label_w = 12
     left_w = (inner - gap) // 2
     right_w = inner - gap - left_w
 
     def _print_plain(text: str, **kwargs) -> None:
         console.print(text, **kwargs)
 
-    def _b(char: str = "=") -> str:
-        return f"+{char * (width - 2)}+"
+    def _b(char: str = "=") -> Text:
+        return Text(f"+{char * (width - 2)}+", style=_BORDER)
 
-    def _centered(body: str) -> str:
+    def _centered(body: str, style: str = "") -> Text:
         """Center *body* in the box.  Leading/trailing whitespace is stripped
         so that the visible content is centred, not the raw string."""
         stripped = body.strip()
-        if not stripped:
-            return f"| {'':<{inner}} |"
-        return f"| {_middle(stripped, inner).center(inner)} |"
+        content = _middle(stripped, inner).center(inner) if stripped else " " * inner
+        t = Text("| ")
+        t.append(content, style=style)
+        t.append(" |")
+        return t
 
-    def _pair_texts(l_label: str, l_val: str, r_label: str, r_val: str):
-        l_vis = f"{l_label:<9} {l_val}"
-        r_vis = f"{r_label:<9} {r_val}"
-        l_pad = _middle(l_vis, left_w).ljust(left_w)
-        r_pad = _middle(r_vis, right_w).ljust(right_w)
-        return l_pad, r_pad
+    def _row(*segments) -> None:
+        """Print one boxed row from styled Text segments."""
+        line = Text("| ")
+        vis = 0
+        for seg in segments:
+            line.append(seg)
+            vis += len(seg)
+        if vis < inner:
+            line.append(" " * (inner - vis))
+        line.append(" |")
+        console.print(line)
 
-    def _print_pair(l_label: str, l_val: str, r_label: str, r_val: str) -> None:
-        """Two-column row.  Labels are bright-magenta; values use default style
-        (forced via ``Text`` to prevent any bleed or Rich re-interpretation)."""
-        l_pad, r_pad = _pair_texts(l_label, l_val, r_label, r_val)
-        console.print(
-            "| ",
-            Text(l_pad[:9], style="bold bright_magenta"),
-            Text(l_pad[9:], style="default"),
-            " " * gap,
-            Text(r_pad[:9], style="bold bright_magenta"),
-            Text(r_pad[9:], style="default"),
-            " |",
-            sep="",
-        )
+    def _field(label: str, icon: str, value: str) -> Text:
+        """One 'icon LABEL value' field; label fixed-width, value truncated."""
+        t = Text()
+        t.append(f"{icon} ", style=_BRAND)
+        t.append(f"{label:<{label_w - 2}}", style=_LABEL)
+        t.append(_middle(str(value), 60))
+        return t
+
+    def _pair(l_label: str, l_icon: str, l_val: str,
+              r_label: str, r_icon: str, r_val: str) -> None:
+        """Two-column row with aligned label columns."""
+        l_field = _field(l_label, l_icon, l_val)
+        r_field = _field(r_label, r_icon, r_val)
+        # Truncate/justify by visible cell length.
+        l_vis = f"{l_icon} {l_label:<{label_w - 2}} {_middle(str(l_val), 60)}"
+        r_vis = f"{r_icon} {r_label:<{label_w - 2}} {_middle(str(r_val), 60)}"
+        l_field = l_field[:max(0, left_w)]
+        r_field = r_field[:max(0, right_w)]
+        l_cell = Text.assemble(l_field, " " * max(0, left_w - min(len(l_vis), left_w)))
+        r_cell = Text.assemble(r_field, " " * max(0, right_w - min(len(r_vis), right_w)))
+        _row(l_cell, Text(" " * gap), r_cell)
 
     # ── render ────────────────────────────────────────────────────────
-    _print_plain(_b("="), style="bright_black")
+    console.print(_b("="))
     for art_line in _WELCOME_ART:
-        _print_plain(_centered(art_line), style="bright_cyan")
+        console.print(_centered(art_line, style=_BRAND))
     # Name · subtitle · status on one line
-    tagline_plain = f"{_WELCOME_NAME}  ·  {_WELCOME_SUBTITLE}  ·  {_WELCOME_STATUS}"
+    tagline_plain = f"{_WELCOME_NAME}  |  {_WELCOME_SUBTITLE}  |  {_WELCOME_STATUS}"
     tagline_body = _middle(tagline_plain, inner).center(inner)
     tagline_rich = (
         tagline_body
-        .replace(_WELCOME_NAME, f"[bold bright_cyan]{_WELCOME_NAME}[/bold bright_cyan]")
+        .replace(_WELCOME_NAME, f"[bold {_BRAND}]{_WELCOME_NAME}[/bold {_BRAND}]")
         .replace(_WELCOME_SUBTITLE, f"[dim italic]{_WELCOME_SUBTITLE}[/dim italic]")
-        .replace(_WELCOME_STATUS, f"[dim green]{_WELCOME_STATUS}[/dim green]")
+        .replace(_WELCOME_STATUS, f"[green]{_WELCOME_STATUS}[/green]")
     )
-    _print_plain(f"| {tagline_rich} |")
-    _print_plain(_b("-"), style="bright_black")
-    _print_plain(f"| {'':<{inner}} |")
+    console.print(f"| {tagline_rich} |")
+    console.print(_b("-"))
+    _row(Text(""))
 
     # Workspace row
-    ws_full = f"WORKSPACE  {cwd}"
-    ws_body = _middle(ws_full, inner)
-    console.print(
-        "| ",
-        Text(ws_body[:9], style="bold bright_magenta"),
-        Text(ws_body[9:].ljust(inner - 9), style="default"),
-        " |",
-        sep="",
-    )
+    ws = _field("WORKSPACE", ">", cwd)
+    _row(ws[:inner])
 
-    _print_pair("MODEL", model, "VERSION", f"v{__version__}")
-    _print_pair("PROVIDER", provider, "PLANNING", config.planning.mode)
+    _pair("MODEL", "*", model, "VERSION", "#", f"v{__version__}")
+    _pair("PROVIDER", "@", provider, "PLANNING", "~", config.planning.mode)
     if config_path:
-        _print_plain(
-            f"|  [dim]config  {config_path}[/dim]{' ' * (inner - len('config  ' + config_path))} |"
-        )
+        cfg = Text()
+        cfg.append("% ", style=_BRAND)
+        cfg.append(_middle(f"config  {config_path}", inner - 2), style=_HINT)
+        _row(cfg)
 
-    _print_plain(f"| {'':<{inner}} |")
-    _print_plain(_centered("type /help for commands"), style="dim")
-    _print_plain(_b("="), style="bright_black")
+    _row(Text(""))
+    console.print(_centered("type /help for commands", style=_HINT))
+    console.print(_b("="))
 
 
 def _show_help(console):
     """Display available commands — pico style."""
     from rich.table import Table
     console.print()
-    t = Table(show_header=False, box=None, padding=(0, 2))
-    t.add_column(style="bold bright_cyan")
-    t.add_column(style="dim")
-    t.add_row("/help", "Show this help")
-    t.add_row("/memory", "View working memory")
-    t.add_row("/session", "Show session path")
-    t.add_row("/reset", "Clear session state")
-    t.add_row("/model [name|num]", "Show or switch model (use number for quick select)")
-    t.add_row("/provider [name]", "Show or switch provider")
-    t.add_row("/mode [name]", "Show or switch planning mode (react / plan_execute / hierarchical)")
-    t.add_row("/tools", "List available tools")
-    t.add_row("/exit, /quit", "Exit")
+    console.print(f"  [bold {_BRAND}]Commands[/bold {_BRAND}]  [{_HINT}]type a command, or just describe your task[/{_HINT}]")
+    t = Table(show_header=False, box=None, padding=(0, 2), pad_edge=False)
+    t.add_column(style=f"bold {_BRAND}", no_wrap=True)
+    t.add_column(style=_HINT)
+    t.add_row("  /help", "Show this help")
+    t.add_row("  /memory", "View working memory")
+    t.add_row("  /session", "Show session path")
+    t.add_row("  /reset", "Clear session state")
+    t.add_row("  /model [name|num]", "Show or switch model (number for quick select)")
+    t.add_row("  /provider [name]", "Show or switch provider")
+    t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical)")
+    t.add_row("  /tools", "List available tools")
+    t.add_row("  /exit, /quit", "Exit")
     console.print(t)
     console.print()
 
@@ -1069,17 +1134,17 @@ def _first_run_wizard(console, config) -> None:
     from synapse.config.schema import _PROVIDER_ENV_VARS
 
     console.print()
-    console.print("[bold bright_cyan]Welcome to Synapse![/bold bright_cyan]")
-    console.print("[dim]No API key found. Let's configure your first model.[/dim]")
+    console.print(f"  [bold {_BRAND}]Welcome to Synapse![/bold {_BRAND}]")
+    console.print(f"  [{_HINT}]No API key found. Let's configure your first model.[/{_HINT}]")
     console.print()
 
     # Show providers
     providers = sorted(_PROVIDER_ENV_VARS.keys())
-    console.print("[bold]Available providers:[/bold]")
+    console.print("  [bold]Available providers:[/bold]")
     for i, p in enumerate(providers, 1):
         env = _PROVIDER_ENV_VARS[p]
         hint = f"env: {env}" if env else "no key needed"
-        console.print(f"  [bold bright_cyan]{i}.[/bold bright_cyan] [bright_magenta]{p}[/bright_magenta] [dim]({hint})[/dim]")
+        console.print(f"  [bold {_BRAND}]{i}.[/bold {_BRAND}] [{_LABEL}]{p}[/{_LABEL}] [{_HINT}]({hint})[/{_HINT}]")
 
     while True:
         choice = console.input(f"\n  [bold]Pick one [1-{len(providers)}]:[/bold] ").strip()
@@ -1245,14 +1310,7 @@ async def _main_interface(config_path: str | None = None):
 
     try:
         from rich.console import Console
-        import shutil as _shutil
-        _cols = _shutil.get_terminal_size((80, 24)).columns
-        try:
-            import os as _os
-            _cols = _os.get_terminal_size().columns
-        except Exception:
-            pass
-        console = Console(force_terminal=True, width=_cols)
+        console = Console(force_terminal=True)  # width auto-detected per render
         use_rich = True
     except ImportError:
         console = None
@@ -1278,10 +1336,12 @@ async def _main_interface(config_path: str | None = None):
     # Mutable holders shared with the confirm callback.
     status_holder: list = []
     exiting: list = [False]
+    prompt_session = _make_prompt_session() if use_rich else None
 
     # Show the welcome banner immediately, before heavy imports.
     if use_rich:
         _show_welcome(console, config, config_source)
+        _last_cols = console.width
     else:
         print(f"输入任务开始工作，输入 /help 查看命令\n")
 
@@ -1307,9 +1367,20 @@ async def _main_interface(config_path: str | None = None):
         return _synapse
 
     while True:
+        # Re-render banner if terminal resized (font zoom changes column count).
+        if use_rich and console.width != _last_cols:
+            _last_cols = console.width
+            console.print()
+            _show_welcome(console, config, config_source)
+
         try:
-            if use_rich:
-                user_input = console.input("  [bold bright_cyan]synapse>[/bold bright_cyan] ")
+            if prompt_session is not None:
+                from prompt_toolkit.formatted_text import HTML
+                user_input = await prompt_session.prompt_async(
+                    HTML('<ansicyan><b>synapse &gt; </b></ansicyan>')
+                )
+            elif use_rich:
+                user_input = console.input(f"  [bold {_BRAND}]synapse > [/bold {_BRAND}]")
             else:
                 user_input = input("synapse> ")
         except EOFError:
@@ -1471,7 +1542,7 @@ async def _main_interface(config_path: str | None = None):
                 else:
                     print(prefix)
             elif cmd == "/tools":
-                tools = ["read", "write", "edit", "glob", "grep", "shell", "git"]
+                tools = ["read", "write", "edit", "glob", "grep", "shell", "git", "web_search"]
                 msg = f"[bright_cyan]>[/bright_cyan] [dim]{', '.join(tools)}[/dim]" if use_rich else f"Tools: {', '.join(tools)}"
                 if use_rich:
                     console.print(msg)
@@ -1489,16 +1560,70 @@ async def _main_interface(config_path: str | None = None):
             status = console.status("[dim]Thinking...[/dim]", spinner="dots")
             status.start()
             status_holder[:] = [status]
+            tokens = {"input": 0, "output": 0}
+            elapsed = {"start": _time.monotonic(), "label": "Thinking..."}
+
+            def _fmt_tokens() -> str:
+                t = tokens["input"] + tokens["output"]
+                if t >= 1000:
+                    return f"{t/1000:.1f}k"
+                return str(t)
+
+            def _fmt_elapsed() -> str:
+                s = _time.monotonic() - elapsed["start"]
+                if s < 60:
+                    return f"{s:.0f}s"
+                return f"{int(s//60)}m{int(s%60):02d}s"
+
+            def _render() -> str:
+                parts = [elapsed["label"]]
+                tok = tokens["input"] + tokens["output"]
+                if tok:
+                    parts.append(f"{_fmt_tokens()} tok")
+                parts.append(_fmt_elapsed())
+                return f"[dim]{'  ·  '.join(parts)}[/dim]"
+
+            async def _tick():
+                """Refresh spinner every 0.5s so the elapsed time stays live."""
+                try:
+                    while True:
+                        await asyncio.sleep(0.5)
+                        try:
+                            status.update(_render())
+                        except Exception:
+                            return
+                except asyncio.CancelledError:
+                    return
+
+            tick_task = asyncio.create_task(_tick())
+
+            def _set_label(text: str) -> None:
+                elapsed["label"] = text
+                try:
+                    status.update(_render())
+                except Exception:
+                    pass
 
             event_bus = synapse._container.resolve(EventBus)
             if event_bus is not None:
                 async def _on_progress(event):
-                    status.update(f"[dim]{event.message}[/dim]")
+                    msg = event.message
+                    # Parse "tokens=A+B" emitted by the planning loop.
+                    if msg.startswith("tokens="):
+                        try:
+                            a, b = msg[7:].split("+", 1)
+                            tokens["input"] = int(a)
+                            tokens["output"] = int(b)
+                            _set_label("Working...")
+                            return
+                        except (ValueError, IndexError):
+                            pass
+                    _set_label(msg)
                 async def _on_tool_started(event):
-                    status.update(f"[dim]{event.tool_name} ...[/dim]")
+                    _set_label(f"{event.tool_name} ...")
                 async def _on_tool_completed(event):
                     icon = "ok" if event.success else "FAIL"
-                    status.update(f"[dim]{event.tool_name} [{icon}] ({event.duration_ms}ms)[/dim]")
+                    _set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
                 event_bus.subscribe("agent_progress", _on_progress)
                 event_bus.subscribe("tool_call_started", _on_tool_started)
                 event_bus.subscribe("tool_call_completed", _on_tool_completed)
@@ -1520,6 +1645,14 @@ async def _main_interface(config_path: str | None = None):
             continue
         finally:
             if use_rich:
+                try:
+                    tick_task.cancel()
+                    try:
+                        await tick_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                except Exception:
+                    pass
                 try:
                     status.stop()
                 except Exception:

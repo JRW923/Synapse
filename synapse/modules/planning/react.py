@@ -209,6 +209,10 @@ class ReActPlanner:
                 f"tool_calls={len(response.tool_calls)}, "
                 f"tokens={metrics.tokens_input}+{metrics.tokens_output}"
             )
+            await event_bus.emit(AgentProgress(
+                session_id=session.id, phase="token_update",
+                message=f"tokens={metrics.tokens_input}+{metrics.tokens_output}",
+            ))
 
             # Add assistant response to messages
             messages.append(Message(
@@ -401,7 +405,9 @@ class ReActPlanner:
             "To create or modify files, call the 'write' or 'edit' tool directly. "
             "To read files, use 'read'. To search code, use 'grep' or 'glob'. "
             "To run commands, use 'shell'. "
-            "For web queries, prefer a single curl command over writing Python scripts. "
+            "For web search, call the 'web_search' tool with a query — "
+            "do NOT write Python scripts or use curl to call search engines. "
+            "Use 'web' only when you already have a specific URL to fetch. "
             "Always provide absolute paths when using file tools."
         )
         blocks.append(tools_instruction)
