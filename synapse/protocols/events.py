@@ -18,6 +18,7 @@ class EventType(str, Enum):
     PLAN_CREATED = "plan_created"
     TASK_DECOMPOSED = "task_decomposed"
     MERGE_RESULT = "merge_result"
+    CONTEXT_BLOCK_CITED = "context_block_cited"
 
 
 @dataclass(kw_only=True)
@@ -109,3 +110,12 @@ class MergeResult(BaseEvent):
     event_type: str = EventType.MERGE_RESULT
     subtask_count: int = 0
     merged_output: str = ""
+
+
+@dataclass(kw_only=True)
+class ContextBlockCited(BaseEvent):
+    """Phase 4 — emitted when an LLM response appears to cite a context block."""
+    event_type: str = EventType.CONTEXT_BLOCK_CITED
+    block_id: str
+    block_source: str
+    response_snippet: str = ""

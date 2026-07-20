@@ -1,9 +1,11 @@
 """Context Retriever Protocol."""
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Protocol
+import uuid
 
 
 class ContextSource(str, Enum):
@@ -27,6 +29,14 @@ class ContextBlock:
     token_count: int = 0
     expires_after_phase: bool = False
     trust_annotation: "TrustAnnotation | None" = None
+    # --- Phase E additions ---
+    id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    # When this block is a compacted/derived version of another, record the source id.
+    derived_from: str | None = None
+    # Phase 4 — citation tracking / attention heatmap
+    usage_count: int = 0       # how many LLM calls this block was sent in
+    citation_count: int = 0   # how many times LLM output cited content from this block
+    retrieved_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass

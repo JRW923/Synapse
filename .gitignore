@@ -34,3 +34,6 @@ synapse.yaml
 htmlcov/
 .coverage
 .pytest_cache/
+
+# Synapse runtime state
+.synapse/

@@ -291,7 +291,19 @@ class Synapse:
         if session is None:
             session = Session()
         agent = Agent(self._container)
+        self._last_agent = agent   # Phase 4 — retained for /context-report
         return await agent.run(task, session)
+
+    def get_citation_report(self) -> dict | None:
+        """Phase 4 — return the citation/usage report for the last run, or None."""
+        agent = getattr(self, "_last_agent", None)
+        if agent is None:
+            return None
+        tracker = getattr(agent, "_citation_tracker", None)
+        context = getattr(agent, "_last_context", None)
+        if tracker is None or context is None:
+            return None
+        return tracker.report(context)
 
     def run_sync(self, task: str) -> AgentResult:
         """Synchronous wrapper around :meth:`run`.
@@ -339,6 +351,10 @@ class Synapse:
         # Core infrastructure
         event_bus = EventBus()
         c.register(EventBus, event_bus)
+
+        # Make config available to components that need it (e.g. Agent reads ContextConfig).
+        from synapse.config.schema import SynapseConfig
+        c.register(SynapseConfig, self._config)
 
         # Audit log — tamper-evident event logging (Phase 2)
         audit_logger = AuditLogger(bus=event_bus)

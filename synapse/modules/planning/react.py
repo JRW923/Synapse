@@ -116,6 +116,12 @@ class ReActPlanner:
         metrics = ExecutionMetrics()
         file_touch_counts: dict[str, int] = {}
 
+        # Phase 4 — citation tracking (tracks which context blocks the LLM cites)
+        from synapse.modules.context.citation import CitationTracker
+        citation_tracker = CitationTracker()
+        citation_tracker.mark_usage(context)
+        self._last_citation_tracker = citation_tracker  # exposed to Agent
+
         # Build initial messages — reuse session history if available.
         # Repair incomplete tool chains first (critical for model switching).
         system_prompt = self._build_system_prompt(context)
@@ -213,6 +219,14 @@ class ReActPlanner:
                 session_id=session.id, phase="token_update",
                 message=f"tokens={metrics.tokens_input}+{metrics.tokens_output}",
             ))
+
+            # Phase 4 — track which context blocks this response cites.
+            try:
+                await citation_tracker.track_response(
+                    response.content, context, event_bus, session.id,
+                )
+            except Exception:
+                pass
 
             # Add assistant response to messages
             messages.append(Message(
@@ -394,7 +408,13 @@ class ReActPlanner:
         )
 
     def _build_system_prompt(self, context) -> str:
-        """Build system prompt from context blocks."""
+        """Build system prompt from all context zones.
+
+        Phase E: injects system → core → reference (overflow is not
+        injected — it is reserved for low-priority blocks that the
+        compactor processes). Each block is annotated with its source
+        so the LLM can gauge provenance.
+        """
         blocks = []
 
         # Add tools usage instruction
@@ -412,6 +432,47 @@ class ReActPlanner:
         )
         blocks.append(tools_instruction)
 
+        # SYSTEM zone — always injected as-is.
         for block in context.system:
             blocks.append(block.content)
+
+        # CORE zone — primary task-relevant context.
+        core_blocks = self._select_within_budget(context.core, max_tokens=4000)
+        if core_blocks:
+            blocks.append("## Core context")
+            for block in core_blocks:
+                blocks.append(self._format_block(block))
+
+        # REFERENCE zone — supporting material; trim if too large.
+        ref_blocks = self._select_within_budget(context.reference, max_tokens=3000)
+        if ref_blocks:
+            blocks.append("## Reference context")
+            for block in ref_blocks:
+                blocks.append(self._format_block(block))
+
         return "\n\n".join(blocks)
+
+    @staticmethod
+    def _format_block(block) -> str:
+        """Render a context block with its source provenance."""
+        source_tag = f"[from {block.source.value}]"
+        header = f"{source_tag} (priority={block.priority})"
+        return f"{header}\n{block.content}"
+
+    @staticmethod
+    def _select_within_budget(blocks, max_tokens: int):
+        """Pick blocks by priority descending until token budget exhausted."""
+        if not blocks:
+            return []
+        sorted_blocks = sorted(blocks, key=lambda b: -b.priority)
+        kept = []
+        running = 0
+        for b in sorted_blocks:
+            tc = b.token_count or (len(b.content) // 4)
+            if running + tc > max_tokens:
+                continue
+            kept.append(b)
+            running += tc
+        # Restore original order.
+        kept_ids = {b.id for b in kept}
+        return [b for b in blocks if b.id in kept_ids]

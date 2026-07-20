@@ -139,12 +139,16 @@ class PlanExecutePlanner:
         # Build planning messages with the dedicated planning system prompt
         system_prompt = PLANNING_SYSTEM_PROMPT
 
-        # Append any system context blocks
-        context_blocks = []
+        # Phase E: inject all context zones (system → core → reference)
+        context_parts = []
         for block in context.system:
-            context_blocks.append(block.content)
-        if context_blocks:
-            system_prompt += "\n\nRelevant context:\n" + "\n\n".join(context_blocks)
+            context_parts.append(block.content)
+        for block in context.core:
+            context_parts.append(f"[from {block.source.value}]\n{block.content}")
+        for block in context.reference:
+            context_parts.append(f"[from {block.source.value}]\n{block.content}")
+        if context_parts:
+            system_prompt += "\n\nRelevant context:\n" + "\n\n".join(context_parts)
 
         messages = [
             Message(role="system", content=system_prompt),

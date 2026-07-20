@@ -847,16 +847,17 @@ def main():
 
 #: (command, description) shown in the completion menu, in display order.
 _SLASH_COMMANDS: tuple = (
-    ("/help",     "Show this help"),
-    ("/memory",   "View working memory"),
-    ("/session",  "Show session path"),
-    ("/reset",    "Clear session state"),
-    ("/model",    "Show or switch model"),
-    ("/provider", "Show or switch provider"),
-    ("/mode",     "Switch planning mode"),
-    ("/tools",    "List available tools"),
-    ("/exit",     "Exit"),
-    ("/quit",     "Exit"),
+    ("/help",            "Show this help"),
+    ("/memory",          "View working memory"),
+    ("/session",         "Show session path"),
+    ("/reset",           "Clear session state"),
+    ("/model",           "Show or switch model"),
+    ("/provider",        "Show or switch provider"),
+    ("/mode",            "Switch planning mode"),
+    ("/tools",           "List available tools"),
+    ("/context-report",  "Context block citation heatmap"),
+    ("/exit",            "Exit"),
+    ("/quit",            "Exit"),
 )
 _COMPLETION_LIMIT = 6  # max entries shown in the dropdown
 
@@ -1048,8 +1049,112 @@ def _show_help(console):
     t.add_row("  /provider [name]", "Show or switch provider")
     t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical)")
     t.add_row("  /tools", "List available tools")
+    t.add_row("  /context-report", "Show context block citation / usage heatmap")
     t.add_row("  /exit, /quit", "Exit")
     console.print(t)
+    console.print()
+
+
+def _format_citation_summary(synapse) -> str:
+    """Phase 2 — one-line citation summary for the /memory command.
+
+    Returns e.g. 'system 2/3 cited · core 1/5 cited · reference 0/2 cited'
+    or empty string when no data is available.
+    """
+    if synapse is None:
+        return ""
+    try:
+        report = synapse.get_citation_report()
+    except Exception:
+        return ""
+    if not report:
+        return ""
+    blocks = report.get("blocks", [])
+    if not blocks:
+        return ""
+
+    # Aggregate per zone.
+    per_zone: dict[str, list[int]] = {}
+    for row in blocks:
+        z = row["zone"]
+        per_zone.setdefault(z, [0, 0])  # [cited, used]
+        per_zone[z][0] += row["cited"]
+        per_zone[z][1] += row["usage"]
+
+    parts = []
+    for zone in ("system", "core", "reference", "overflow"):
+        if zone in per_zone:
+            cited, used = per_zone[zone]
+            parts.append(f"{zone} {cited}/{used} cited")
+    return " · ".join(parts) if parts else ""
+
+
+def _show_context_report(console, synapse, use_rich: bool) -> None:
+    """Phase 4 — render the citation/usage heatmap for the last task."""
+    if synapse is None:
+        msg = "Run a task first — no context to report yet."
+        if use_rich:
+            console.print(f"[dim]{msg}[/dim]")
+        else:
+            print(msg)
+        return
+
+    try:
+        report = synapse.get_citation_report()
+    except Exception as e:
+        if use_rich:
+            console.print(f"[red]Failed to build report: {e}[/red]")
+        else:
+            print(f"Failed to build report: {e}")
+        return
+
+    if not report:
+        msg = "No citation data — run a task first."
+        if use_rich:
+            console.print(f"[dim]{msg}[/dim]")
+        else:
+            print(msg)
+        return
+
+    blocks = report.get("blocks", [])
+    if not blocks:
+        if use_rich:
+            console.print("[dim]No context blocks in the last run.[/dim]")
+        else:
+            print("No context blocks in the last run.")
+        return
+
+    from rich.table import Table
+    console.print()
+    console.print(f"  [bold {_BRAND}]Context heatmap[/bold {_BRAND}]  [{_HINT}]citation rate = cited / used[/{_HINT}]")
+    t = Table(show_header=True, box=None, padding=(0, 2), pad_edge=False)
+    t.add_column("Zone", style=f"bold {_BRAND}")
+    t.add_column("Source", style=_HINT)
+    t.add_column("Pri", justify="right")
+    t.add_column("Tokens", justify="right")
+    t.add_column("Used", justify="right")
+    t.add_column("Cited", justify="right")
+    t.add_column("Rate", style="green")
+
+    total_used = 0
+    total_cited = 0
+    for row in blocks:
+        t.add_row(
+            row["zone"],
+            row["source"],
+            str(row["priority"]),
+            str(row["tokens"]),
+            str(row["usage"]),
+            str(row["cited"]),
+            row["citation_rate"],
+        )
+        total_used += row["usage"]
+        total_cited += row["cited"]
+
+    console.print(t)
+    if total_used > 0:
+        rate = f"{total_cited}/{total_used} blocks cited"
+        console.print(f"  [{_HINT}]Overall: {rate}[/{_HINT}]")
     console.print()
 
 
@@ -1432,17 +1537,26 @@ async def _main_interface(config_path: str | None = None):
                     console.print(f"[dim]Est. tokens: {est} / {budget}[/dim]")
                     console.print(f"[dim]Provider: {provider}/{model}[/dim]")
                     console.print(f"[dim]Workspace: {Path.cwd()}[/dim]")
+                    # Phase 2 — show citation rate per zone from the last task.
+                    citation_line = _format_citation_summary(_synapse)
+                    if citation_line:
+                        console.print(f"[{_HINT}]Context: {citation_line}[/{_HINT}]")
                 else:
                     print(f"Messages: {len(session.messages)}")
                     print(f"Est. tokens: {est} / {budget}")
                     print(f"Provider: {provider}/{model}")
                     print(f"Workspace: {Path.cwd()}")
+                    citation_line = _format_citation_summary(_synapse)
+                    if citation_line:
+                        print(f"Context: {citation_line}")
             elif cmd == "/session":
                 session_dir = Path.cwd() / ".synapse" / "sessions"
                 if use_rich:
                     console.print(f"[dim]Session path: {session_dir}[/dim]")
                 else:
                     print(f"Session path: {session_dir}")
+            elif cmd == "/context-report":
+                _show_context_report(console, _synapse, use_rich)
             elif cmd == "/model":
                 if arg:
                     avail, _ = _available_models(config)

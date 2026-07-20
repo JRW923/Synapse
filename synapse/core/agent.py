@@ -57,15 +57,33 @@ class Agent:
         except (KeyError, ImportError):
             pass
 
+        # Phase E — context config (optional, falls back to defaults)
+        self._context_cfg = None
+        try:
+            from synapse.config.schema import SynapseConfig
+            self._context_cfg = container.resolve(SynapseConfig)
+        except (KeyError, ImportError):
+            pass
+
+        # Phase 3 — dynamic budget allocation (classifier + history)
+        from synapse.modules.context.budget import BudgetHistory
+        self._budget_history = BudgetHistory(project_memory=self.memory)
+        self._last_task_type = None
+
+        # Phase 4 — citation tracking state, populated during run().
+        self._citation_tracker = None
+        self._last_context = None
+
     async def run(self, task: str, session: Session) -> AgentResult:
-        # 1. Build context
-        context = await self._build_context(task)
+        # 1. Build context (Phase 3: task type drives budget selection)
+        context = await self._build_context(task, session)
+        self._last_context = context  # Phase 4 — retain for /context-report
 
         # 2. Annotate context with trust levels (Phase 3)
         if self._injection_guard is not None:
             context = self._injection_guard.annotate(context)  # type: ignore[union-attr]
 
-        # 3. Delegate to planner
+        # 3. Delegate to planner (which will populate _citation_tracker)
         result = await self._planner.execute(
             task=task,
             context=context,
@@ -76,15 +94,75 @@ class Agent:
             event_bus=self.event_bus,
         )
 
+        # Pick up the citation tracker the planner created, if any.
+        self._citation_tracker = getattr(self._planner, "_last_citation_tracker", None)
+
+        # Phase 3 — record citation history for adaptive budget tuning.
+        if self._citation_tracker is not None and self._last_task_type is not None:
+            try:
+                report = self._citation_tracker.report(context)
+                await self._budget_history.record(self._last_task_type, report)
+            except Exception:
+                pass
+
         # 4. Persist session memory
         await self._persist_memory(session, task, result)
 
         return result
 
-    async def _build_context(self, task: str):
-        """Assemble context from retriever + memory, then apply budget."""
+    def _build_budget(self, task: str = "") -> "ContextBudget":
+        """Construct a ContextBudget from config + task classification.
+
+        Phase 3: classifies the task, picks the static profile, then
+        applies historical adjustments if enough samples exist.
+        """
+        from synapse.protocols.retriever import ContextBudget
+        from synapse.modules.context.classifier import classify_task, TaskType
+        from synapse.modules.context.budget import select_budget
+
+        if self._context_cfg is None:
+            # No config — use the classifier against default total.
+            task_type = classify_task(task) if task else TaskType.UNKNOWN
+            self._last_task_type = task_type
+            return select_budget(task_type, total_tokens=100_000)
+
+        cfg = self._context_cfg.context
+        total = cfg.total_tokens
+        if total <= 0:
+            total = self._context_cfg.planning.max_tokens_per_task
+
+        task_type = classify_task(task) if task else TaskType.UNKNOWN
+        self._last_task_type = task_type
+        base = select_budget(task_type, total)
+
+        # Apply historical adjustments (no-op until enough samples).
+        return self._budget_history.suggest_adjustment(task_type, base)
+
+    def _resolve_compactor(self, overflow_chars: int):
+        """Pick the compactor based on config strategy and overflow size."""
+        from synapse.modules.context.compactor import ContextCompactor as _Trunc
+        if self._context_cfg is None:
+            return self._compactor if self._compactor is not None else _Trunc()
+        strategy = self._context_cfg.context.compaction_strategy
+        if strategy == "off":
+            return None
+        if strategy == "llm" and overflow_chars > self._context_cfg.context.llm_compact_threshold_chars:
+            try:
+                from synapse.modules.context.llm_compactor import LLMCompactor
+                return LLMCompactor(llm=self.llm, fallback=_Trunc())
+            except ImportError:
+                return _Trunc()
+        # truncation (default)
+        return _Trunc()
+
+    async def _build_context(self, task: str, session: Session = None):
+        """Assemble context: retrieve → compact(overflow) → partition."""
         import asyncio
         from pathlib import Path
+        from synapse.protocols.retriever import Context, ContextBlock, ContextSource
+
+        budget = self._build_budget(task)
+
         try:
             context = await asyncio.wait_for(
                 self.retriever.retrieve(
@@ -92,19 +170,57 @@ class Agent:
                     project_root=Path.cwd(),
                     tools=self.tools,
                     memory=self.memory,
+                    budget=budget,
                 ),
-                timeout=5,
+                timeout=10,
             )
         except asyncio.TimeoutError:
-            from synapse.protocols.retriever import Context
-            context = Context()
+            # Fallback: minimal SYSTEM-only context (read README/AGENTS.md).
+            await self.event_bus.emit(self._fallback_context_event(session, task))
+            context = self._fallback_context()
 
-        # Apply budget if context is large and trimmer is available.
+        # Compact overflow before partitioning.
+        overflow_chars = sum(len(b.content) for b in context.overflow)
+        compactor = self._resolve_compactor(overflow_chars)
+        if compactor is not None and context.overflow:
+            context = compactor.compact(context, budget)
+
+        # Apply budget via partitioner.
         if self._partitioner is not None:
-            budget = ContextBudget()
             context = self._partitioner.partition(context, budget)  # type: ignore[union-attr]
 
         return context
+
+    def _fallback_context(self) -> "Context":
+        """Minimal SYSTEM-only context when retrieval times out."""
+        from synapse.protocols.retriever import Context, ContextBlock, ContextSource
+        from pathlib import Path
+
+        system: list[ContextBlock] = []
+        cwd = Path.cwd()
+        for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
+            p = cwd / name
+            if p.exists():
+                try:
+                    content = p.read_text(encoding="utf-8", errors="ignore")[:4000]
+                    system.append(ContextBlock(
+                        content=content,
+                        source=ContextSource.MEMORY,
+                        priority=9,
+                        token_count=len(content) // 4,
+                    ))
+                except Exception:
+                    pass
+        return Context(system=system)
+
+    async def _fallback_context_event(self, session, task: str):
+        """Emit a warning event when retrieval times out."""
+        from synapse.protocols.events import AgentProgress
+        return AgentProgress(
+            session_id=session.id if session else "",
+            phase="context_timeout",
+            message="Context retrieval timed out; using minimal system context.",
+        )
 
     async def _persist_memory(self, session: Session, task: str, result: AgentResult) -> None:
         """Store task summary as session memory."""

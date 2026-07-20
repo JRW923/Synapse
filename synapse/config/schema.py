@@ -100,6 +100,22 @@ class PlanningConfig(BaseModel):
     total_timeout_seconds: int = 300
 
 
+class ContextConfig(BaseModel):
+    """Context engineering configuration (Phase E)."""
+    # Total token budget for context assembly. 0 = inherit from planning.max_tokens_per_task.
+    total_tokens: int = 0
+    # Four-zone percentage split. Must sum to ~1.0.
+    system_pct: float = 0.15
+    core_pct: float = 0.50
+    reference_pct: float = 0.25
+    overflow_pct: float = 0.10
+    # Compaction strategy for OVERFLOW blocks.
+    # truncation | llm | off  (llm uses LLMCompactor with fallback to truncation)
+    compaction_strategy: str = "truncation"
+    # Only invoke LLM compactor when overflow total chars exceed this threshold.
+    llm_compact_threshold_chars: int = 1000
+
+
 class SecurityConfig(BaseModel):
     """Security configuration."""
     sandbox_enabled: bool = True
@@ -114,3 +130,4 @@ class SynapseConfig(BaseModel):
     tools: ToolsConfig = ToolsConfig()
     planning: PlanningConfig = PlanningConfig()
     security: SecurityConfig = SecurityConfig()
+    context: ContextConfig = ContextConfig()

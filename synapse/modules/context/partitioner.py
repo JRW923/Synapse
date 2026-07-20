@@ -46,17 +46,20 @@ class ContextPartitioner:
 
     @staticmethod
     def _trim_zone(blocks: list[ContextBlock], token_budget: int) -> list[ContextBlock]:
-        """Trim a zone's blocks to fit within token_budget by dropping lowest priority.
+        """Trim a zone's blocks to fit within token_budget (knapsack-style).
 
-        Blocks are sorted by priority ascending (lowest first = easiest to evict).
-        The lowest-priority blocks are removed until the total fits the budget.
+        Blocks are sorted by priority DESCENDING (highest priority first =
+        hardest to evict). We greedily keep blocks that fit; when one
+        doesn't fit we continue scanning for smaller blocks that might.
+        This fixes the previous `break` bug which dropped higher-priority
+        blocks that appeared later in the sort order.
         """
         total = sum(b.token_count for b in blocks)
         if total <= token_budget:
             return list(blocks)
 
-        # Sort by priority ascending — lowest priority first (easiest to drop)
-        sorted_blocks = sorted(blocks, key=lambda b: b.priority)
+        # Highest priority first; preserve original order for ties via stable sort.
+        sorted_blocks = sorted(blocks, key=lambda b: -b.priority)
 
         kept: list[ContextBlock] = []
         running = 0
@@ -64,7 +67,9 @@ class ContextPartitioner:
             if running + block.token_count <= token_budget:
                 kept.append(block)
                 running += block.token_count
-            else:
-                break  # budget exhausted; remaining (higher priority in sorted order) dropped
+            # else: skip this block but keep scanning — a later (smaller)
+            # block at the same or lower priority may still fit.
 
-        return kept
+        # Restore original insertion order for downstream consumers.
+        kept_ids = {b.id for b in kept}
+        return [b for b in blocks if b.id in kept_ids]

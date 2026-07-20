@@ -22,7 +22,11 @@ class TestContextCompactor:
     """Unit tests for ContextCompactor.compact()."""
 
     def test_compactor_truncates_overflow(self):
-        """OVERFLOW blocks longer than 500 chars should be truncated."""
+        """OVERFLOW blocks longer than 500 chars should be truncated.
+
+        Phase E: source is now preserved (not overwritten to MEMORY);
+        derived_from records the original block id.
+        """
         long_content = "x" * 1200
         ctx = Context(
             overflow=[
@@ -42,7 +46,9 @@ class TestContextCompactor:
         block = result.overflow[0]
         assert len(block.content) <= 500 + len("...[truncated]")
         assert block.content.endswith("...[truncated]")
-        assert block.source == ContextSource.MEMORY
+        # Phase E: provenance preserved, not overwritten to MEMORY.
+        assert block.source == ContextSource.GLOB
+        assert block.derived_from is not None
 
     def test_compactor_preserves_core(self):
         """CORE blocks must not be modified by compaction."""

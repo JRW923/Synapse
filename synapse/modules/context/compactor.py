@@ -1,14 +1,14 @@
 """Context Compactor — summarization-based compression of low-priority blocks.
 
-Phase 2: simple truncation of OVERFLOW blocks (no LLM summarization yet).
-Full LLM summarization comes in Phase 3.
+Phase 0 (E): truncation with provenance preservation — derived_from records
+the original block id, source is preserved (not overwritten to MEMORY).
+Phase 1 (E): LLMCompactor subclass in llm_compactor.py adds LLM summarization.
 """
 
 from synapse.protocols.retriever import (
     Context,
     ContextBlock,
     ContextBudget,
-    ContextSource,
 )
 
 
@@ -20,9 +20,10 @@ TRUNCATION_SUFFIX = "...[truncated]"
 class ContextCompactor:
     """Compresses OVERFLOW blocks to fit within budget constraints.
 
-    Phase 2 strategy: truncate OVERFLOW block content to the first 500
-    characters and append a truncation marker. Compressed blocks are
-    re-tagged with source=MEMORY. All other zones pass through unchanged.
+    Default strategy: truncate OVERFLOW block content to the first
+    TRUNCATION_LIMIT characters and append a truncation marker. The
+    resulting block preserves the original `source` and records the
+    original block's id in `derived_from`. All other zones pass through.
     """
 
     def compact(self, context: Context, budget: ContextBudget) -> Context:
@@ -30,12 +31,11 @@ class ContextCompactor:
 
         Args:
             context: The source Context to compact.
-            budget: The token budget (unused in Phase 2 — full LLM
-                    summarization in Phase 3 will use it).
+            budget: The token budget (unused by truncation strategy).
 
         Returns:
-            A new Context with OVERFLOW blocks truncated and re-tagged.
-            SYSTEM, CORE, and REFERENCE zones are passed through unchanged.
+            A new Context with OVERFLOW blocks truncated. SYSTEM, CORE,
+            and REFERENCE zones are passed through unchanged.
         """
         return Context(
             system=list(context.system),
@@ -46,11 +46,12 @@ class ContextCompactor:
 
     @staticmethod
     def _compact_block(block: ContextBlock) -> ContextBlock:
-        """Truncate a single OVERFLOW block and re-tag as MEMORY.
+        """Truncate a single OVERFLOW block, preserving provenance.
 
         If the block's content exceeds TRUNCATION_LIMIT characters, it is
         truncated to the first TRUNCATION_LIMIT characters and the suffix
-        is appended. The source is always updated to ContextSource.MEMORY.
+        is appended. `source` is preserved; `derived_from` records the
+        original block id.
         """
         content = block.content
         if len(content) > TRUNCATION_LIMIT:
@@ -58,8 +59,10 @@ class ContextCompactor:
 
         return ContextBlock(
             content=content,
-            source=ContextSource.MEMORY,
+            source=block.source,                    # preserve provenance
             priority=block.priority,
-            # Rough token estimate for truncated content
             token_count=len(content) // 4,
+            derived_from=block.id,                  # link to original
+            expires_after_phase=block.expires_after_phase,
+            trust_annotation=block.trust_annotation,
         )
