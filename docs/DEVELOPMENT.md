@@ -799,3 +799,173 @@ CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
 | Tests | 174 |
 | 工具总数 | 11（+web_search） |
 
+---
+
+## 2026-07-20 · 上下文工程深度优化（Phase 0-4）
+
+### [design] 调研与方案
+
+调研发现当前上下文工程存在 8 个关键问题：planner 只消费 `context.system`、`core/reference/overflow` 完全被忽略；`ContextCompactor` 注册了但从未调用；budget 硬编码 100k 与 `max_tokens_per_task=200k` 脱钩；5s 超时返回空 Context；Compactor 截断 500 字符且覆盖 source；Partitioner `_trim_zone` 有 break bug 等。
+
+方案分 5 阶段实施，本次会话完成 Phase 0 + 1 + 2 + 3 + 4 全部。
+
+### [feat] Phase 0 · 前置修复（地基）
+
+让四区真正流到 LLM，让 compactor 真正运行，让 budget 跟随配置。
+
+**0.1 planner 接入四区**（`react.py`, `plan_execute.py`）
+- `_build_system_prompt` 不再只拼 `context.system`，按 `system → core → reference` 顺序注入
+- 每个 block 带 `[from <source>]` 标注，让 LLM 感知 provenance
+- CORE 区 token 预算 4000，REFERENCE 区 3000，超出按 priority 降序裁剪
+- OVERFLOW 内容不注入 LLM prompt
+
+**0.2 Agent 调用 Compactor**（`agent.py:_build_context`）
+- 流程改为 `retrieve → compact(overflow) → partition`
+- Compactor 在 Partitioner 之前运行
+
+**0.3 Budget 配置化**（`schema.py`, `agent.py`）
+- 新增 `ContextConfig`（在 `SynapseConfig.context`）：`total_tokens`（0 时继承 `planning.max_tokens_per_task`）、四区百分比、`compaction_strategy`（`truncation` | `llm` | `off`）、`llm_compact_threshold_chars`
+- `Agent._build_budget(task)` 从 config 取 budget，不再硬编码
+
+**0.4 修 partitioner knapsack bug**（`partitioner.py:_trim_zone`）
+- 旧逻辑：按 priority 升序排，遇到放不下的就 `break`，导致后续更小的块即使能放下也被丢弃
+- 新逻辑：按 priority 降序排（高优先级先保留），放不下也继续扫描后续更小的块
+- 保留原始插入顺序
+
+**0.5 超时回退**（`agent.py`）
+- 5s → 10s
+- 超时不再返回空 Context，改为返回只含 SYSTEM 的最小 Context（读 AGENTS.md/CLAUDE.md/README.md）
+- 并发 `AgentProgress(phase="context_timeout")` 警告事件
+
+**0.6 保留 provenance**（`compactor.py` + `retriever.py`）
+- 压缩后生成新 block，新增 `derived_from` 字段记录原 block id
+- 不再覆盖 `source` 为 `MEMORY`，保留原始 source
+- `ContextBlock` 加 `id` 字段
+
+### [feat] Phase 1 · LLM 驱动智能摘要
+
+**LLMCompactor**（`synapse/modules/context/llm_compactor.py`）
+- 对每个 overflow block 调 LLM 生成紧凑摘要，prompt 要求保留文件路径/符号/关键发现
+- content hash 缓存避免重复调用
+- LLM 失败自动回退到 `TruncationCompactor`
+- 输入硬限 8000 字符，摘要软限 1500 字符
+- 通过 `ContextConfig.compaction_strategy = "llm"` 启用，默认仍 `truncation`
+- 触发阈值：仅当 overflow 总量 > `llm_compact_threshold_chars`（默认 1000）时才用 LLM
+
+### [feat] Phase 2 · 引用率追踪（RAG 评估基础）
+
+**ContextBlock 加字段**（`retriever.py`）
+- `id: str` — uuid hex 前 8 位
+- `usage_count: int` — 被 LLM 调用次数
+- `citation_count: int` — 被 LLM 响应引用次数
+- `retrieved_at: datetime` — 检索时间戳
+
+**CitationTracker**（`synapse/modules/context/citation.py`）
+- `mark_usage(context)` — 在 planner 把 context 发给 LLM 前调用，递增每个 block 的 `usage_count`
+- `track_response(response_content, context, event_bus, session_id)` — LLM 响应后扫描内容：
+  - 从每个 block 提取"信号"（文件路径、`def/class` 符号名、≥12 字符的特征行）
+  - 信号在 response 中出现 → 递增 `citation_count`，发 `ContextBlockCited` 事件
+  - 每个 block 最多测试 5 个信号，避免性能开销
+  - 偏好精确而非召回：citation_count 是下界
+
+**ContextBlockCited 事件**（`events.py`）
+- 新增 `EventType.CONTEXT_BLOCK_CITED = "context_block_cited"`
+- 事件载荷：`block_id`、`block_source`、`response_snippet`（响应前 200 字符）
+
+**`/memory` 命令展示引用率**
+- 在原有 messages/tokens/provider/workspace 信息后追加 citation 汇总一行
+- 显示格式：`Context: system 2/3 cited · core 1/5 cited · reference 0/2 cited`
+
+### [feat] Phase 3 · 动态预算分配
+
+**3.1 任务类型分类器**（`synapse/modules/context/classifier.py`）
+- `TaskType` enum：`TEST / REFACTOR / DEBUG / FEATURE / DOC / UNKNOWN`
+- `classify_task(task)` — 规则分类，首匹配优先，顺序 DEBUG → TEST → REFACTOR → DOC → FEATURE
+- 中英文关键词都支持（`测试`/`修复`/`重构`/`新增`/`调试`/`报错`/`文档` 等）
+- DEBUG 排在 TEST 前：`fix failing test` 判为 DEBUG（在调试失败用例，而非编写新测试）
+
+**3.2 预算策略表**（`synapse/modules/context/budget.py`）
+- `TASK_BUDGET_PROFILES` — 6 种静态 profile，每种 TaskType 对应不同四区比例：
+
+| TaskType | system | core | reference | overflow | 理由 |
+|----------|--------|------|-----------|----------|------|
+| TEST | 0.10 | 0.40 | 0.40 | 0.10 | 需大量参考既有测试 |
+| REFACTOR | 0.15 | 0.60 | 0.20 | 0.05 | 重构以核心代码为主 |
+| DEBUG | 0.10 | 0.30 | 0.50 | 0.10 | 调试需广参考定位 |
+| FEATURE | 0.15 | 0.50 | 0.25 | 0.10 | 默认均衡 |
+| DOC | 0.20 | 0.30 | 0.40 | 0.10 | 文档需既有内容参考 |
+| UNKNOWN | 0.15 | 0.50 | 0.25 | 0.10 | 同 FEATURE |
+
+- `select_budget(task_type, total_tokens)` — 根据 TaskType 选 profile 构造 `ContextBudget`
+
+**3.3 Agent 接入分类器**（`agent.py:_build_budget`）
+- `_build_budget(task)` — 先 `classify_task(task)`，再 `select_budget(task_type, total)`，最后 `suggest_adjustment` 应用历史反馈
+- `_last_task_type` 保留供 `run()` 末尾记录历史
+
+**3.4 历史反馈**（`BudgetHistory` 类，`budget.py`）
+- `record(task_type, citation_report)` — 任务结束记录该类型的引用率汇总，持久化到 `ProjectMemory`
+- `suggest_adjustment(task_type, base_budget)` — 样本数 ≥ 3 后根据各 zone 引用率与均值差异微调 profile，每 zone 变化严格 cap 在 ±5%
+- 冷启动：样本不足时返回 base 不变
+
+### [feat] Phase 4 · 注意力热力图
+
+**Agent 保留上下文状态**（`agent.py`）
+- `self._last_context` — 保留最后一次 build 的 context
+- `self._citation_tracker` — 从 planner 拿到 tracker
+- 任务结束调用 `BudgetHistory.record()` 累积历史
+
+**`Synapse` facade 暴露 `get_citation_report()`**（`library.py`）
+- 返回最近一次任务的引用率报告，供 CLI 调用
+
+**`/context-report` 命令**（`cli.py`）
+- 新增 `_show_context_report(console, synapse, use_rich)` 函数
+- Rich 表格显示：Zone / Source / Pri / Tokens / Used / Cited / Rate
+- Rate 列用绿色显示 `cited/used` 比例
+- 末尾汇总：`Overall: X/Y blocks cited`
+
+**补全与帮助**（`cli.py`）
+- `_SLASH_COMMANDS` 加入 `/context-report`（描述 "Context block citation heatmap"）
+- `_show_help` 表格加入 `/context-report` 行
+
+**Trade-off**
+- 跨 provider 兼容性差 — 只有 Anthropic 暴露 cache 元数据，但字符串匹配对所有 provider 通用
+- 字符串匹配不精确 — 偏好精确而非召回，citation_count 是下界
+- 后续可升级为 embedding 相似度，但当前实现已能覆盖 80% 的"上下文使用"分析需求
+
+### [fix] 关键 Bug 修复
+
+- **Compactor 破坏 provenance**：旧版本把所有压缩 block 的 `source` 覆盖为 `MEMORY`，丢失原始来源（grep/glob/git 等）。现保留 `source` 并通过 `derived_from` 链接原 block。
+- **Partitioner `_trim_zone` break bug**：小预算下会误丢本可放下的高优先级块。
+- **Budget 与 config 脱钩**：旧版本硬编码 `ContextBudget()` 100k，与 `PlanningConfig.max_tokens_per_task=200k` 无关。现已配置化并可继承。
+- **超时静默丢上下文**：旧版本 5s 超时返回空 `Context()`，导致大项目首跑 LLM 拿不到任何项目信息。现返回 SYSTEM 最小 context 并发警告事件。
+
+### 文件清单
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `synapse/protocols/retriever.py` | 修改 | ContextBlock 加 id/derived_from/usage_count/citation_count/retrieved_at |
+| `synapse/protocols/events.py` | 修改 | 新增 ContextBlockCited 事件 |
+| `synapse/config/schema.py` | 修改 | 新增 ContextConfig |
+| `synapse/core/agent.py` | 修改 | 接入 compactor/classifier/budget history/citation tracker |
+| `synapse/modules/context/compactor.py` | 修改 | 保留 provenance + derived_from |
+| `synapse/modules/context/partitioner.py` | 修改 | 修 knapsack bug |
+| `synapse/modules/context/llm_compactor.py` | 新增 | LLM 摘要 Compactor |
+| `synapse/modules/context/citation.py` | 新增 | CitationTracker |
+| `synapse/modules/context/classifier.py` | 新增 | 任务类型分类器 |
+| `synapse/modules/context/budget.py` | 新增 | 预算策略表 + BudgetHistory |
+| `synapse/modules/planning/react.py` | 修改 | 接入四区 + citation tracking |
+| `synapse/modules/planning/plan_execute.py` | 修改 | 接入四区 |
+| `synapse/adapters/cli.py` | 修改 | /memory 增强 + /context-report 命令 |
+| `synapse/adapters/library.py` | 修改 | 注册 SynapseConfig + get_citation_report |
+| `tests/modules/test_context_phase_e.py` | 新增 | 17 测试 |
+| `tests/modules/test_context_phase_2_3.py` | 新增 | 22 测试 |
+| `tests/modules/test_compactor.py` | 修改 | 适配新 provenance 行为 |
+
+### 当前状态
+
+| 指标 | 数值 |
+|------|------|
+| Commits | 70 |
+| Tests | 213（+39） |
+| 上下文工具数 | 6（+llm_compactor/citation/classifier/budget） |
+
