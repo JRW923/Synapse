@@ -1,6 +1,6 @@
 """Tests for AnthropicProvider — mock-based, no real API calls."""
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from synapse.modules.providers.anthropic import AnthropicProvider
 from synapse.protocols.llm import Message, LLMResponse
 
@@ -92,3 +92,41 @@ async def test_chat_converts_tool_results():
 
     # The key thing: it didn't crash on tool_result messages
     assert True
+
+
+class _StreamCM:
+    def __init__(self, events):
+        self._events = events
+
+    async def __aenter__(self):
+        return self._event_stream()
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def _event_stream(self):
+        for e in self._events:
+            yield e
+
+
+def _make_event(delta_type, text=None, partial_json=None):
+    delta = type("Delta", (), {"type": delta_type, "text": text, "partial_json": partial_json})()
+    return type("Event", (), {"type": "content_block_delta", "delta": delta})()
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_text_and_tool_chunks():
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="test-key")
+    events = [
+        _make_event("text_delta", text="Hello"),
+        _make_event("text_delta", text=" world"),
+        _make_event("input_json_delta", partial_json='{"path": "/x"}'),
+    ]
+    with patch.object(
+        provider._client.messages, "stream",
+        new=MagicMock(return_value=_StreamCM(events)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    assert [c.content for c in out] == ["Hello", " world", ""]
+    assert out[2].tool_call_delta == {"input": '{"path": "/x"}'}

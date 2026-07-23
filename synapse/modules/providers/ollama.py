@@ -67,8 +67,47 @@ class OllamaProvider:
             raise ProviderError(f"Ollama API error: {e}") from e
 
     async def stream(self, messages: list[Message], tools: list[dict] | None = None):
-        """Streaming not implemented in Phase 1 MVP."""
-        raise NotImplementedError("Streaming will be added in Phase 2")
+        """Stream chat completions as a sequence of LLMChunk deltas."""
+        converted = self._convert_messages(messages)
+
+        kwargs: dict = {
+            "model": self._model,
+            "messages": converted,
+            "max_tokens": self._max_tokens,
+            "stream": True,
+        }
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t["name"],
+                        "description": t["description"],
+                        "parameters": t.get("input_schema", t.get("parameters", {})),
+                    },
+                }
+                for t in tools
+            ]
+
+        try:
+            async for chunk in self._client.chat.completions.create(**kwargs):
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                content = delta.content or ""
+                tool_delta = None
+                if delta.tool_calls:
+                    tc = delta.tool_calls[0]
+                    tool_delta = {
+                        "index": tc.index,
+                        "id": tc.id,
+                        "name": tc.function.name if tc.function else None,
+                        "arguments": tc.function.arguments if tc.function else None,
+                    }
+                if content or tool_delta:
+                    yield LLMChunk(content=content, tool_call_delta=tool_delta)
+        except Exception as e:
+            raise ProviderError(f"Ollama API error: {e}") from e
 
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
         """Convert internal Message list to OpenAI-compatible dicts.

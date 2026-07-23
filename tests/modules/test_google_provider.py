@@ -62,3 +62,34 @@ async def test_chat_basic():
     assert result.stop_reason == "end_turn"
     assert result.usage["input"] == 10
     assert result.usage["output"] == 5
+
+
+def _make_gchunk(text=None, function_call=None):
+    part = type("Part", (), {"text": text, "function_call": function_call})()
+    content = type("Content", (), {"parts": [part]})()
+    candidate = type("Candidate", (), {"content": content})()
+    return type("Chunk", (), {"candidates": [candidate]})()
+
+
+async def _gchunk_stream(chunks):
+    for c in chunks:
+        yield c
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_text_and_tool_chunks():
+    provider = GoogleProvider(model="gemini-pro", api_key="test-key")
+    chunks = [
+        _make_gchunk(text="Hello"),
+        _make_gchunk(text=" world"),
+        _make_gchunk(function_call=type("FC", (), {"name": "read", "args": {"path": "/x"}})()),
+    ]
+    with patch.object(
+        provider._client.aio.models, "generate_content_stream",
+        new=AsyncMock(return_value=_gchunk_stream(chunks)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    assert [c.content for c in out] == ["Hello", " world", ""]
+    assert out[2].tool_call_delta is not None
+    assert out[2].tool_call_delta["name"] == "read"

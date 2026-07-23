@@ -61,8 +61,40 @@ class AnthropicProvider:
             raise ProviderError(f"Anthropic API error: {e}") from e
 
     async def stream(self, messages: list[Message], tools: list[dict] | None = None):
-        """Streaming not implemented in Phase 1 MVP."""
-        raise NotImplementedError("Streaming will be added in Phase 2")
+        """Stream messages as a sequence of LLMChunk deltas (text + tool_use)."""
+        system_prompt = self._extract_system(messages)
+        converted = self._convert_messages(messages)
+
+        kwargs: dict = {
+            "model": self._model,
+            "messages": converted,
+            "max_tokens": self._max_tokens,
+        }
+        if system_prompt:
+            kwargs["system"] = system_prompt
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "name": t["name"],
+                    "description": t["description"],
+                    "input_schema": t.get("input_schema", t.get("parameters", {})),
+                }
+                for t in tools
+            ]
+
+        try:
+            async with self._client.messages.stream(**kwargs) as stream:
+                async for event in stream:
+                    if event.type != "content_block_delta":
+                        continue
+                    delta = event.delta
+                    if delta.type == "text_delta":
+                        if delta.text:
+                            yield LLMChunk(content=delta.text)
+                    elif delta.type == "input_json_delta":
+                        yield LLMChunk(tool_call_delta={"input": delta.partial_json})
+        except Exception as e:
+            raise ProviderError(f"Anthropic streaming error: {e}") from e
 
     def _extract_system(self, messages: list[Message]) -> str | None:
         """Extract system message if present (Anthropic uses separate system param)."""

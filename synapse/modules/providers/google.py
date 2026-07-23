@@ -1,7 +1,7 @@
 """Google Gemini LLM Provider implementation."""
 
 import logging
-from synapse.protocols.llm import LLMResponse, Message
+from synapse.protocols.llm import LLMResponse, LLMChunk, Message
 from synapse.core.exceptions import ProviderError
 
 logger = logging.getLogger(__name__)
@@ -80,8 +80,33 @@ if _GOOGLE_AVAILABLE:
                 raise ProviderError(f"Gemini API error: {e}") from e
 
         async def stream(self, messages: list[Message], tools: list[dict] | None = None):
-            """Streaming not implemented in Phase 2 MVP."""
-            raise NotImplementedError("Streaming will be added in a later phase")
+            """Stream Gemini responses as a sequence of LLMChunk deltas."""
+            system_instruction = self._extract_system(messages)
+            contents = self._convert_messages(messages)
+            config = self._build_config(system_instruction, tools)
+
+            try:
+                async for chunk in await self._client.aio.models.generate_content_stream(
+                    model=self._model,
+                    contents=contents,
+                    config=config,
+                ):
+                    if not chunk.candidates:
+                        continue
+                    candidate = chunk.candidates[0]
+                    if not candidate.content or not candidate.content.parts:
+                        continue
+                    for part in candidate.content.parts:
+                        if part.text:
+                            yield LLMChunk(content=part.text)
+                        elif part.function_call:
+                            fc = part.function_call
+                            yield LLMChunk(tool_call_delta={
+                                "name": fc.name,
+                                "input": fc.args,
+                            })
+            except Exception as e:
+                raise ProviderError(f"Gemini streaming error: {e}") from e
 
         # ------------------------------------------------------------------
         # Private helpers

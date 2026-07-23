@@ -966,6 +966,50 @@ CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
 | 指标 | 数值 |
 |------|------|
 | Commits | 70 |
-| Tests | 213（+39） |
+| Tests | 217（+43） |
 | 上下文工具数 | 6（+llm_compactor/citation/classifier/budget） |
+
+---
+
+## 2026-07-23 · LLM 流式输出（stream）补全
+
+### 背景
+
+Phase 2 计划（`plans/2026-07-16-synapse-phase-2.md:32,38`）把 `stream support` 列为交付物，但五个 provider 的 `LLMProvider.stream()` 此前全是 `raise NotImplementedError` 占位（`DEVELOPMENT.md` 现状表也标着 `stream stub`）。本次将其真正实现，使协议层的 `stream() -> AsyncIterator[LLMChunk]` 在所有 provider 上可用。
+
+### 实现
+
+`LLMChunk` 通过 `content`（文本增量）与 `tool_call_delta`（工具调用增量）携带流式增量，五个 provider 均按各自 SDK 的流式接口产出：
+
+- **OpenAI / DeepSeek / Ollama**（共用 `openai.AsyncOpenAI`）：`chat.completions.create(stream=True)`，逐块读取 `choices[0].delta` 的 `content` 与 `tool_calls` 增量。
+- **Anthropic**：`messages.stream()` 上下文管理器，遍历 `content_block_delta` 事件，`text_delta` → `content`，`input_json_delta` → `tool_call_delta["input"]`。
+- **Google（Gemini）**：`aio.models.generate_content_stream()`，遍历 `candidates[0].content.parts` 的 `text` 与 `function_call`。
+
+所有 `stream()` 均复用各自 `chat()` 已有的消息/工具转换逻辑，错误统一包成 `ProviderError`，行为与该 provider 的非流式路径一致。
+
+### 测试
+
+`tests/modules/` 下五个 provider 测试各新增 `test_stream_yields_text_and_tool_chunks`（mock SDK，无真实 API 调用），验证同时产出文本块与工具调用增量。原 `test_deepseek_provider.py` 中过时的 `test_stream_not_implemented` 已替换为真实流式测试。
+
+### 文件清单
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `synapse/modules/providers/anthropic.py` | 修改 | `stream()` 实现（事件流） |
+| `synapse/modules/providers/openai.py` | 修改 | `stream()` 实现 |
+| `synapse/modules/providers/deepseek.py` | 修改 | `stream()` 实现 |
+| `synapse/modules/providers/ollama.py` | 修改 | `stream()` 实现 |
+| `synapse/modules/providers/google.py` | 修改 | `stream()` 实现（含 `LLMChunk` import） |
+| `tests/modules/test_openai_provider.py` | 修改 | +stream 测试 |
+| `tests/modules/test_deepseek_provider.py` | 修改 | 替换陈旧 stream 测试 |
+| `tests/modules/test_ollama_provider.py` | 修改 | +stream 测试 |
+| `tests/modules/test_anthropic_provider.py` | 修改 | +stream 测试 |
+| `tests/modules/test_google_provider.py` | 修改 | +stream 测试 |
+
+### 当前状态（更新）
+
+| 指标 | 数值 |
+|------|------|
+| Tests | 217（+4 streaming） |
+| 流式输出 | 5/5 provider 已落地 |
 

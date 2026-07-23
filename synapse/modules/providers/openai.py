@@ -54,8 +54,38 @@ class OpenAIProvider:
             raise ProviderError(f"OpenAI API error: {e}") from e
 
     async def stream(self, messages: list[Message], tools: list[dict] | None = None):
-        """Streaming not implemented in Phase 2 MVP."""
-        raise NotImplementedError("Streaming will be added in a later phase")
+        """Stream chat completions as a sequence of LLMChunk deltas."""
+        converted = self._convert_messages(messages)
+        openai_tools = self._convert_tools(tools) if tools else None
+
+        kwargs: dict = {
+            "model": self._model,
+            "messages": converted,
+            "max_tokens": self._max_tokens,
+            "stream": True,
+        }
+        if openai_tools:
+            kwargs["tools"] = openai_tools
+
+        try:
+            async for chunk in self._client.chat.completions.create(**kwargs):
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                content = delta.content or ""
+                tool_delta = None
+                if delta.tool_calls:
+                    tc = delta.tool_calls[0]
+                    tool_delta = {
+                        "index": tc.index,
+                        "id": tc.id,
+                        "name": tc.function.name if tc.function else None,
+                        "arguments": tc.function.arguments if tc.function else None,
+                    }
+                if content or tool_delta:
+                    yield LLMChunk(content=content, tool_call_delta=tool_delta)
+        except Exception as e:
+            raise ProviderError(f"OpenAI streaming error: {e}") from e
 
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
         """Convert internal Message to OpenAI API format.
