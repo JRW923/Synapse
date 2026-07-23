@@ -19,6 +19,7 @@ class EventType(str, Enum):
     TASK_DECOMPOSED = "task_decomposed"
     MERGE_RESULT = "merge_result"
     CONTEXT_BLOCK_CITED = "context_block_cited"
+    LLM_TOKEN = "llm_token"
 
 
 @dataclass(kw_only=True)
@@ -119,3 +120,10 @@ class ContextBlockCited(BaseEvent):
     block_id: str
     block_source: str
     response_snippet: str = ""
+
+
+@dataclass(kw_only=True)
+class LLMToken(BaseEvent):
+    """Streaming LLM text chunk — emitted per token for live CLI display."""
+    event_type: str = EventType.LLM_TOKEN
+    text: str

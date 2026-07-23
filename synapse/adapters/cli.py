@@ -458,6 +458,74 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
     return _confirm
 
 
+class _LiveDisplay:
+    """Rich Live panel that shows streamed LLM text with a live footer.
+
+    The footer reports the current activity label plus optional token/elapsed
+    readouts supplied by the caller. Used to render the agent's streaming
+    output in real time (replaces the old spinner-only status).
+    """
+
+    def __init__(self, console, fmt_tokens, fmt_elapsed):
+        from rich.live import Live
+        from rich.panel import Panel
+        from rich.text import Text
+
+        self._console = console
+        self._fmt_tokens = fmt_tokens
+        self._fmt_elapsed = fmt_elapsed
+        self._buf: list[str] = []
+        self._label = "Thinking..."
+        self._live = Live(self._render(), console=console, auto_refresh=True, refresh_per_second=15)
+
+    @property
+    def live(self):
+        return self._live
+
+    def start(self):
+        self._live.start()
+
+    def stop(self):
+        try:
+            self._live.stop()
+        except Exception:
+            pass
+
+    def set_label(self, text: str) -> None:
+        self._label = text
+        self._refresh()
+
+    def add_text(self, text: str) -> None:
+        self._buf.append(text)
+        self._refresh()
+
+    def reset_text(self) -> None:
+        self._buf = []
+        self._refresh()
+
+    def _refresh(self) -> None:
+        try:
+            self._live.update(self._render())
+        except Exception:
+            pass
+
+    def _render(self):
+        from rich.panel import Panel
+        from rich.text import Text
+
+        body = "".join(self._buf)
+        pieces = [self._label]
+        tk = self._fmt_tokens()
+        if tk:
+            pieces.append(f"{tk} tok")
+        el = self._fmt_elapsed()
+        if el:
+            pieces.append(el)
+        header = "  ·  ".join(pieces)
+        text = Text(body, style="none") if body else Text("…", style="dim")
+        return Panel(text, title=header, border_style=_BORDER, expand=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="synapse",
@@ -1671,9 +1739,6 @@ async def _main_interface(config_path: str | None = None):
 
         if use_rich:
             from rich.status import Status
-            status = console.status("[dim]Thinking...[/dim]", spinner="dots")
-            status.start()
-            status_holder[:] = [status]
             tokens = {"input": 0, "output": 0}
             elapsed = {"start": _time.monotonic(), "label": "Thinking..."}
 
@@ -1689,56 +1754,54 @@ async def _main_interface(config_path: str | None = None):
                     return f"{s:.0f}s"
                 return f"{int(s//60)}m{int(s%60):02d}s"
 
-            def _render() -> str:
-                parts = [elapsed["label"]]
-                tok = tokens["input"] + tokens["output"]
-                if tok:
-                    parts.append(f"{_fmt_tokens()} tok")
-                parts.append(_fmt_elapsed())
-                return f"[dim]{'  ·  '.join(parts)}[/dim]"
+            live = _LiveDisplay(console, _fmt_tokens, _fmt_elapsed)
+            live.start()
+            status_holder[:] = [live.live]
 
             async def _tick():
-                """Refresh spinner every 0.5s so the elapsed time stays live."""
+                """Refresh the live footer every 0.5s so elapsed time stays live."""
                 try:
                     while True:
                         await asyncio.sleep(0.5)
-                        try:
-                            status.update(_render())
-                        except Exception:
-                            return
+                        live._refresh()
                 except asyncio.CancelledError:
                     return
 
             tick_task = asyncio.create_task(_tick())
 
             def _set_label(text: str) -> None:
-                elapsed["label"] = text
-                try:
-                    status.update(_render())
-                except Exception:
-                    pass
+                live.set_label(text)
 
             event_bus = synapse._container.resolve(EventBus)
             if event_bus is not None:
                 async def _on_progress(event):
                     msg = event.message
+                    # Reset streamed text at the start of each LLM call so the
+                    # panel always shows the current turn.
+                    if event.phase == "calling_llm":
+                        live.reset_text()
+                        live.set_label("Working...")
+                        return
                     # Parse "tokens=A+B" emitted by the planning loop.
                     if msg.startswith("tokens="):
                         try:
                             a, b = msg[7:].split("+", 1)
                             tokens["input"] = int(a)
                             tokens["output"] = int(b)
-                            _set_label("Working...")
+                            live.set_label("Working...")
                             return
                         except (ValueError, IndexError):
                             pass
-                    _set_label(msg)
+                    live.set_label(msg)
+                async def _on_token(event):
+                    live.add_text(event.text)
                 async def _on_tool_started(event):
-                    _set_label(f"{event.tool_name} ...")
+                    live.set_label(f"{event.tool_name} ...")
                 async def _on_tool_completed(event):
                     icon = "ok" if event.success else "FAIL"
-                    _set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
+                    live.set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
                 event_bus.subscribe("agent_progress", _on_progress)
+                event_bus.subscribe("llm_token", _on_token)
                 event_bus.subscribe("tool_call_started", _on_tool_started)
                 event_bus.subscribe("tool_call_completed", _on_tool_completed)
 
@@ -1752,7 +1815,7 @@ async def _main_interface(config_path: str | None = None):
             break
         except Exception as exc:
             if use_rich:
-                status.stop()
+                live.stop()
                 console.print(f"  [bold red]{type(exc).__name__}:[/bold red] {exc}")
             else:
                 print(f"Error: {exc}")
@@ -1768,13 +1831,14 @@ async def _main_interface(config_path: str | None = None):
                 except Exception:
                     pass
                 try:
-                    status.stop()
+                    live.stop()
                 except Exception:
                     pass
                 status_holder[:] = []
                 if event_bus is not None:
                     try:
                         event_bus.unsubscribe("agent_progress", _on_progress)
+                        event_bus.unsubscribe("llm_token", _on_token)
                         event_bus.unsubscribe("tool_call_started", _on_tool_started)
                         event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
                     except Exception:

@@ -1,6 +1,7 @@
 """ReAct Planner — Think → Act → Observe loop."""
 
 import asyncio
+import json
 import sys
 import time
 from synapse.protocols.planner import (
@@ -8,7 +9,7 @@ from synapse.protocols.planner import (
 )
 from synapse.protocols.llm import Message
 from synapse.protocols.events import (
-    ToolCallStarted, ToolCallCompleted, ThrashingDetected, AgentCompleted, AgentProgress
+    ToolCallStarted, ToolCallCompleted, ThrashingDetected, AgentCompleted, AgentProgress, LLMToken
 )
 from synapse.core.exceptions import PlannerError
 
@@ -64,6 +65,77 @@ class ReActPlanner:
         if asyncio.iscoroutine(obj):
             return await obj
         return obj
+
+    async def _call_llm(self, llm, messages, tools, event_bus, session_id):
+        """Call the LLM, preferring streaming for live display.
+
+        Falls back to ``chat()`` when the provider doesn't implement
+        ``stream()`` (e.g. test doubles that only mock ``chat``). The
+        ``LLMProvider`` protocol still declares ``chat``, so it remains a
+        valid path.
+        """
+        try:
+            return await self._call_llm_stream(llm, messages, tools, event_bus, session_id)
+        except (NotImplementedError, TypeError, AttributeError):
+            return await llm.chat(messages, tools=tools if tools else None)
+
+    async def _call_llm_stream(self, llm, messages, tools, event_bus, session_id):
+        """Stream one LLM call, emitting LLMToken events for live CLI display.
+
+        Accumulates the streamed chunks into an object exposing
+        ``.content`` / ``.tool_calls`` / ``.usage`` / ``.stop_reason`` so the
+        rest of the ReAct loop is unchanged. Tool-call deltas (from any
+        provider) are merged by index into a complete tool_calls list.
+        """
+        content_parts: list[str] = []
+        tool_acc: dict[int, dict] = {}
+        usage: dict[str, int] = {}
+
+        async for chunk in llm.stream(messages, tools=tools if tools else None):
+            if chunk.usage:
+                usage = chunk.usage
+            if chunk.content:
+                content_parts.append(chunk.content)
+                if event_bus is not None:
+                    await event_bus.emit(LLMToken(session_id=session_id, text=chunk.content))
+            if chunk.tool_call_delta:
+                d = chunk.tool_call_delta
+                idx = d.get("index", 0)
+                slot = tool_acc.setdefault(idx, {"id": "", "name": "", "input_raw": ""})
+                if d.get("id"):
+                    slot["id"] = d["id"]
+                if d.get("name"):
+                    slot["name"] = d["name"]
+                if d.get("input") is not None:
+                    val = d["input"]
+                    # Gemini streams the tool input as a ready-made dict;
+                    # OpenAI/Anthropic stream it as a partial JSON string.
+                    if isinstance(val, dict):
+                        slot["input_raw"] = val
+                    elif not isinstance(slot["input_raw"], dict):
+                        slot["input_raw"] = (slot["input_raw"] or "") + val
+
+        tool_calls: list[dict] = []
+        for idx in sorted(tool_acc):
+            slot = tool_acc[idx]
+            raw = slot["input_raw"]
+            if isinstance(raw, dict):
+                parsed = raw
+            elif isinstance(raw, str) and raw.strip():
+                try:
+                    parsed = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    parsed = {}
+            else:
+                parsed = {}
+            tool_calls.append({"id": slot["id"], "name": slot["name"], "input": parsed})
+
+        return type("StreamResponse", (), {
+            "content": "".join(content_parts),
+            "tool_calls": tool_calls,
+            "usage": usage,
+            "stop_reason": "tool_use" if tool_calls else "end_turn",
+        })()
 
     @staticmethod
     def _repair_session(messages: list[Message]) -> list[Message]:
@@ -172,7 +244,10 @@ class ReActPlanner:
             max_llm_retries = 3
             for attempt in range(max_llm_retries + 1):  # 1 initial + 3 retries = 4 total
                 try:
-                    response = await llm.chat(messages, tools=tool_schemas if tool_schemas else None)
+                    response = await self._call_llm(
+                        llm, messages, tool_schemas if tool_schemas else None,
+                        event_bus, session.id,
+                    )
                     break
                 except Exception as e:
                     if attempt == max_llm_retries:

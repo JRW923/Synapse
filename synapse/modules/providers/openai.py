@@ -63,12 +63,19 @@ class OpenAIProvider:
             "messages": converted,
             "max_tokens": self._max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if openai_tools:
             kwargs["tools"] = openai_tools
 
+        usage: dict[str, int] = {}
         try:
             async for chunk in self._client.chat.completions.create(**kwargs):
+                if getattr(chunk, "usage", None):
+                    usage = {
+                        "input": chunk.usage.prompt_tokens or 0,
+                        "output": chunk.usage.completion_tokens or 0,
+                    }
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -80,10 +87,12 @@ class OpenAIProvider:
                         "index": tc.index,
                         "id": tc.id,
                         "name": tc.function.name if tc.function else None,
-                        "arguments": tc.function.arguments if tc.function else None,
+                        "input": tc.function.arguments if tc.function else None,
                     }
                 if content or tool_delta:
                     yield LLMChunk(content=content, tool_call_delta=tool_delta)
+            if usage:
+                yield LLMChunk(usage=usage)
         except Exception as e:
             raise ProviderError(f"OpenAI streaming error: {e}") from e
 

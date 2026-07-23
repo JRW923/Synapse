@@ -979,37 +979,52 @@ Phase 2 计划（`plans/2026-07-16-synapse-phase-2.md:32,38`）把 `stream suppo
 
 ### 实现
 
-`LLMChunk` 通过 `content`（文本增量）与 `tool_call_delta`（工具调用增量）携带流式增量，五个 provider 均按各自 SDK 的流式接口产出：
+改动分四层，自底向上串起整条流式链路：
 
-- **OpenAI / DeepSeek / Ollama**（共用 `openai.AsyncOpenAI`）：`chat.completions.create(stream=True)`，逐块读取 `choices[0].delta` 的 `content` 与 `tool_calls` 增量。
-- **Anthropic**：`messages.stream()` 上下文管理器，遍历 `content_block_delta` 事件，`text_delta` → `content`，`input_json_delta` → `tool_call_delta["input"]`。
-- **Google（Gemini）**：`aio.models.generate_content_stream()`，遍历 `candidates[0].content.parts` 的 `text` 与 `function_call`。
+**1. Provider 层（`stream()`）** — `LLMChunk` 通过 `content`（文本增量）与 `tool_call_delta`（工具调用增量）携带流式增量，五个 provider 均按各自 SDK 的流式接口产出：
+
+- **OpenAI / DeepSeek / Ollama**（共用 `openai.AsyncOpenAI`）：`chat.completions.create(stream=True, stream_options={"include_usage": True})`，逐块读取 `choices[0].delta` 的 `content` 与 `tool_calls` 增量，累计 `usage`。
+- **Anthropic**：`messages.stream()` 上下文管理器，遍历 `content_block_delta` 事件，`text_delta` → `content`，`input_json_delta` → `tool_call_delta["input"]`，收尾用 `await stream.get_final_message()` 取 `usage`。
+- **Google（Gemini）**：`aio.models.generate_content_stream()`，遍历 `candidates[0].content.parts` 的 `text` 与 `function_call`，从 `usage_metadata` 累计 `usage`。
 
 所有 `stream()` 均复用各自 `chat()` 已有的消息/工具转换逻辑，错误统一包成 `ProviderError`，行为与该 provider 的非流式路径一致。
 
+**2. 协议层（`LLMChunk` + `LLMToken`）** — `LLMChunk` 新增 `usage: dict | None` 字段（最终块携带 `{"input", "output"}` 用量）；新增事件 `LLM_TOKEN = "llm_token"`（`LLMToken(text)`，逐 token 透传给 UI）。`tool_call_delta` 的键在三个 provider 间统一为 `{"index", "id", "name", "input"}`。
+
+**3. 规划层（`ReAct`）** — `react.py` 新增 `_call_llm_stream()`：异步遍历 `llm.stream()`，逐块累加 `content`/`tool_call_delta`/`usage`，每块 `content` 发一个 `LLMToken` 事件；按 `index` 合并工具调用增量（同时兼容 OpenAI 风格字符串 JSON 累加与 Gemini 风格 dict 输入），用 `json.loads` 解析；返回 `(content, tool_calls, usage, stop_reason)`。再由 `_call_llm()` 包装：优先 `stream()`，捕获 `NotImplementedError / TypeError / AttributeError` 时回退到 `chat()`（保留只 mock 了 `chat()` 的既有测试）。重试循环调用 `_call_llm()`。
+
+**4. CLI 层（实时显示）** — `adapters/cli.py` 新增 `_LiveDisplay`（Rich `Live` + `Panel`）：底部状态行显示当前阶段标签、累计 token 数、已用时长；订阅 `agent_progress` / `llm_token` / `tool_call_started` / `tool_call_completed` 四个事件，`llm_token` 直接把 `event.text` 追加进面板正文，`phase=="calling_llm"` 时清空已显示文本。原先的 `console.status` 转圈被替换为该 Live 面板，并复用既有 `status_holder` 机制以维持确认回调（confirm）时的暂停/恢复。
+
 ### 测试
 
-`tests/modules/` 下五个 provider 测试各新增 `test_stream_yields_text_and_tool_chunks`（mock SDK，无真实 API 调用），验证同时产出文本块与工具调用增量。原 `test_deepseek_provider.py` 中过时的 `test_stream_not_implemented` 已替换为真实流式测试。
+- `tests/modules/` 下五个 provider 测试各新增 `test_stream_yields_text_and_tool_chunks`（mock SDK，无真实 API 调用），验证同时产出文本块、工具调用增量、并最终产出一个带 `usage` 的收尾块。原 `test_deepseek_provider.py` 中过时的 `test_stream_not_implemented` 已替换为真实流式测试。
+- 新增 `tests/modules/test_react_streaming.py`（3 项）：验证 `_call_llm_stream()` 重组工具调用、逐 token 发 `LLMToken`、处理 Gemini 风格 dict 工具输入、以及 `end_turn` 无工具调用场景。
 
 ### 文件清单
 
 | 文件 | 状态 | 说明 |
 |------|------|------|
-| `synapse/modules/providers/anthropic.py` | 修改 | `stream()` 实现（事件流） |
-| `synapse/modules/providers/openai.py` | 修改 | `stream()` 实现 |
-| `synapse/modules/providers/deepseek.py` | 修改 | `stream()` 实现 |
-| `synapse/modules/providers/ollama.py` | 修改 | `stream()` 实现 |
-| `synapse/modules/providers/google.py` | 修改 | `stream()` 实现（含 `LLMChunk` import） |
+| `synapse/protocols/events.py` | 修改 | 新增 `LLM_TOKEN` 事件 + `LLMToken` 数据类 |
+| `synapse/protocols/llm.py` | 修改 | `LLMChunk.usage` 字段 |
+| `synapse/modules/providers/anthropic.py` | 修改 | `stream()` 实现（事件流 + usage 收尾） |
+| `synapse/modules/providers/openai.py` | 修改 | `stream()` 实现 + `stream_options`/usage |
+| `synapse/modules/providers/deepseek.py` | 修改 | `stream()` 实现 + `stream_options`/usage |
+| `synapse/modules/providers/ollama.py` | 修改 | `stream()` 实现 + `stream_options`/usage |
+| `synapse/modules/providers/google.py` | 修改 | `stream()` 实现 + `LLMChunk` import + usage |
+| `synapse/modules/planning/react.py` | 修改 | `_call_llm_stream()` / `_call_llm()`（stream 优先，chat 回退） |
+| `synapse/adapters/cli.py` | 修改 | `_LiveDisplay` + 实时流式显示接线 |
 | `tests/modules/test_openai_provider.py` | 修改 | +stream 测试 |
 | `tests/modules/test_deepseek_provider.py` | 修改 | 替换陈旧 stream 测试 |
 | `tests/modules/test_ollama_provider.py` | 修改 | +stream 测试 |
 | `tests/modules/test_anthropic_provider.py` | 修改 | +stream 测试 |
 | `tests/modules/test_google_provider.py` | 修改 | +stream 测试 |
+| `tests/modules/test_react_streaming.py` | 新增 | 3 项 ReAct 流式单测 |
 
 ### 当前状态（更新）
 
 | 指标 | 数值 |
 |------|------|
-| Tests | 217（+4 streaming） |
+| Tests | 220（+9：5 provider stream + 3 react stream + 1 替换） |
 | 流式输出 | 5/5 provider 已落地 |
+| CLI 实时显示 | `_LiveDisplay` 已接入，`LLMToken` 实时渲染 |
 

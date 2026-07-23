@@ -24,6 +24,7 @@ class LLMResponse:
 class LLMChunk:
     content: str = ""
     tool_call_delta: dict | None = None
+    usage: dict | None = None  # {"input": N, "output": M}, emitted on the final chunk
 
 
 class LLMProvider(Protocol):

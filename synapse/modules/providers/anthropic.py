@@ -85,14 +85,30 @@ class AnthropicProvider:
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 async for event in stream:
-                    if event.type != "content_block_delta":
-                        continue
-                    delta = event.delta
-                    if delta.type == "text_delta":
-                        if delta.text:
-                            yield LLMChunk(content=delta.text)
-                    elif delta.type == "input_json_delta":
-                        yield LLMChunk(tool_call_delta={"input": delta.partial_json})
+                    if event.type == "content_block_start":
+                        block = event.content_block
+                        if getattr(block, "type", None) == "tool_use":
+                            yield LLMChunk(tool_call_delta={
+                                "index": event.index,
+                                "id": getattr(block, "id", None),
+                                "name": getattr(block, "name", None),
+                            })
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            if delta.text:
+                                yield LLMChunk(content=delta.text)
+                        elif delta.type == "input_json_delta":
+                            yield LLMChunk(tool_call_delta={"input": delta.partial_json})
+                try:
+                    final = await stream.get_final_message()
+                    if getattr(final, "usage", None):
+                        yield LLMChunk(usage={
+                            "input": final.usage.input_tokens or 0,
+                            "output": final.usage.output_tokens or 0,
+                        })
+                except Exception:
+                    pass
         except Exception as e:
             raise ProviderError(f"Anthropic streaming error: {e}") from e
 
