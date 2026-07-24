@@ -1124,6 +1124,7 @@ TODO C 要求多个对等 Agent 同时工作、互相 review、投票决策。�
 **3. 接入（`adapters/library.py` + `adapters/cli.py`）** —
 - `library.py` 与 `cli.py` 的 `_create_planner` 均新增 `SWARM` 分支，返回 `SwarmPlanner(react_planner=react)`。
 - `ReActPlanner` 新增 `role` / `system_prompt_suffix` 注入（在 `_build_system_prompt` 前置 `## Your role` 块），供 `SwarmPlanner._make_planner` 复用以给每个 worker 注入角色提示。
+- **CLI 入口**：`run` / `chat` 的 `--mode` 选项 `choices` 加入 `swarm`（`synapse run --mode swarm` / `synapse chat --mode swarm`），聊天内 `/mode swarm` 亦可切换；帮助文案与 banner 同步显示 swarm。
 
 ### 测试
 
@@ -1147,14 +1148,16 @@ MVP **不在沙箱层硬隔离文件作用域**——依赖 LLM 分解质量。�
 | `synapse/modules/planning/react.py` | 修改 | `role` / `system_prompt_suffix` 注入 |
 | `synapse/modules/planning/hierarchical.py` | 修改 | `merge_subtask_results` 重构为模块级函数（供 swarm 复用） |
 | `synapse/adapters/library.py` | 修改 | 注册 `SWARM` 分支 |
-| `synapse/adapters/cli.py` | 修改 | `_create_planner` 加 `SWARM` 分支 |
+| `synapse/adapters/cli.py` | 修改 | `_create_planner` 加 `SWARM` 分支 + `--mode swarm` 入口 |
 | `tests/modules/test_swarm_planner.py` | 新增 | 4 项 Swarm 闭环测试 |
+| `tests/adapters/test_cli_planner.py` | 新增 | 4 模式 → Planner 选择映射（含 swarm） |
 
 ### 当前状态（更新）
 
 | 指标 | 数值 |
 |------|------|
-| Tests | 229（+5：4 swarm + 1 过程质量 eval 纯净度） |
+| Tests | 230（+6：4 swarm + 1 过程质量 eval 纯净度 + 1 CLI 模式选择） |
 | 多 Agent 协作 | 核心闭环 MVP 已落地（并行 coder + 只读 reviewer + 验证闭环） |
 | 规划模式 | ReAct / PlanExecute / Hierarchical / **Swarm**（4） |
+| CLI 入口 | `synapse run --mode swarm` / `synapse chat --mode swarm` / `/mode swarm` |
 

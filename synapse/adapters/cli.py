@@ -559,7 +559,7 @@ def main():
     run_parser.add_argument(
         "--mode",
         default=None,
-        choices=["react", "plan_execute", "hierarchical"],
+        choices=["react", "plan_execute", "hierarchical", "swarm"],
         help="Planning mode (overrides config)",
     )
     run_parser.add_argument(
@@ -630,7 +630,7 @@ def main():
     chat_parser.add_argument(
         "--mode",
         default=None,
-        choices=["react", "plan_execute", "hierarchical"],
+        choices=["react", "plan_execute", "hierarchical", "swarm"],
         help="Planning mode (overrides config)",
     )
     chat_parser.add_argument(
@@ -1119,7 +1119,7 @@ def _show_help(console):
     t.add_row("  /reset", "Clear session state")
     t.add_row("  /model [name|num]", "Show or switch model (number for quick select)")
     t.add_row("  /provider [name]", "Show or switch provider")
-    t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical)")
+    t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical / swarm)")
     t.add_row("  /tools", "List available tools")
     t.add_row("  /context-report", "Show context block citation / usage heatmap")
     t.add_row("  /exit, /quit", "Exit")
