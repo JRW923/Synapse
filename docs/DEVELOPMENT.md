@@ -1134,6 +1134,11 @@ TODO C 要求多个对等 Agent 同时工作、互相 review、投票决策。�
 - `test_verify_loop_reruns_on_reject`：reviewer 首拒后通过 → 触发一次 coder 重试 + 重新合并，最终 `SwarmVerified` success，审查序列为 `["reject","approve"]`。
 - `test_filtered_tool_registry`：`FilteredToolRegistry` 允许读工具、拒绝写工具、schema 过滤正确。
 
+**端到端**（`tests/test_swarm_e2e.py`，2 项）：用内容路由的脚本化假 LLM 注入真实 Container（真实工具 / 真实 `ProcessSandbox` / 真实 `Session.fork`），跑通 `Agent.run → SwarmPlanner` 全链路——这是比纯单测更近生产的一层验证：
+- `test_swarm_e2e_approve`：2 并行 coder 各自真实写出 `a.py`/`b.py` → 合并 → reviewer 通过 → `SwarmVerified` success，3 个 WorkerSpawned/Completed、1 个 ReviewSubmitted/VoteCast。
+- `test_swarm_e2e_reject_then_approve`：reviewer 先"不通过"后"通过" → 触发最弱 coder 重跑 + 重新合并 + 再审，最终 success，审查/投票序列为 `["reject","approve"]`。
+- 假 LLM 按 prompt 内容路由（decompose / merge / reviewer / coder），而非按调用序号——因为并行 coder 共享同一 LLM，`asyncio.gather` 下序号不稳定。
+
 ### ponytail 已知上限
 
 MVP **不在沙箱层硬隔离文件作用域**——依赖 LLM 分解质量。升级路径：把 `file_scope` 作为写白名单传给 sandbox/workspace。`test_verify_loop_reruns_on_reject` 曾因测试把 reviewer 的 `side_effect` 设成单个 lambda（导致 reviewer 永远 reject、验证循环跑满两轮）而失败，改为"每角色完整列表 side_effect"后通过——同时把事件的测试捕获回调改为 async（EventBus `emit` 会 `await` handler，同步回调会触发 `await NoneType` 警告）。
@@ -1151,13 +1156,15 @@ MVP **不在沙箱层硬隔离文件作用域**——依赖 LLM 分解质量。�
 | `synapse/adapters/cli.py` | 修改 | `_create_planner` 加 `SWARM` 分支 + `--mode swarm` 入口 |
 | `tests/modules/test_swarm_planner.py` | 新增 | 4 项 Swarm 闭环测试 |
 | `tests/adapters/test_cli_planner.py` | 新增 | 4 模式 → Planner 选择映射（含 swarm） |
+| `tests/test_swarm_e2e.py` | 新增 | 2 项端到端（approve / reject→重试→approve） |
 
 ### 当前状态（更新）
 
 | 指标 | 数值 |
 |------|------|
-| Tests | 230（+6：4 swarm + 1 过程质量 eval 纯净度 + 1 CLI 模式选择） |
+| Tests | 232（+8：4 swarm + 1 过程质量 eval 纯净度 + 1 CLI 模式选择 + 2 端到端） |
 | 多 Agent 协作 | 核心闭环 MVP 已落地（并行 coder + 只读 reviewer + 验证闭环） |
 | 规划模式 | ReAct / PlanExecute / Hierarchical / **Swarm**（4） |
 | CLI 入口 | `synapse run --mode swarm` / `synapse chat --mode swarm` / `/mode swarm` |
+| 端到端验证 | `Agent.run → SwarmPlanner` 真实工具写文件 + Session.fork + 验证闭环 |
 
