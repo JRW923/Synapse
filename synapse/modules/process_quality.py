@@ -99,9 +99,16 @@ class ProcessQualityVerifier:
     agent's post-task hook to score, emit, and persist feedback.
     """
 
-    def __init__(self, event_bus: EventBus | None = None, memory=None) -> None:
+    def __init__(
+        self, event_bus: EventBus | None = None, memory=None, persist_feedback: bool = True
+    ) -> None:
         self._bus = event_bus
         self._memory = memory
+        # In eval mode the loop still scores + emits, but must NOT persist the
+        # feedback to memory — otherwise it would leak into later benchmark
+        # tasks' prompts and bias the measurement. ponytail: this is the single
+        # clean switch that keeps benchmarks pristine.
+        self._persist_feedback = persist_feedback
         self._reset()
         if event_bus is not None:
             event_bus.subscribe("tool_call_started", self._on_tool_started)
@@ -232,7 +239,7 @@ class ProcessQualityVerifier:
                 hint=report.hint,
             ))
 
-        if self._memory is not None:
+        if self._memory is not None and self._persist_feedback:
             await self._store_feedback(report)
 
         self._reset()

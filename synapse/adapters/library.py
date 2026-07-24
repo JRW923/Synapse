@@ -387,10 +387,16 @@ class Synapse:
         c.register(MemoryStore, layered)
 
         # Process-quality verification closed loop (TODO B) — live, not eval-gated.
+        # Skip persisting feedback during eval benchmarks so the loop does not
+        # leak into later benchmark tasks' prompts.
         from synapse.modules.process_quality import ProcessQualityVerifier
         c.register(
             ProcessQualityVerifier,
-            ProcessQualityVerifier(event_bus=event_bus, memory=layered),
+            ProcessQualityVerifier(
+                event_bus=event_bus,
+                memory=layered,
+                persist_feedback=not self._enable_eval,
+            ),
         )
 
         # Context

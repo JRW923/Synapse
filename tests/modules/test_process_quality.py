@@ -118,6 +118,37 @@ def test_failed_task_penalizes_score():
     assert 0.4 < report.score < 1.0
 
 
+def test_eval_mode_does_not_persist_feedback():
+    # In eval mode the loop must still score + emit, but NOT write memory.
+    events = [
+        ("start", {"tool_name": "write", "tool_params": {"path": "src/foo.py"}}),
+        ("done", {"tool_name": "write", "success": True, "duration_ms": 1, "files_touched": ["src/foo.py"]}),
+    ]
+    report, emitted, memory = _run_verifier(events, success=True)
+    # Force eval semantics by rebuilding a verifier with persist_feedback=False.
+    import asyncio
+    from synapse.modules.process_quality import ProcessQualityVerifier
+
+    bus = EventBus()
+    captured = []
+    bus.subscribe("process_quality_scored", lambda e: captured.append(e))
+    mem = FakeMemory()
+    v = ProcessQualityVerifier(event_bus=bus, memory=mem, persist_feedback=False)
+
+    async def go():
+        for name, kwargs in events:
+            if name == "start":
+                await bus.emit(ToolCallStarted(session_id="s", **kwargs))
+            else:
+                await bus.emit(ToolCallCompleted(session_id="s", **kwargs))
+        return await v.after_task("t", success=True, session_id="s")
+
+    asyncio.run(go())
+    assert captured, "event must still be emitted in eval mode"
+    assert mem.stored == [], "eval mode must not persist feedback to memory"
+    assert report.write_without_lookup == 1
+
+
 def test_retriever_injects_feedback_into_next_prompt():
     feedback = MemoryEntry(
         id="process_quality_feedback",
