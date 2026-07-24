@@ -9,7 +9,8 @@ from synapse.protocols.planner import (
 )
 from synapse.protocols.llm import Message
 from synapse.protocols.events import (
-    ToolCallStarted, ToolCallCompleted, ThrashingDetected, AgentCompleted, AgentProgress, LLMToken
+    ToolCallStarted, ToolCallCompleted, ThrashingDetected, AgentCompleted, AgentProgress, LLMToken,
+    AuthDecisionMade, FileWritten,
 )
 from synapse.core.exceptions import PlannerError
 
@@ -351,6 +352,16 @@ class ReActPlanner:
                             )
                             decision = self.auth.authorize(auth_req)
 
+                            # Emit the decision so security metrics / red-team
+                            # scoring can observe blocks (SafetyMetrics counts
+                            # allowed == False as auth_blocks).
+                            await event_bus.emit(AuthDecisionMade(
+                                session_id=session.id,
+                                tool_name=tool_name,
+                                allowed=decision.allowed,
+                                reason=decision.reason,
+                            ))
+
                             # Hard deny
                             if not decision.allowed:
                                 result = type("TR", (), {
@@ -409,6 +420,14 @@ class ReActPlanner:
                 metrics.tool_call_count += 1
                 if result.success:
                     metrics.tool_success_count += 1
+                    # Surface successful writes so out-of-workspace access can
+                    # be detected by SecurityMetrics (SafetyMetrics.file_written).
+                    if tool_name == "write":
+                        await event_bus.emit(FileWritten(
+                            session_id=session.id,
+                            path=tool_input.get("path", ""),
+                            bytes_written=len(tool_input.get("content", "") or ""),
+                        ))
 
                 # Track file modifications for thrashing detection
                 for f in result.metadata.files_touched:
