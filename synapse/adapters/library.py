@@ -82,6 +82,7 @@ from synapse.modules.security.injection import InjectionGuard
 from synapse.modules.planning.react import ReActPlanner
 from synapse.modules.planning.plan_execute import PlanExecutePlanner
 from synapse.modules.planning.hierarchical import HierarchicalPlanner
+from synapse.modules.planning.swarm import SwarmPlanner
 
 # MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
@@ -526,9 +527,12 @@ class Synapse:
                 complex_planner=complex_planner,
             )
 
+        if mode == PlanningMode.SWARM:
+            return SwarmPlanner(react_planner=react)
+
         raise ValueError(
             f"Unknown planning mode '{mode}'. "
-            f"Available: react, plan_execute, hierarchical"
+            f"Available: react, plan_execute, hierarchical, swarm"
         )
 
     # -- Internal: tool factory ----------------------------------------------

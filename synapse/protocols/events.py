@@ -21,6 +21,11 @@ class EventType(str, Enum):
     CONTEXT_BLOCK_CITED = "context_block_cited"
     LLM_TOKEN = "llm_token"
     PROCESS_QUALITY_SCORED = "process_quality_scored"
+    WORKER_SPAWNED = "worker_spawned"
+    WORKER_COMPLETED = "worker_completed"
+    REVIEW_SUBMITTED = "review_submitted"
+    VOTE_CAST = "vote_cast"
+    SWARM_VERIFIED = "swarm_verified"
 
 
 @dataclass(kw_only=True)
@@ -28,6 +33,9 @@ class BaseEvent:
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
     session_id: str
+    # Swarm/Team attribution (TODO C) — empty for non-swarm events.
+    agent_id: str = ""
+    role: str = ""
 
 
 @dataclass(kw_only=True)
@@ -146,3 +154,53 @@ class ProcessQualityScored(BaseEvent):
     success: bool
     tool_calls: int
     hint: str                         # feedback for the next run
+
+
+# ---- Swarm / Team (TODO C) -------------------------------------------------
+
+
+@dataclass(kw_only=True)
+class WorkerSpawned(BaseEvent):
+    """A swarm worker (role) was spawned for a slice of the task."""
+    event_type: str = EventType.WORKER_SPAWNED
+    agent_id: str
+    role: str
+    task: str
+
+
+@dataclass(kw_only=True)
+class WorkerCompleted(BaseEvent):
+    """A swarm worker finished its slice."""
+    event_type: str = EventType.WORKER_COMPLETED
+    agent_id: str
+    role: str
+    status: str
+    output_snippet: str = ""
+
+
+@dataclass(kw_only=True)
+class ReviewSubmitted(BaseEvent):
+    """A reviewer/verifier submitted a review of another worker's output."""
+    event_type: str = EventType.REVIEW_SUBMITTED
+    agent_id: str
+    reviewer_role: str
+    target_role: str
+    verdict: str                     # "approve" | "reject"
+    comments: str = ""
+
+
+@dataclass(kw_only=True)
+class VoteCast(BaseEvent):
+    """A worker cast a vote (e.g. approve/reject) during swarm resolution."""
+    event_type: str = EventType.VOTE_CAST
+    agent_id: str
+    role: str
+    decision: str
+
+
+@dataclass(kw_only=True)
+class SwarmVerified(BaseEvent):
+    """The swarm's merged result passed (or failed) final verification."""
+    event_type: str = EventType.SWARM_VERIFIED
+    status: str                      # "success" | "partial" | "failed"
+    issues: str = ""

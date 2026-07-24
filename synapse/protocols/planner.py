@@ -9,6 +9,7 @@ class PlanningMode(str, Enum):
     REACT = "react"
     PLAN_EXECUTE = "plan_execute"
     HIERARCHICAL = "hierarchical"
+    SWARM = "swarm"
 
 
 class ResultStatus(str, Enum):
@@ -40,6 +41,10 @@ class AgentResult:
     output: str
     artifacts: list[Artifact] = field(default_factory=list)
     metrics: ExecutionMetrics = field(default_factory=ExecutionMetrics)
+    # Swarm/Team: attribution +溯源 for merge/vote (TODO C).
+    agent_id: str = ""
+    role: str = ""
+    contributors: list["AgentResult"] = field(default_factory=list)
 
 
 class Planner(Protocol):

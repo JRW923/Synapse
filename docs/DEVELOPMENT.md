@@ -1087,3 +1087,74 @@ TODO B 要求：任务完成后**自动验证 Agent 的行为质量**（而不�
 | 过程质量验证闭环 | 已落地（live 生效，非仅 eval） |
 | 反馈回路 | PROJECT 记忆 upsert → 下一任务 prompt 注入 |
 
+---
+
+## 2026-07-24 · 多 Agent 协作（Swarm/Team，TODO C）
+
+### [feat] 核心闭环 MVP
+
+TODO C 要求多个对等 Agent 同时工作、互相 review、投票决策。经调研/方案确认，本次只做**核心闭环**：并行 coder + 只读 reviewer + 验证闭环（reject 则重跑最弱 coder）。冲突处理采用"角色只读 + 文件作用域"——多 coder 由 LLM 拆成互不重叠的文件作用域，只读角色经 `FilteredToolRegistry` 限制工具，并行 coder 用 `session.fork` 隔离。
+
+### 设计取舍
+
+- **角色即差异，不新建 Agent 类**：worker 就是普通 `ReActPlanner`，仅靠 `RoleSpec`（`role` / `system_prompt_suffix` / `tool_filter` / `count` / `file_scope`）区分。新增一种协作角色只需加一个 `RoleSpec`，不引入 Reviewer/Tester/Security 类。
+- **刻意反转 Hierarchical 的串行策略**：`HierarchicalPlanner` 串行执行子任务是为抑制并行错误放大；Swarm 反过来——接受并行，用"验证闭环"抵消风险（reject → 重跑最弱 coder → 重新合并 → 再审，最多 `max_verify_loops` 次）。
+- **复用合并逻辑**：直接复用 `HierarchicalPlanner.merge_subtask_results`，同一套"合成子结果"prompt，不重复造轮子。
+- **只读隔离**：`FilteredToolRegistry` 同时过滤 `get`（执行）与 `get_schemas`（暴露给 LLM 的 schema），让只读角色无法被模型说服去调用写工具。
+
+### 实现
+
+**1. 协议扩展（`protocols/planner.py` + `protocols/events.py`）** —
+- `PlanningMode` 新增 `SWARM`。
+- `AgentResult` 新增 `agent_id` / `role` / `contributors`（用于把 swarm 的并行结果归因到整体）。
+- `BaseEvent` 新增 `agent_id` / `role`（`kw_only` 默认，向后兼容）。
+- 新增五个 swarm 事件：`WorkerSpawned` / `WorkerCompleted` / `ReviewSubmitted` / `VoteCast` / `SwarmVerified`。
+
+**2. 角色与规划器（`modules/planning/swarm.py`，新增）** — `SwarmPlanner`：
+- `DEFAULT_ROLES` = 2 个并行 coder（`file_scope=True`）+ 1 个只读 reviewer（`tool_filter={"read","grep","glob","git"}`）。
+- `execute()`：
+  1. 多 coder 时 `_decompose_scopes` 调 LLM 拆成 `n` 个互不重叠文件作用域（JSON 解析失败优雅回退为 n 份复制）；
+  2. `_spawn` 为每个 worker `session.fork(agent_id)` 拿隔离子会话，只读角色包 `FilteredToolRegistry`；
+  3. coder 用 `asyncio.gather` 真正并行，`worker_completed` 事件随后发出；其他角色（reviewer）等合并后再跑；
+  4. `merge_subtask_results` 合并 coder 输出；
+  5. `reviewer` 审合并结果，`_judge` 从输出文本映射 approve/reject；reject → 重跑最弱 coder（fork 重试会话 + 带上审查意见）→ 重新合并 → 再审，循环受 `max_verify_loops` 限制；
+  6. 发出 `SwarmVerified`，返回 `AgentResult(role="swarm", agent_id="swarm", contributors=[...])`。
+- `_judge(review_result)` 按中文/英文关键词（不通过/reject/fail → reject；通过/approve/lgtm → approve；无结论默认 approve）映射结论。
+
+**3. 接入（`adapters/library.py` + `adapters/cli.py`）** —
+- `library.py` 与 `cli.py` 的 `_create_planner` 均新增 `SWARM` 分支，返回 `SwarmPlanner(react_planner=react)`。
+- `ReActPlanner` 新增 `role` / `system_prompt_suffix` 注入（在 `_build_system_prompt` 前置 `## Your role` 块），供 `SwarmPlanner._make_planner` 复用以给每个 worker 注入角色提示。
+
+### 测试
+
+`tests/modules/test_swarm_planner.py`（4 项，全过）：
+- `test_happy_path_approve`：1 coder + 1 reviewer，reviewer 通过 → 事件齐全（WorkerSpawned×2/WorkerCompleted×2/ReviewSubmitted×1/VoteCast×1/SwarmVerified success），result 带 `role="swarm"` 且 `contributors=2`。
+- `test_coders_run_in_parallel`：2 coder 各自 sleep 50ms，断言"全部 start 早于任意 end"→ 真并发。
+- `test_verify_loop_reruns_on_reject`：reviewer 首拒后通过 → 触发一次 coder 重试 + 重新合并，最终 `SwarmVerified` success，审查序列为 `["reject","approve"]`。
+- `test_filtered_tool_registry`：`FilteredToolRegistry` 允许读工具、拒绝写工具、schema 过滤正确。
+
+### ponytail 已知上限
+
+MVP **不在沙箱层硬隔离文件作用域**——依赖 LLM 分解质量。升级路径：把 `file_scope` 作为写白名单传给 sandbox/workspace。`test_verify_loop_reruns_on_reject` 曾因测试把 reviewer 的 `side_effect` 设成单个 lambda（导致 reviewer 永远 reject、验证循环跑满两轮）而失败，改为"每角色完整列表 side_effect"后通过——同时把事件的测试捕获回调改为 async（EventBus `emit` 会 `await` handler，同步回调会触发 `await NoneType` 警告）。
+
+### 文件清单
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `synapse/protocols/planner.py` | 修改 | `SWARM` 模式 + `AgentResult.agent_id/role/contributors` |
+| `synapse/protocols/events.py` | 修改 | `agent_id`/`role` + 5 个 swarm 事件 |
+| `synapse/modules/planning/swarm.py` | 新增 | `RoleSpec` / `DEFAULT_ROLES` / `FilteredToolRegistry` / `SwarmPlanner` |
+| `synapse/modules/planning/react.py` | 修改 | `role` / `system_prompt_suffix` 注入 |
+| `synapse/modules/planning/hierarchical.py` | 修改 | `merge_subtask_results` 重构为模块级函数（供 swarm 复用） |
+| `synapse/adapters/library.py` | 修改 | 注册 `SWARM` 分支 |
+| `synapse/adapters/cli.py` | 修改 | `_create_planner` 加 `SWARM` 分支 |
+| `tests/modules/test_swarm_planner.py` | 新增 | 4 项 Swarm 闭环测试 |
+
+### 当前状态（更新）
+
+| 指标 | 数值 |
+|------|------|
+| Tests | 229（+5：4 swarm + 1 过程质量 eval 纯净度） |
+| 多 Agent 协作 | 核心闭环 MVP 已落地（并行 coder + 只读 reviewer + 验证闭环） |
+| 规划模式 | ReAct / PlanExecute / Hierarchical / **Swarm**（4） |
+

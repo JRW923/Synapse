@@ -194,35 +194,51 @@ class HierarchicalPlanner:
         session,
     ) -> str:
         """Ask the LLM to synthesize subtask results into a single output."""
-        parts: list[str] = []
-        for st, result in subtask_results:
-            label = "SUCCESS" if result.status == ResultStatus.SUCCESS else result.status.value.upper()
-            parts.append(
-                f"### Subtask {st.id}: {st.description} [{label}]\n"
-                f"{result.output}\n"
-            )
+        items = [(st.id, st.description, r) for st, r in subtask_results]
+        return await merge_subtask_results(task, items, llm, event_bus, session)
 
-        system_prompt = (
-            "You are a result-merging expert. Given the original task and the "
-            "results of individual subtasks, produce a single coherent final "
-            "output. Synthesize — do not just list."
+
+async def merge_subtask_results(
+    task: str,
+    items: list[tuple[str, str, AgentResult]],
+    llm,
+    event_bus,
+    session,
+) -> str:
+    """Merge ``(id, description, AgentResult)`` items into one coherent output.
+
+    Shared by :class:`HierarchicalPlanner` and the Swarm planner (TODO C) so
+    the same "synthesize subtask results" prompt is reused.
+    """
+    parts: list[str] = []
+    for sid, desc, result in items:
+        label = "SUCCESS" if result.status == ResultStatus.SUCCESS else result.status.value.upper()
+        parts.append(
+            f"### Subtask {sid}: {desc} [{label}]\n"
+            f"{result.output}\n"
         )
-        messages = [
-            Message(role="system", content=system_prompt),
-            Message(role="user", content=(
-                f"Original task: {task}\n\n"
-                f"Subtask results:\n\n{''.join(parts)}\n\n"
-                "Please merge these into a single coherent final output."
-            )),
-        ]
 
-        response = await llm.chat(messages)
-        merged = response.content.strip()
+    system_prompt = (
+        "You are a result-merging expert. Given the original task and the "
+        "results of individual subtasks, produce a single coherent final "
+        "output. Synthesize — do not just list."
+    )
+    messages = [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=(
+            f"Original task: {task}\n\n"
+            f"Subtask results:\n\n{''.join(parts)}\n\n"
+            "Please merge these into a single coherent final output."
+        )),
+    ]
 
-        await event_bus.emit(MergeResult(
-            session_id=session.id,
-            subtask_count=len(subtask_results),
-            merged_output=merged,
-        ))
+    response = await llm.chat(messages)
+    merged = response.content.strip()
 
-        return merged
+    await event_bus.emit(MergeResult(
+        session_id=session.id,
+        subtask_count=len(items),
+        merged_output=merged,
+    ))
+
+    return merged

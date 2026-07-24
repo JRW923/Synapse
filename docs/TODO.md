@@ -41,7 +41,7 @@
 
 ### C · 多 Agent 协作（Swarm/Team）
 
-**状态**：待实现
+**状态**：✅ 已完成 (2026-07-24)
 
 当前只有单 Agent + HierarchicalPlanner 的树形分解。真正的多 Agent 协作是多个对等 Agent 同时工作、互相 review、投票决策。
 
@@ -50,6 +50,20 @@
 - 冲突解决与结果合并
 - 专用 Agent（Code Reviewer、Test Writer、Security Auditor）
 - 并行 Agent 的错误放大问题需要专门的验证 Agent 来抵消
+
+**实现（2026-07-24）· 核心闭环 MVP**：新增 `synapse/modules/planning/swarm.py` 的 `SwarmPlanner`，做"对等并行 + 验证闭环"的最小可用闭环：
+
+- **角色即差异**：worker 就是普通 `ReActPlanner`，仅靠 `RoleSpec(role, system_prompt_suffix, tool_filter, count, file_scope)` 区分——无需新建 Reviewer/Tester 类。新增角色只需加一个 `RoleSpec`。
+- **默认团队**：2 个并行 coder（`file_scope=True`）+ 1 个只读 reviewer（`tool_filter={"read","grep","glob","git"}`）。
+- **并行与隔离**：多 coder 时由 LLM 拆成互不重叠的文件作用域（`_decompose_scopes`，解析失败优雅回退为 n 份复制）；每个 worker 用 `session.fork(agent_id)` 拿到隔离子会话；coder 用 `asyncio.gather` 真正并行，reviewer 等合并后再审。
+- **结果合并**：复用 `HierarchicalPlanner` 的 `merge_subtask_results`（同一套"合成子结果"prompt，不重复造轮子）。
+- **验证闭环**：reviewer 审合并结果，结论由 `_judge` 从输出文本映射为 approve/reject；reject 则重跑最弱 coder（fork 重试会话、带上审查意见），重新合并再审，最多 `max_verify_loops` 次。这刻意反转了 Hierarchical 的"串行以抑制错误放大"——用验证闭环来抵消并行的风险。
+- **只读隔离**：`FilteredToolRegistry` 同时过滤 `get`（执行）与 `get_schemas`（暴露给 LLM 的 schema），让只读角色无法被模型说服去调用写工具。
+- **事件**：新增 `WorkerSpawned / WorkerCompleted / ReviewSubmitted / VoteCast / SwarmVerified` 五个事件（`protocols/events.py`），`BaseEvent` 增加 `agent_id`/`role` 字段；`AgentResult` 增加 `agent_id`/`role`/`contributors`。
+- **接入**：`PlanningMode.SWARM` 已注册到 `adapters/library.py` 与 `adapters/cli.py`，`ReActPlanner` 支持 `role`/`system_prompt_suffix` 注入。
+- **测试**：`tests/modules/test_swarm_planner.py`（4 项：happy-path 通过 / coder 真正并行 / reject 后验证闭环重跑 / 工具过滤）。
+
+**ponytail 已知上限**：MVP 不在沙箱层硬隔离文件作用域，依赖分解质量；升级路径是把 `file_scope` 作为写白名单传给 sandbox/workspace。
 
 **难度**：高
 

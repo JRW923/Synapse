@@ -38,7 +38,8 @@ class ReActPlanner:
                  max_thrashing_events: int = 2,
                  max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
-                 verbose: bool = True):
+                 verbose: bool = True,
+                 role: str = "", system_prompt_suffix: str = ""):
         self.max_iterations = max_iterations
         self.thrashing_threshold = thrashing_threshold
         self.max_thrashing_events = max_thrashing_events
@@ -47,6 +48,10 @@ class ReActPlanner:
         self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
         self.total_timeout_seconds = total_timeout_seconds
         self.verbose = verbose
+        # TODO C — role lets one ReActPlanner act as a specialized swarm worker
+        # (e.g. "reviewer") without a separate class.
+        self.role = role
+        self.system_prompt_suffix = system_prompt_suffix
 
     def _log(self, msg: str):
         """Print a progress message if verbose is enabled.
@@ -491,6 +496,16 @@ class ReActPlanner:
         so the LLM can gauge provenance.
         """
         blocks = []
+
+        # TODO C — prepend role instruction so this planner acts as a
+        # specialized swarm worker (reviewer/tester/security/...).
+        if self.role or self.system_prompt_suffix:
+            role_block = "## Your role\n"
+            if self.role:
+                role_block += f"You are operating as the **{self.role}** role.\n"
+            if self.system_prompt_suffix:
+                role_block += self.system_prompt_suffix + "\n"
+            blocks.append(role_block.strip())
 
         # Add tools usage instruction
         tools_instruction = (

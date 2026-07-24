@@ -212,6 +212,7 @@ def _create_planner(config, auth):
     from synapse.modules.planning.react import ReActPlanner
     from synapse.modules.planning.plan_execute import PlanExecutePlanner
     from synapse.modules.planning.hierarchical import HierarchicalPlanner
+    from synapse.modules.planning.swarm import SwarmPlanner
 
     mode = config.planning.mode.lower()
     cfg = config.planning
@@ -235,9 +236,12 @@ def _create_planner(config, auth):
             complex_planner=complex_planner,
         )
 
+    if mode == PlanningMode.SWARM:
+        return SwarmPlanner(react_planner=react)
+
     raise ValueError(
         f"Unknown planning mode '{mode}'. "
-        "Available: react, plan_execute, hierarchical"
+        "Available: react, plan_execute, hierarchical, swarm"
     )
 
 
