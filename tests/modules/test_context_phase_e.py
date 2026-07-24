@@ -19,7 +19,11 @@ from synapse.protocols.events import ContextBlockCited, EventType
 from synapse.modules.context.partitioner import ContextPartitioner
 from synapse.modules.context.compactor import ContextCompactor
 from synapse.modules.context.llm_compactor import LLMCompactor
-from synapse.modules.context.citation import CitationTracker, _extract_signals
+from synapse.modules.context.citation import (
+    CitationTracker,
+    _extract_signals,
+    _MAX_SIGNALS_PER_BLOCK,
+)
 from synapse.config.schema import ContextConfig, SynapseConfig, PlanningConfig
 
 
@@ -175,6 +179,111 @@ class TestCitationTracker:
         assert report["total"] == 4
         zones = {r["zone"] for r in report["blocks"]}
         assert zones == {"system", "core", "reference", "overflow"}
+
+
+# ---- Phase 4: _extract_signals boundary cases ---------------------------
+
+class TestExtractSignalsBoundaries:
+    """Boundary cases around the path-signal length/separator filter.
+
+    The filter (citation.py:34) requires BOTH a length >= 6 AND a path
+    separator. A backslash must NOT bypass the length gate.
+    """
+
+    def test_short_backslash_path_is_dropped(self):
+        # Regression guard for the operator-precedence bug: a <6-char token
+        # with a backslash (and no forward slash) must be filtered out.
+        block = make_block(r"see a\b.c for details")
+        assert r"a\b.c" not in _extract_signals(block)
+
+    def test_long_backslash_path_is_kept(self):
+        # Windows-style path (colon excluded by the path char class, so the
+        # captured signal starts at the backslash), long enough -> kept.
+        block = make_block(r"edit \foo\bar.py now")
+        assert r"\foo\bar.py" in _extract_signals(block)
+
+    def test_long_forwardslash_path_is_kept(self):
+        block = make_block("from src/a/b.py import x")
+        assert "src/a/b.py" in _extract_signals(block)
+
+    def test_length_boundary_exactly_six_with_separator_kept(self):
+        # "a/b.py" is exactly 6 chars and contains a separator.
+        block = make_block("use a/b.py here")
+        assert "a/b.py" in _extract_signals(block)
+
+    def test_length_boundary_five_with_separator_dropped(self):
+        # "a/b.x" is 5 chars with a separator -> below the length gate.
+        block = make_block("use a/b.x here")
+        assert "a/b.x" not in _extract_signals(block)
+
+    def test_short_extension_noise_dropped(self):
+        # No separator -> noise even if it carries an extension.
+        block = make_block("version v1.0 then asyncio.py")
+        signals = _extract_signals(block)
+        assert "v1.0" not in signals
+        assert "asyncio.py" not in signals
+
+    def test_symbol_signals_ignore_length_gate(self):
+        # def/class/function names are extracted regardless of the length gate.
+        block = make_block("def helper:\nclass Widget:\nfunction run")
+        signals = _extract_signals(block)
+        assert "helper" in signals
+        assert "Widget" in signals
+        assert "run" in signals
+
+    def test_signal_count_capped(self):
+        # Many long distinctive lines -> only _MAX_SIGNALS_PER_BLOCK kept.
+        lines = "\n".join(
+            f"this is a distinctive line number {i} here" for i in range(20)
+        )
+        block = make_block(lines)
+        assert len(_extract_signals(block)) == _MAX_SIGNALS_PER_BLOCK
+
+
+# ---- Phase 4: track_response / mark_usage boundaries --------------------
+
+class TestCitationTrackingBoundaries:
+    def test_empty_response_returns_zero(self):
+        block = make_block("src/main.py")
+        ctx = Context(core=[block])
+        bus = MagicMock()
+        bus.emit = AsyncMock()
+        n = asyncio.run(CitationTracker().track_response("", ctx, bus, "s"))
+        assert n == 0
+        assert block.citation_count == 0
+        assert bus.emit.call_count == 0
+
+    def test_case_insensitive_match(self):
+        block = make_block("see SRC/Main.py and class App")
+        ctx = Context(core=[block])
+        bus = MagicMock()
+        bus.emit = AsyncMock()
+        n = asyncio.run(CitationTracker().track_response(
+            "I read src/main.py and app", ctx, bus, "s",
+        ))
+        assert n == 1
+        assert block.citation_count == 1
+
+    def test_overflow_zone_not_tracked(self):
+        # overflow is never injected to the LLM (react.py), so it is never
+        # usage-marked or citation-scanned — assert that boundary holds.
+        block = make_block("src/overflow.py unique-sentinel")
+        ctx = Context(overflow=[block])
+        bus = MagicMock()
+        bus.emit = AsyncMock()
+        n = asyncio.run(CitationTracker().track_response(
+            "src/overflow.py unique-sentinel", ctx, bus, "s",
+        ))
+        assert n == 0
+        assert block.citation_count == 0
+
+    def test_mark_usage_skips_overflow(self):
+        ov = make_block("overflow only")
+        core = make_block("core only")
+        ctx = Context(core=[core], overflow=[ov])
+        CitationTracker().mark_usage(ctx)
+        assert core.usage_count == 1
+        assert ov.usage_count == 0
 
 
 # ---- Phase 0.3: ContextConfig -------------------------------------------
