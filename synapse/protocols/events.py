@@ -20,6 +20,7 @@ class EventType(str, Enum):
     MERGE_RESULT = "merge_result"
     CONTEXT_BLOCK_CITED = "context_block_cited"
     LLM_TOKEN = "llm_token"
+    PROCESS_QUALITY_SCORED = "process_quality_scored"
 
 
 @dataclass(kw_only=True)
@@ -127,3 +128,21 @@ class LLMToken(BaseEvent):
     """Streaming LLM text chunk — emitted per token for live CLI display."""
     event_type: str = EventType.LLM_TOKEN
     text: str
+
+
+@dataclass(kw_only=True)
+class ProcessQualityScored(BaseEvent):
+    """Emitted after a task completes — the process-quality verification result.
+
+    Carries the composite score plus the signals that produced it, and a
+    natural-language ``hint`` intended to be fed back into the next task.
+    """
+    event_type: str = EventType.PROCESS_QUALITY_SCORED
+    task: str
+    score: float                      # 0..1 composite process-quality score
+    reuse_ratio: float                # fraction of writes preceded by a lookup
+    write_without_lookup: int         # writes with no preceding lookup
+    thrashing_events: int
+    success: bool
+    tool_calls: int
+    hint: str                         # feedback for the next run

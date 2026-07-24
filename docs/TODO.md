@@ -24,7 +24,7 @@
 
 ### B · 过程质量验证闭环
 
-**状态**：待实现
+**状态**：✅ 已完成 (2026-07-24)
 
 当前 ProcessMetrics 采集了指标但缺少自动验证——即在任务完成后自动检查 Agent 行为质量，并反馈给 Agent 以改进下次执行。
 
@@ -32,6 +32,8 @@
 - 对工具调用序列做模式识别（"先 grep 再 write"=复用，"直接 write"=未复用）
 - 任务完成后生成过程质量评分
 - 设计反馈机制（prompt 中注入质量提示或记忆系统记录）
+
+**实现（2026-07-24）**：新增 `synapse/modules/process_quality.py` 的 `ProcessQualityVerifier`，订阅 `tool_call_*` 事件捕获有序工具序列；任务结束（`Agent.run` 后处理钩子）时按"写/改前是否有 read/grep/glob 命中同文件"判定复用率，与成功与否加权得 0~1 过程质量分，发出 `process_quality_scored` 事件，并把滚动反馈条目写入 PROJECT 记忆。检索器 `_build_reference` 用固定查询把该反馈注入下一任务的 reference 上下文→进入 system prompt，形成闭环。详见 `DEVELOPMENT.md`。
 
 **难度**：较高
 

@@ -1028,3 +1028,62 @@ Phase 2 计划（`plans/2026-07-16-synapse-phase-2.md:32,38`）把 `stream suppo
 | 流式输出 | 5/5 provider 已落地 |
 | CLI 实时显示 | `_LiveDisplay` 已接入，`LLMToken` 实时渲染 |
 
+---
+
+## 2026-07-24 · 过程质量验证闭环（TODO B）
+
+### 背景
+
+TODO B 要求：任务完成后**自动验证 Agent 的行为质量**（而不只是看补丁是否通过），并把结论反馈给 Agent 以改进下次执行。既有 `ProcessMetrics`（`eval/metrics/process.py`）已采集复用/根因/测试留存等指标，但：
+
+1. 它只在 `enable_eval=True` 时接入——正常 `synapse run` 里是死的；
+2. 它做的是**逐事件计数**，没有对工具调用**序列**做模式识别；
+3. 没有统一的过程质量分，也没有反馈回路。
+
+本次补上"序列模式识别 → 评分 → 反馈"的闭环，且该闭环在**正常 run** 中也生效。
+
+### 实现
+
+四步闭环，自底向上：
+
+**1. 事件（`protocols/events.py`）** — 新增 `PROCESS_QUALITY_SCORED = "process_quality_scored"` 与 `ProcessQualityScored` 数据类（`task / score / reuse_ratio / write_without_lookup / thrashing_events / success / tool_calls / hint`）。
+
+**2. 验证器（`modules/process_quality.py`）** — `ProcessQualityVerifier`：
+- 构造时订阅 `tool_call_started` / `tool_call_completed` / `thrashing_detected`，按发生顺序捕获工具序列（每次调用记 `name / params / files / success`）。
+- `after_task(task, success)`（`Agent.run` 后处理钩子调用）：
+  - **复用判定**：遍历序列，对每个 `write`/`edit`（变更类工具），检查其之前是否有 `read`/`grep`/`glob`/`git`（检索类工具）命中同一文件（路径相等 / 祖先目录 / 互含）。命中 → 复用正向；未命中 → `write_without_lookup`。
+  - **评分**：`score = 0.6 * reuse_ratio + 0.4 * success_factor`（成功=1.0、失败=0.3），再按 thrashing 次数小幅扣分（封顶）。
+  - **反馈文本**：复用率低且有"盲写"→ 提示"先 grep/read 再写"；有 thrashing → 提示先读懂再改；否则正向鼓励。
+  - 发出 `ProcessQualityScored` 事件，并把反馈以**滚动条目**（固定 id `process_quality_feedback`，`forget`+`store` 实现 upsert）写入 **PROJECT** 记忆。
+
+**3. 接线（`adapters/library.py` + `core/agent.py`）** — `ProcessQualityVerifier` 在容器构建时**无条件注册**（不再受 `enable_eval` 限制，因为是 live 功能）；`Agent.__init__` 解析它（try/except，缺失则跳过），`Agent.run()` 在 `_persist_memory` 之后调用 `verifier.after_task(...)`。
+
+**4. 反馈注入（`modules/context/retriever.py`）** — `_build_reference` 在原有 SESSION 记忆检索之后，额外用固定查询 `"process quality feedback"` 检索 **PROJECT** 记忆，把滚动反馈块（priority 6）注入下一任务的 `reference` 上下文。由于 planner 会把 `reference` 注入 system prompt，Agent 下次执行时即看到自己的过程质量反馈，闭环完成。
+
+### 测试
+
+`tests/modules/test_process_quality.py`（4 项）：
+- `grep` 先于 `write` 命中同文件 → `reuse_ratio=1.0`、高分、正向 hint；
+- 直接 `write` 无前置检索 → `reuse_ratio=0`、低分、hint 提示先检索；
+- 复用良好但任务失败 → 分数介于纯失败地板与满分之间（失败仍扣分）；
+- 检索器 `_build_reference` 确实把反馈块注入 reference 上下文。
+
+### 文件清单
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `synapse/protocols/events.py` | 修改 | 新增 `PROCESS_QUALITY_SCORED` 事件 + `ProcessQualityScored` |
+| `synapse/modules/process_quality.py` | 新增 | `ProcessQualityVerifier` + `ProcessQualityReport` |
+| `synapse/adapters/library.py` | 修改 | 无条件注册 `ProcessQualityVerifier` |
+| `synapse/core/agent.py` | 修改 | 解析并调用 `verifier.after_task()` |
+| `synapse/modules/context/retriever.py` | 修改 | `_build_reference` 注入过程质量反馈 |
+| `tests/modules/test_process_quality.py` | 新增 | 4 项闭环测试 |
+
+### 当前状态（更新）
+
+| 指标 | 数值 |
+|------|------|
+| Tests | 224（+4 过程质量闭环） |
+| 过程质量验证闭环 | 已落地（live 生效，非仅 eval） |
+| 反馈回路 | PROJECT 记忆 upsert → 下一任务 prompt 注入 |
+

@@ -386,6 +386,13 @@ class Synapse:
         layered = LayeredMemory(session_memory, project_memory, user_memory, semantic_memory)
         c.register(MemoryStore, layered)
 
+        # Process-quality verification closed loop (TODO B) — live, not eval-gated.
+        from synapse.modules.process_quality import ProcessQualityVerifier
+        c.register(
+            ProcessQualityVerifier,
+            ProcessQualityVerifier(event_bus=event_bus, memory=layered),
+        )
+
         # Context
         retriever = BasicContextRetriever()
         c.register(ContextRetriever, retriever)

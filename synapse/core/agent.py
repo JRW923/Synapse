@@ -3,7 +3,7 @@
 from synapse.core.container import Container
 from synapse.core.session import Session
 from synapse.protocols.llm import LLMProvider
-from synapse.protocols.planner import Planner, AgentResult
+from synapse.protocols.planner import Planner, AgentResult, ResultStatus
 from synapse.protocols.tool import ToolRegistry
 from synapse.protocols.memory import MemoryStore, MemoryLevel, MemoryEntry, MemoryMetadata
 from synapse.protocols.retriever import ContextRetriever, ContextSource, Context, ContextBudget
@@ -74,6 +74,14 @@ class Agent:
         self._citation_tracker = None
         self._last_context = None
 
+        # TODO B — process-quality verification closed loop (optional service).
+        self._quality_verifier = None
+        try:
+            from synapse.modules.process_quality import ProcessQualityVerifier
+            self._quality_verifier = container.resolve(ProcessQualityVerifier)
+        except (KeyError, ImportError):
+            pass
+
     async def run(self, task: str, session: Session) -> AgentResult:
         # 1. Build context (Phase 3: task type drives budget selection)
         context = await self._build_context(task, session)
@@ -107,6 +115,17 @@ class Agent:
 
         # 4. Persist session memory
         await self._persist_memory(session, task, result)
+
+        # TODO B — verify process quality; the hint is stored to PROJECT memory
+        # and re-injected into the next task's prompt by the retriever.
+        if self._quality_verifier is not None:
+            try:
+                await self._quality_verifier.after_task(
+                    task, result.status == ResultStatus.SUCCESS,
+                    session_id=session.id if session else "",
+                )
+            except Exception:
+                pass
 
         return result
 

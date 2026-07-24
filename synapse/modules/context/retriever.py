@@ -101,6 +101,22 @@ class BasicContextRetriever:
                     priority=5,
                     token_count=len(entry.content) // 4,
                 ))
+
+            # TODO B — pull the rolling process-quality feedback (fixed id/tag)
+            # and inject it into the next task's reference context so the agent
+            # sees its own prior process-quality hint.  Stored at PROJECT level,
+            # retrieved by a stable query that matches its content sentinel.
+            fb = await memory.retrieve(
+                "process quality feedback", MemoryLevel.PROJECT, top_k=1,
+            )
+            for entry in fb:
+                if entry.content not in {b.content for b in blocks}:
+                    blocks.append(ContextBlock(
+                        content=entry.content,
+                        source=ContextSource.MEMORY,
+                        priority=6,
+                        token_count=len(entry.content) // 4,
+                    ))
         except Exception:
             pass
         return blocks
