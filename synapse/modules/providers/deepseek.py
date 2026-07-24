@@ -6,19 +6,17 @@ the Anthropic protocol at ``api.deepseek.com/anthropic`` (handled in
 ``_resolve_provider`` in library.py).
 """
 
-import json
-import logging
-from openai import AsyncOpenAI
-from synapse.protocols.llm import LLMResponse, LLMChunk, Message
-from synapse.core.exceptions import ProviderError
+import os
+from synapse.modules.providers.openai_compatible import OpenAICompatibleProvider
 
-logger = logging.getLogger(__name__)
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 
-class DeepSeekProvider:
+class DeepSeekProvider(OpenAICompatibleProvider):
     """LLM provider backed by DeepSeek's OpenAI-compatible API."""
+
+    _error_prefix = "DeepSeek"
 
     def __init__(
         self,
@@ -28,143 +26,19 @@ class DeepSeekProvider:
         base_url: str = DEEPSEEK_BASE_URL,
         timeout_seconds: int = 120,
     ):
-        import os
-        self._model = model
-        self._max_tokens = max_tokens
-        self._base_url = base_url
         # If no key provided, try env vars (DEEPSEEK_API_KEY first, then OPENAI_API_KEY)
         resolved_key = api_key or os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-        self._client = AsyncOpenAI(
+        super().__init__(
+            model=model,
             api_key=resolved_key,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
             base_url=base_url,
-            timeout=timeout_seconds,
         )
 
-    @property
-    def model_id(self) -> str:
-        return self._model
-
-    async def chat(
-        self,
-        messages: list[Message],
-        tools: list[dict] | None = None,
-    ) -> LLMResponse:
-        converted = self._convert_messages(messages)
-
-        try:
-            kwargs: dict = {
-                "model": self._model,
-                "messages": converted,
-                "max_tokens": self._max_tokens,
-            }
-            if tools:
-                kwargs["tools"] = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": t["name"],
-                            "description": t["description"],
-                            "parameters": t.get("input_schema", t.get("parameters", {})),
-                        },
-                    }
-                    for t in tools
-                ]
-
-            response = await self._client.chat.completions.create(**kwargs)
-            return self._parse_response(response)
-        except Exception as e:
-            raise ProviderError(f"DeepSeek API error: {e}") from e
-
-    async def stream(self, messages: list[Message], tools: list[dict] | None = None):
-        """Stream chat completions as a sequence of LLMChunk deltas."""
-        converted = self._convert_messages(messages)
-
-        kwargs: dict = {
-            "model": self._model,
-            "messages": converted,
-            "max_tokens": self._max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if tools:
-            kwargs["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t["description"],
-                        "parameters": t.get("input_schema", t.get("parameters", {})),
-                    },
-                }
-                for t in tools
-            ]
-
-        usage: dict[str, int] = {}
-        try:
-            async for chunk in self._client.chat.completions.create(**kwargs):
-                if getattr(chunk, "usage", None):
-                    usage = {
-                        "input": chunk.usage.prompt_tokens or 0,
-                        "output": chunk.usage.completion_tokens or 0,
-                    }
-                if not chunk.choices:
-                    continue
-                delta = chunk.choices[0].delta
-                content = delta.content or ""
-                tool_delta = None
-                if delta.tool_calls:
-                    tc = delta.tool_calls[0]
-                    tool_delta = {
-                        "index": tc.index,
-                        "id": tc.id,
-                        "name": tc.function.name if tc.function else None,
-                        "input": tc.function.arguments if tc.function else None,
-                    }
-                if content or tool_delta:
-                    yield LLMChunk(content=content, tool_call_delta=tool_delta)
-            if usage:
-                yield LLMChunk(usage=usage)
-        except Exception as e:
-            raise ProviderError(f"DeepSeek API error: {e}") from e
-
-    def _convert_messages(self, messages: list[Message]) -> list[dict]:
-        """Convert internal Message objects to OpenAI-compatible JSON dicts.
-
-        Handles:
-        - assistant messages with tool_calls → OpenAI tool_calls format
-        - tool messages → OpenAI tool role with tool_call_id
-        - empty user messages (legacy placeholders) are filtered out
-        """
-        result = []
-        for msg in messages:
-            if msg.role == "user" and msg.content == "" and not msg.tool_call_id:
-                continue
-
-            entry: dict = {"role": msg.role, "content": msg.content}
-
-            # Assistant message with tool_calls
-            if msg.role == "assistant" and msg.tool_calls:
-                entry["tool_calls"] = [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": json.dumps(tc["input"], ensure_ascii=False),
-                        },
-                    }
-                    for tc in msg.tool_calls
-                ]
-
-            # Tool result message
-            if msg.role == "tool" and msg.tool_call_id:
-                entry["tool_call_id"] = msg.tool_call_id
-
-            result.append(entry)
-        return result
-
-    def _parse_response(self, response) -> LLMResponse:
-        """Parse OpenAI-compatible response into our internal LLMResponse."""
+    def _parse_response(self, response) -> "object":
+        """Parse OpenAI-compatible response (no tool_use stop-reason mapping)."""
+        from synapse.protocols.llm import LLMResponse
         choice = response.choices[0]
         message = choice.message
 
@@ -176,13 +50,11 @@ class DeepSeekProvider:
 
         if message.tool_calls:
             for tc in message.tool_calls:
-                tool_calls.append(
-                    {
-                        "id": tc.id,
-                        "name": tc.function.name,
-                        "input": json.loads(tc.function.arguments),
-                    }
-                )
+                tool_calls.append({
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "input": __import__("json").loads(tc.function.arguments),
+                })
 
         return LLMResponse(
             content="\n".join(text_parts) if text_parts else "",
@@ -193,9 +65,3 @@ class DeepSeekProvider:
                 "output": response.usage.completion_tokens,
             },
         )
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *args):
-        pass

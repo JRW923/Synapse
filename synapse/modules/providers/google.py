@@ -1,5 +1,6 @@
 """Google Gemini LLM Provider implementation."""
 
+import json
 import logging
 from synapse.protocols.llm import LLMResponse, LLMChunk, Message
 from synapse.core.exceptions import ProviderError
@@ -127,28 +128,48 @@ if _GOOGLE_AVAILABLE:
             return None
 
         def _convert_messages(self, messages: list[Message]) -> list[genai_types.Content]:
-            """Convert internal Message list to Gemini Content list."""
+            """Convert internal Message list to Gemini Content list.
+
+            Multi-turn tool use is preserved: an assistant message that
+            carries tool_calls emits one ``function_call`` part per call (so
+            Gemini sees what the model decided), and a subsequent tool-result
+            message emits a ``function_response`` whose name is recovered from
+            the preceding call via its ``tool_call_id``.
+            """
             result: list[genai_types.Content] = []
+            call_names: dict[str, str] = {}
             for msg in messages:
                 if msg.role == "system":
                     continue
 
                 if msg.role == "assistant" and msg.tool_calls:
-                    # Assistant message with tool_calls — need to handle in a future update
-                    # For now, include the text content if any
                     parts = []
                     if msg.content:
                         parts.append(genai_types.Part.from_text(text=msg.content))
+                    for tc in msg.tool_calls:
+                        call_names[tc["id"]] = tc["name"]
+                        args = tc.get("input") or {}
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except (ValueError, json.JSONDecodeError):
+                                args = {}
+                        parts.append(genai_types.Part.from_function_call(
+                            name=tc["name"],
+                            args=args,
+                        ))
                     result.append(genai_types.Content(role="model", parts=parts))
                     continue
 
                 if msg.role == "tool" and msg.tool_call_id:
-                    # Tool result — convert to function_response
+                    # Recover the original function name so Gemini can pair the
+                    # response with its call (empty name breaks multi-turn).
+                    name = call_names.get(msg.tool_call_id, "")
                     result.append(
                         genai_types.Content(
                             role="tool",
                             parts=[genai_types.Part.from_function_response(
-                                name="",
+                                name=name,
                                 response={"result": msg.content},
                             )],
                         )

@@ -70,7 +70,7 @@ class BudgetHistory:
 
     def __init__(self, project_memory=None):
         self._memory = project_memory
-        # In-memory cache when no ProjectMemory is wired.
+        # In-memory cache of the merged, authoritative history per task type.
         self._cache: dict[TaskType, dict] = {}
 
     async def record(self, task_type: TaskType, citation_report: dict | None) -> None:
@@ -81,7 +81,7 @@ class BudgetHistory:
         if not blocks:
             return
 
-        stats = self._load(task_type)
+        stats = await self._load(task_type)
         stats["samples"] = stats.get("samples", 0) + 1
         stats["per_zone"] = stats.get("per_zone", {})
 
@@ -118,12 +118,38 @@ class BudgetHistory:
             except Exception:
                 pass
 
-    def _load(self, task_type: TaskType) -> dict:
-        """Load history for a task type. In-memory cache only — ProjectMemory
-        async retrieval is handled lazily by callers if needed."""
-        return self._cache.get(task_type, {"samples": 0, "per_zone": {}})
+    async def _load(self, task_type: TaskType) -> dict:
+        """Load history for a task type, seeded from persisted ProjectMemory.
 
-    def suggest_adjustment(self, task_type: TaskType, base: ContextBudget) -> ContextBudget:
+        Each persisted `budget_history` entry is a *cumulative snapshot*, so we
+        take the one with the most samples as the canonical base (never sum
+        snapshots — that would double-count).  The in-memory cache wins when it
+        already holds a newer/more complete count for this session.
+        """
+        stats = dict(self._cache.get(task_type, {"samples": 0, "per_zone": {}}))
+        if self._memory is not None:
+            try:
+                from synapse.protocols.memory import MemoryLevel
+                import ast
+                entries = await self._memory.retrieve(
+                    "budget_history", MemoryLevel.PROJECT, top_k=50,
+                )
+                latest = None
+                for entry in entries:
+                    if f"budget_history {task_type.value}:" not in entry.content:
+                        continue
+                    seg = entry.content.split(":", 1)[1].strip()
+                    snap = ast.literal_eval(seg)
+                    if latest is None or snap.get("samples", 0) > latest.get("samples", 0):
+                        latest = snap
+                if latest is not None and latest.get("samples", 0) > stats.get("samples", 0):
+                    stats = latest
+                    self._cache[task_type] = latest
+            except Exception:
+                pass
+        return stats
+
+    async def suggest_adjustment(self, task_type: TaskType, base: ContextBudget) -> ContextBudget:
         """Suggest a budget adjustment based on historical citation rates.
 
         If samples < _MIN_SAMPLES_FOR_ADJUSTMENT, returns `base` unchanged.
@@ -131,7 +157,7 @@ class BudgetHistory:
         toward zones with higher citation rates (capped at _MAX_SHIFT_PCT
         per zone, redistributed proportionally from low-citation zones).
         """
-        stats = self._load(task_type)
+        stats = await self._load(task_type)
         if stats.get("samples", 0) < _MIN_SAMPLES_FOR_ADJUSTMENT:
             return base
 

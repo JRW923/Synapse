@@ -32,7 +32,44 @@ class BasicContextRetriever:
         # 3. REFERENCE: session memory entries related to task
         ctx.reference = await self._build_reference(task, memory)
 
+        # 4. OVERFLOW: route reference results that exceed the reference budget
+        #    into the overflow zone so the ContextCompactor can summarize them
+        #    (TODO E Phase 0/1).  Without this the overflow zone is never
+        #    populated and the compactor never runs.
+        #    ponytail: overflow is populated here, but react.py does NOT inject
+        #    it directly — agent._build_context folds the *compacted* overflow
+        #    back into `reference` so the LLM actually consumes the summary.
+        ctx.reference, ctx.overflow = self._route_overflow(ctx.reference, budget)
+
         return ctx
+
+    def _route_overflow(
+        self, blocks: list[ContextBlock], budget: ContextBudget,
+    ) -> tuple[list[ContextBlock], list[ContextBlock]]:
+        """Split reference blocks into (kept, overflow) by the reference budget.
+
+        Keeps highest-priority blocks in ``reference`` up to
+        ``reference_pct * total_tokens``; the rest go to ``overflow`` for
+        compaction.  Original ordering is preserved within each bucket.
+        """
+        ref_budget = int(budget.total_tokens * budget.reference_pct)
+        if ref_budget <= 0 or not blocks:
+            return blocks, []
+        kept: list[ContextBlock] = []
+        overflow: list[ContextBlock] = []
+        used = 0
+        # Highest priority first; stable sort preserves input order on ties.
+        for b in sorted(blocks, key=lambda x: -x.priority):
+            size = b.token_count or 0
+            if used + size <= ref_budget or not kept:
+                kept.append(b)
+                used += size
+            else:
+                overflow.append(b)
+        kept_ids = {id(b) for b in kept}
+        kept_sorted = [b for b in blocks if id(b) in kept_ids]
+        overflow_sorted = [b for b in blocks if id(b) not in kept_ids]
+        return kept_sorted, overflow_sorted
 
     async def _build_system(self, project_root: Path) -> list[ContextBlock]:
         blocks = []

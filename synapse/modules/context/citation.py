@@ -31,7 +31,7 @@ def _extract_signals(block: ContextBlock) -> list[str]:
     for m in re.finditer(r"[\w./\\-]+\.\w{1,6}", content):
         path = m.group(0)
         # Filter out trivial noise like "v1.0" or "asyncio.py" if too short.
-        if len(path) >= 6 and "/" in path or "\\" in path:
+        if len(path) >= 6 and ("/" in path or "\\" in path):
             signals.append(path)
 
     # 2. Def/function/class signatures.

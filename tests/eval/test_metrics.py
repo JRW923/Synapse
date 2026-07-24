@@ -381,3 +381,26 @@ async def test_safety_metrics_reset():
     assert snap.auth_blocks == 0
     assert snap.injection_attempts == 0
     assert snap.dangerous_command_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_file_written_inside_workspace_not_flagged():
+    """Regression: an absolute path INSIDE workspace_root must not be counted
+    as out-of-workspace.  The old heuristic flagged every absolute path, so a
+    write to /abs/project/file.py (inside the workspace) was a false positive.
+    """
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as root:
+        bus = EventBus()
+        collector = SafetyMetrics(bus, workspace_root=root)
+
+        inside = os.path.join(root, "src", "main.py")
+        outside = "/etc/passwd"
+        await bus.emit(FileWritten(session_id="s", path=inside, bytes_written=10))
+        await bus.emit(FileWritten(session_id="s", path=outside, bytes_written=10))
+
+        snap = collector.snapshot()
+        # Only /etc/passwd is genuinely out-of-workspace.
+        assert snap.out_of_workspace_access == 1

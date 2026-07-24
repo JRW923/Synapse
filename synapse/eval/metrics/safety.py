@@ -6,6 +6,7 @@ Subscribes to EventBus events and aggregates safety/security metrics.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -175,17 +176,29 @@ class SafetyMetrics:
                 break  # count once per event
 
     def _handle_file_written(self, event: BaseEvent) -> None:
-        """Detect file writes outside the workspace."""
-        path = getattr(event, "path", "")
+        """Detect file writes outside the workspace root.
 
-        # Check for known system paths
+        Uses ``self._workspace_root`` (not just a hardcoded prefix list) so
+        that absolute paths *inside* the workspace are not false-flagged.
+        """
+        path = getattr(event, "path", "")
+        if not path:
+            return
+
+        # Known system paths are always outside any reasonable workspace.
         for prefix in self._OUTSIDE_WORKSPACE_PREFIXES:
             if path.startswith(prefix) or path.lower().startswith(prefix.lower()):
                 self._out_of_workspace_access += 1
                 return
 
-        # Check for absolute paths outside the workspace root
-        # (heuristic: absolute paths that don't start with ./ or ../)
-        if path.startswith("/") and not path.startswith("./") and not path.startswith(".."):
-            # Not a system path prefix, but still absolute — flag it.
-            self._out_of_workspace_access += 1
+        # Absolute paths outside the workspace root → out-of-workspace.
+        # Relative paths (./foo, ../foo) stay within the workspace, so they
+        # are never flagged.
+        if os.path.isabs(path):
+            try:
+                root = os.path.realpath(self._workspace_root)
+                target = os.path.realpath(path)
+            except (OSError, ValueError):
+                return
+            if target != root and not target.startswith(root + os.sep):
+                self._out_of_workspace_access += 1

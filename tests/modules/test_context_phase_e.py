@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 from synapse.protocols.retriever import (
     Context, ContextBlock, ContextBudget, ContextSource,
 )
+from synapse.modules.context.retriever import BasicContextRetriever
 from synapse.protocols.llm import LLMResponse, Message
 from synapse.protocols.events import ContextBlockCited, EventType
 from synapse.modules.context.partitioner import ContextPartitioner
@@ -74,6 +75,43 @@ class TestCompactorProvenance:
         result = ContextCompactor().compact(ctx, ContextBudget())
         assert result.overflow[0].content == "short content"
         assert result.overflow[0].derived_from == block.id
+
+
+# ---- Phase 0/1: overflow routing + fold-back (TODO E 方案 A) -----------
+
+class TestOverflowRouting:
+    def test_excess_reference_routed_to_overflow(self):
+        # 10 blocks * 200 tokens = 2000; ref budget = 250 -> only ~1 kept.
+        blocks = [
+            make_block("ref content " * 20, priority=5, token_count=200)
+            for _ in range(10)
+        ]
+        budget = ContextBudget(total_tokens=1000, reference_pct=0.25)
+        kept, overflow = BasicContextRetriever()._route_overflow(blocks, budget)
+        assert len(kept) < len(blocks)
+        assert len(overflow) == len(blocks) - len(kept)
+        assert sum(b.token_count for b in kept) <= 250
+        # Original order preserved within each bucket.
+        assert [id(b) for b in kept] == [id(b) for b in blocks if id(b) in {id(x) for x in kept}]
+
+    def test_compacted_overflow_folded_into_reference(self):
+        # Mirrors agent._build_context: compact overflow, then fold the
+        # compacted summary back into reference (react.py does not inject
+        # overflow directly), so the LLM consumes it.
+        ref_block = make_block("primary reference", priority=8, token_count=10)
+        overflow_block = make_block("x" * 1000, priority=5, token_count=250)
+        ctx = Context(reference=[ref_block], overflow=[overflow_block])
+
+        compactor = ContextCompactor()
+        ctx = compactor.compact(ctx, ContextBudget())
+        ctx.reference = ctx.reference + ctx.overflow
+        ctx.overflow = []
+
+        assert ctx.overflow == []
+        assert len(ctx.reference) == 2
+        compacted = next(b for b in ctx.reference if b.derived_from)
+        assert compacted.derived_from == overflow_block.id
+        assert len(compacted.content) <= 500 + len("...[truncated]")
 
 
 # ---- Phase 1: LLMCompactor ----------------------------------------------

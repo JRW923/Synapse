@@ -129,7 +129,7 @@ class Agent:
 
         return result
 
-    def _build_budget(self, task: str = "") -> "ContextBudget":
+    async def _build_budget(self, task: str = "") -> "ContextBudget":
         """Construct a ContextBudget from config + task classification.
 
         Phase 3: classifies the task, picks the static profile, then
@@ -155,7 +155,7 @@ class Agent:
         base = select_budget(task_type, total)
 
         # Apply historical adjustments (no-op until enough samples).
-        return self._budget_history.suggest_adjustment(task_type, base)
+        return await self._budget_history.suggest_adjustment(task_type, base)
 
     def _resolve_compactor(self, overflow_chars: int):
         """Pick the compactor based on config strategy and overflow size."""
@@ -180,7 +180,7 @@ class Agent:
         from pathlib import Path
         from synapse.protocols.retriever import Context, ContextBlock, ContextSource
 
-        budget = self._build_budget(task)
+        budget = await self._build_budget(task)
 
         try:
             context = await asyncio.wait_for(
@@ -203,6 +203,11 @@ class Agent:
         compactor = self._resolve_compactor(overflow_chars)
         if compactor is not None and context.overflow:
             context = compactor.compact(context, budget)
+            # Fold the compacted overflow summaries back into `reference` so the
+            # LLM actually consumes them — react.py does not inject the overflow
+            # zone directly (ponytail: overflow is non-injected by design).
+            context.reference = context.reference + context.overflow
+            context.overflow = []
 
         # Apply budget via partitioner.
         if self._partitioner is not None:

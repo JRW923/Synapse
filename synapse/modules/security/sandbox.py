@@ -35,8 +35,6 @@ class ProcessSandbox:
         cwd: Path | None = None,
         env: dict[str, str] | None = None,
         timeout: int = 120,
-        network: bool = False,
-        allowed_paths: list[Path] | None = None,
     ) -> SandboxResult:
         try:
             proc = await asyncio.create_subprocess_shell(

@@ -27,6 +27,16 @@ class ActionAuthorizer:
         ":(){ :|:& };:",  # fork bomb
         "chmod 777 /",
         "chown -R",
+        # Pipe-to-shell: downloading and executing untrusted scripts in one step.
+        "| sh", "| bash", "|bash", "|sh", "| /bin/sh", "| /bin/bash",
+    ]
+
+    # Paths that read tools may reach via the allowlist but are sensitive
+    # enough to require explicit confirmation rather than silent read.
+    SENSITIVE_PATHS = [
+        "/etc/passwd", "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
+        "/etc/ssh/", "/root/", "/.ssh/", "id_rsa", "id_ed25519",
+        "credentials", "secrets", ".env",
     ]
 
     ALWAYS_ALLOWED_COMMANDS = [
@@ -61,8 +71,15 @@ class ActionAuthorizer:
     def authorize(self, request: AuthRequest) -> AuthDecision:
         risk = request.risk_level
 
-        # --- READ_ONLY: always allow ------------------------------------------------
+        # --- READ_ONLY: allow, but gate sensitive files ---------------------------
         if risk == RiskLevel.READ_ONLY.value:
+            target = request.tool_params.get("path", "")
+            if target and self._is_sensitive(target):
+                return AuthDecision(
+                    allowed=True,
+                    reason=f"Read of sensitive path '{target}' requires confirmation",
+                    requires_confirmation=True,
+                )
             return AuthDecision(allowed=True, reason="Read-only operation")
 
         # --- WRITE_LOCAL ------------------------------------------------------------
@@ -128,6 +145,12 @@ class ActionAuthorizer:
             if pattern in command:
                 return True
         return False
+
+    def _is_sensitive(self, path_str: str) -> bool:
+        normalized = path_str.replace("\\", "/")
+        return any(
+            sensitive in normalized for sensitive in self.SENSITIVE_PATHS
+        )
 
     def _is_allowlisted(self, command: str) -> bool:
         if not command.strip():

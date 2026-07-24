@@ -283,6 +283,10 @@ Phase 0 (前置修复) ─┐
 - planner 接入四区后 prompt 变长，可能触发 thrashing — 通过 token 预算检查控制
 - LLM Compactor 增加任务耗时和成本 — 通过配置开关 + 触发阈值控制，默认关闭
 
+**ponytail 已知上限（2026-07-24 复审）**：
+- Retriever 实际只填充 `system/core/reference`，**从不填充 `overflow`**，导致 `ContextCompactor` / `LLMCompactor`（Phase 0/1）在真实 `Agent.run` 路径中永远不被触发——四区压缩当前是"已接线但未运行"。**已修复（2026-07-24，方案 A）**：`BasicContextRetriever._route_overflow` 把超出 reference 预算的结果路由进 `overflow`；`Agent._build_context` 压缩后把摘要折回 `reference`（因 `react.py` 不直接注入 overflow 区），使压缩结果真正被 LLM 消费。`tests/modules/test_context_phase_e.py` 的 `TestOverflowRouting` 覆盖该路径。
+- `BudgetHistory` 自适应反馈原为"只写"——`record()` 持久化到 `ProjectMemory` 但 `_load()` 从不读回，跨会话无法自适应。**已修复（2026-07-24）**：`_load()` 改为 async 并从 `ProjectMemory` 取回"样本数最多"的累计快照作为基准（不累加、不重复计数）；`suggest_adjustment` 相应改为 async；`tests/modules/test_context_phase_2_3.py::test_history_persists_across_instances` 覆盖跨实例读回。
+
 ---
 
 ### F · 安全红队 / 对抗测试框架
@@ -333,7 +337,7 @@ _（暂无。后续如有暂不推进的需求，记录在此。）_
 
 ### H · CLI 主界面（Rich 增强型 REPL）
 
-**状态**：开发中
+**状态**：✅ 已完成 (2026-07-24)
 
 输入 `synapse`（无子命令）进入增强型交互主界面，类似 Claude Code / pico。
 
@@ -342,8 +346,57 @@ _（暂无。后续如有暂不推进的需求，记录在此。）_
 **要点**：
 - `synapse` 无参数直接进入主界面
 - 欢迎横幅显示版本/provider/model/项目路径/工具数
-- `/` 命令：help, clear, model, mode, tools, exit
+- `/` 命令：`/help` `/memory` `/session` `/reset` `/clear` `/model` `/provider` `/mode` `/tools` `/context-report` `/exit` `/quit`
 - 现有子命令（chat/run/serve/eval/experiment）保持不变
 - 用 Rich Panel/Table 美化输出
 
 **难度**：低（复用现有 Rich 依赖）
+
+---
+
+### I · Swarm 文件作用域硬隔离
+
+**状态**：待实现
+
+TODO C 的 Swarm 默认团队（2 并行 coder + 1 只读 reviewer）依赖 LLM 拆分的文件作用域，但 `file_scope` 仅作为分解提示传给 prompt，**未在 sandbox/workspace 层强制**。恶意或失误的 coder 仍可能写入其他 coder 的作用域。
+
+**要点**：
+- 把 `RoleSpec.file_scope` 作为写白名单传给 `ProcessSandbox` / workspace 校验
+- worker 越界写 → 授权层硬拒（复用 `ActionAuthorizer` 的 out-of-workspace 路径）
+- 与现有 `--mode swarm` / `/mode swarm` 入口无缝衔接
+
+**难度**：中等（需把 scope 透传到 tool 执行的 auth 检查）
+
+---
+
+### J · 红队攻击库扩充 + 真 LLM 对抗
+
+**状态**：待实现
+
+TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重放。升级路径：扩到更多变种（TODO F 原计划的 88+ 变种），并加"用真实 LLM 跑攻防"的 CLI harness——让红队能接真实模型做开放式对抗，而非仅重放预设步骤。
+
+**要点**：
+- 攻击库从 ~19 扩充（直接/间接/多步/沙箱逃逸/权限提升 更多变种）
+- 新增真 LLM 驱动的对抗模式（复用 `RedTeamRunner`，替换 `AttackLLM` 为真实 provider）
+- `AttackLLM` 重放路径保留，作为 CI 可跑的确定性回归集
+
+**难度**：中等
+
+---
+
+### K · 运行时评分闭环
+
+**状态**：待实现
+
+4 个 eval 收集器（`ProcessMetrics` / `QualityMetrics` / `EfficiencyMetrics` / `SafetyMetrics`）目前只在测试里被构造并接收事件，真实运行不产生任何评分。把它们接入运行时 container，让每次任务都产出可观测的过程质量 / 效率 / 安全评分，闭环到记忆或报告。
+
+**要点**：
+- container 构造时实例化 4 个收集器并订阅 EventBus
+- `synapse eval` / `/context-report` 之外，增加运行后评分汇总（可落 ProjectMemory）
+- 与 TODO B（过程质量验证闭环）打通，让评分驱动下一次执行
+
+**难度**：中等
+
+---
+
+*最后更新：2026-07-24*

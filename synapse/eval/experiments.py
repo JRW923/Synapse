@@ -7,7 +7,6 @@ benchmark and computing statistical significance via scipy.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 

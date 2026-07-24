@@ -424,19 +424,23 @@ class Synapse:
         injection_guard = InjectionGuard()
         c.register(InjectionGuard, injection_guard)
 
-        # Eval — optionally wire metrics collectors to EventBus (Phase 3)
+        # Security — SafetyMetrics always subscribes to the EventBus (cheap,
+        # counters only) so out-of-workspace / injection / auth-block signals
+        # are collected on every run, not just when eval is enabled.
+        from synapse.eval.metrics.safety import SafetyMetrics as _SM
+        c.register(_SM, _SM(
+            bus=event_bus,
+            workspace_root=self._config.tools.workspace_root,
+        ))
+
+        # Eval — optionally wire the heavier metrics collectors (Phase 3)
         if self._enable_eval:
             from synapse.eval.metrics.process import ProcessMetrics as _PM
             from synapse.eval.metrics.quality import QualityMetrics as _QM
             from synapse.eval.metrics.efficiency import EfficiencyMetrics as _EM
-            from synapse.eval.metrics.safety import SafetyMetrics as _SM
             c.register(_PM, _PM(bus=event_bus))
             c.register(_QM, _QM(bus=event_bus))
             c.register(_EM, _EM(bus=event_bus))
-            c.register(_SM, _SM(
-                bus=event_bus,
-                workspace_root=self._config.tools.workspace_root,
-            ))
 
         # Planner (selected by planning mode)
         planner = self._create_planner(auth)
@@ -500,40 +504,7 @@ class Synapse:
 
     def _create_planner(self, auth: ActionAuthorizer) -> Planner:
         """Instantiate the configured planning strategy."""
-        mode = self._config.planning.mode.lower()
-        cfg = self._config.planning
-
-        # Base ReAct planner — used by all three modes
-        react = ReActPlanner(
-            max_iterations=cfg.max_iterations,
-            thrashing_threshold=cfg.thrashing_threshold,
-            max_thrashing_events=cfg.max_thrashing_events,
-            max_tokens_per_task=cfg.max_tokens_per_task,
-            auth=auth,
-            confirm_callback=self._confirm_callback,
-            total_timeout_seconds=cfg.total_timeout_seconds,
-        )
-
-        if mode == PlanningMode.REACT:
-            return react
-
-        if mode == PlanningMode.PLAN_EXECUTE:
-            return PlanExecutePlanner(react_planner=react)
-
-        if mode == PlanningMode.HIERARCHICAL:
-            complex_planner = PlanExecutePlanner(react_planner=react)
-            return HierarchicalPlanner(
-                react_planner=react,
-                complex_planner=complex_planner,
-            )
-
-        if mode == PlanningMode.SWARM:
-            return SwarmPlanner(react_planner=react)
-
-        raise ValueError(
-            f"Unknown planning mode '{mode}'. "
-            f"Available: react, plan_execute, hierarchical, swarm"
-        )
+        return build_planner(self._config.planning, auth, self._confirm_callback)
 
     # -- Internal: tool factory ----------------------------------------------
 
@@ -597,3 +568,38 @@ class Synapse:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(asyncio.run, _connect_all())
             future.result(timeout=60)
+
+
+def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
+    """Build the planner for a planning config — single source of truth.
+
+    Shared by :meth:`Synapse._create_planner` and by CLI/test wiring so the
+    mode->Planner mapping lives in exactly one place.
+    """
+    mode = planning_config.mode.lower()
+    cfg = planning_config
+
+    react = ReActPlanner(
+        max_iterations=cfg.max_iterations,
+        thrashing_threshold=cfg.thrashing_threshold,
+        max_thrashing_events=cfg.max_thrashing_events,
+        max_tokens_per_task=cfg.max_tokens_per_task,
+        auth=auth,
+        confirm_callback=confirm_callback,
+        total_timeout_seconds=cfg.total_timeout_seconds,
+    )
+
+    if mode == PlanningMode.REACT:
+        return react
+    if mode == PlanningMode.PLAN_EXECUTE:
+        return PlanExecutePlanner(react_planner=react)
+    if mode == PlanningMode.HIERARCHICAL:
+        complex_planner = PlanExecutePlanner(react_planner=react)
+        return HierarchicalPlanner(react_planner=react, complex_planner=complex_planner)
+    if mode == PlanningMode.SWARM:
+        return SwarmPlanner(react_planner=react)
+
+    raise ValueError(
+        f"Unknown planning mode '{mode}'. "
+        f"Available: react, plan_execute, hierarchical, swarm"
+    )

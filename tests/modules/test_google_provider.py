@@ -93,3 +93,41 @@ async def test_stream_yields_text_and_tool_chunks():
     assert [c.content for c in out] == ["Hello", " world", ""]
     assert out[2].tool_call_delta is not None
     assert out[2].tool_call_delta["name"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_convert_messages_roundtrips_tool_calls():
+    """Regression: multi-turn tool calls must survive conversion.
+
+    Before the fix, assistant tool_calls were dropped (only text kept) and
+    tool-result responses used an empty name — breaking Gemini multi-turn
+    tool use.  Now each assistant call becomes a function_call part and each
+    tool result recovers its name from the preceding call's tool_call_id.
+    """
+    provider = GoogleProvider(model="gemini-pro", api_key="test-key")
+    messages = [
+        Message(role="user", content="List files"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[{"id": "call_1", "name": "grep", "input": {"pattern": "*.py"}}],
+        ),
+        Message(role="tool", tool_call_id="call_1", content='["a.py", "b.py"]'),
+    ]
+
+    contents = provider._convert_messages(messages)
+
+    # user, assistant (model), tool — 3 contents
+    assert len(contents) == 3
+    model_parts = contents[1].parts
+    # assistant turn must carry the function_call (not just empty text)
+    fc_parts = [p for p in model_parts if getattr(p, "function_call", None)]
+    assert len(fc_parts) == 1
+    assert fc_parts[0].function_call.name == "grep"
+    assert fc_parts[0].function_call.args == {"pattern": "*.py"}
+
+    tool_parts = contents[2].parts
+    fr_parts = [p for p in tool_parts if getattr(p, "function_response", None)]
+    assert len(fr_parts) == 1
+    # name must be recovered, not empty
+    assert fr_parts[0].function_response.name == "grep"

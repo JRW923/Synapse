@@ -13,6 +13,7 @@ from synapse.modules.context.budget import (
     TASK_BUDGET_PROFILES, select_budget, BudgetHistory,
     _MIN_SAMPLES_FOR_ADJUSTMENT, _MAX_SHIFT_PCT,
 )
+from synapse.protocols.memory import MemoryEntry, MemoryMetadata, MemoryLevel
 
 
 def make_block(content, source=ContextSource.GREP, priority=5):
@@ -94,11 +95,12 @@ class TestBudgetProfiles:
 # ---- Phase 3.3: BudgetHistory -------------------------------------------
 
 class TestBudgetHistory:
-    def test_cold_start_returns_base_unchanged(self):
+    @pytest.mark.asyncio
+    async def test_cold_start_returns_base_unchanged(self):
         """Below _MIN_SAMPLES_FOR_ADJUSTMENT, no adjustment applied."""
         bh = BudgetHistory()
         base = select_budget(TaskType.TEST, 100_000)
-        result = bh.suggest_adjustment(TaskType.TEST, base)
+        result = await bh.suggest_adjustment(TaskType.TEST, base)
         assert result.system_pct == base.system_pct
         assert result.core_pct == base.core_pct
 
@@ -120,7 +122,7 @@ class TestBudgetHistory:
             await bh.record(TaskType.TEST, report)
 
         base = select_budget(TaskType.TEST, 100_000)
-        adjusted = bh.suggest_adjustment(TaskType.TEST, base)
+        adjusted = await bh.suggest_adjustment(TaskType.TEST, base)
         # Reference should increase (or stay) — never decrease.
         assert adjusted.reference_pct >= base.reference_pct
         # And the shift should be capped.
@@ -130,13 +132,53 @@ class TestBudgetHistory:
     async def test_record_handles_none_report(self):
         bh = BudgetHistory()
         await bh.record(TaskType.FEATURE, None)  # should not raise
-        assert bh._load(TaskType.FEATURE)["samples"] == 0
+        assert bh._cache.get(TaskType.FEATURE, {"samples": 0})["samples"] == 0
 
     @pytest.mark.asyncio
     async def test_record_handles_empty_blocks(self):
         bh = BudgetHistory()
         await bh.record(TaskType.FEATURE, {"blocks": [], "total": 0})
-        assert bh._load(TaskType.FEATURE)["samples"] == 0
+        assert (await bh._load(TaskType.FEATURE))["samples"] == 0
+
+    @pytest.mark.asyncio
+    async def test_history_persists_across_instances(self):
+        """Regression: history written by one BudgetHistory instance must be
+        read back by a fresh instance wired to the same ProjectMemory.
+
+        This is the bug the TODO audit flagged as 'write-only' — _load()
+        never read persisted entries, so cross-session adaptation was dead.
+        """
+
+        class _FakeMemory:
+            def __init__(self):
+                self._entries = []
+
+            async def store(self, entry):
+                self._entries.append(entry)
+
+            async def retrieve(self, query, level, top_k=5):
+                return [e for e in self._entries if query in e.content][:top_k]
+
+        mem = _FakeMemory()
+        bh1 = BudgetHistory(project_memory=mem)
+        report = {
+            "blocks": [
+                {"zone": "system", "cited": 1, "usage": 2},
+                {"zone": "core", "cited": 0, "usage": 3},
+                {"zone": "reference", "cited": 5, "usage": 5},  # 100% cited
+                {"zone": "overflow", "cited": 0, "usage": 1},
+            ],
+            "total": 4,
+        }
+        for _ in range(_MIN_SAMPLES_FOR_ADJUSTMENT):
+            await bh1.record(TaskType.TEST, report)
+
+        # Fresh instance, same persisted memory — must read history back.
+        bh2 = BudgetHistory(project_memory=mem)
+        base = select_budget(TaskType.TEST, 100_000)
+        adjusted = await bh2.suggest_adjustment(TaskType.TEST, base)
+        assert adjusted.reference_pct >= base.reference_pct
+        assert (adjusted.reference_pct - base.reference_pct) <= _MAX_SHIFT_PCT + 0.001
 
 
 # ---- Phase 2: citation summary format ----------------------------------
