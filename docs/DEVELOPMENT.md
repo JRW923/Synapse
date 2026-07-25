@@ -1308,3 +1308,132 @@ TODO L 系列把"黑盒式一次性任务"和"晦涩异常"两类体验痛点一
 | 新增/修改测试 | ~6 项（覆盖 swarm tracker、run_score、无回调拒绝、friendly error、auth 点名） |
 | 文档 | README（中/英）、CHANGELOG、DEVELOPMENT 同步更新 |
 
+---
+
+## 2026-07-25 · Harness 对照审计与 9 模块补齐（s04–s18）
+
+### 背景
+
+依据 [learn.claude code · timeline](https://learn.shareai.run/en/timeline/) 划分的 20 个 harness 章节（s01–s20）做对照审计，形成 `docs/harness_audit.md`。审计发现 s04/s05/s07/s12/s13/s14/s16/s17/s18 此前为缺口，制定本开发计划并按 P0→P1→P2 三批落地，**全部复用既有 `EventBus` / `Session.fork` / `DefaultToolRegistry` / planner 接口，不引入新依赖，每批带可运行单测（check）**。
+
+计划与落地顺序：
+
+```
+s18 Worktree → s17 自主认领(含 s12 TaskBoard) → s13 后台执行   # P0：Swarm 生产化
+s07 Skill → s05 TodoWrite → s04 用户钩子                        # P1：单 agent 体验
+s14 Cron → s16 协议完善                                        # P2：运维与协议
+```
+
+### 设计取舍（ponytail 主线）
+
+- **进程级单例而非容器重构**：`BackgroundTaskManager` / `SkillLoader` / `TodoStore` 各提供 `get_default_*()` 模块单例，工具层、planner 层、CLI REPL 共享同一实例，避免改动 Container 装配。
+- **注入而非改签名**：`background_manager` / `skill_loader` 作为可选参数注入 `ReActPlanner` 与 `ShellTool`，既不破坏既有工具 `execute` 签名，也不触碰每条工具的调用点。
+- **s17 走 opt-in**：`SwarmPlanner(autonomous=...)` 默认 `False`，保留既有显式 `RoleSpec` 行为，所有旧 swarm 测试继续绿；新增 autonomous 路径单测覆盖。
+- **事件契约优先**：协议层（`events.py`）统一承载 `TaskClaimed` / `TaskReleased` / `BackgroundResult` / `AgentMessage` 等事件，worker 间通信走事件而非隐含约定（s16）。
+
+### 实现（按模块）
+
+**P0 · Swarm 生产化**
+
+**1. s18 Worktree 隔离（`modules/planning/worktree.py`，新增）** — `WorktreeManager`：
+- `create(agent_id)`：git 仓库 → `git worktree add -b synapse-<agent_id>` 落到 `<base_root>/.synapse/worktrees/<agent_id>`；非 git → `tempfile` 式独立子目录。
+- `remove(agent_id)`：`git worktree remove --force` + 分支 `-D`，否则 `shutil.rmtree`；`remove_all()` 批量清理。
+- `SwarmPlanner._spawn` 在 `worktree_manager` 已注入且 `file_scope` 时给每个 worker 拿隔离目录；`_make_planner` 据此构造 `ActionAuthorizer(workspace_root=worktree_path, ...)` 并在 system 提示追加「在 worktree 内读写」约束；`execute()` 用 `try/finally` 保证 `remove_all()`。
+- `library.build_planner` 在 `isinstance(auth, ActionAuthorizer)` 时构造 `WorktreeManager(auth.workspace_root)` 传入。
+
+**2. s17 自主认领 + s12 TaskBoard（`modules/planning/board.py` 新增 + `swarm.py` 改造）**：
+- `TaskBoard(event_bus=None, session_id="")`：`TaskStatus`（PENDING/CLAIMED/DONE）+ `BoardTask`；`add` / `add_many` / `claim(worker_id)`（在 `asyncio.Lock` 下原子认领，发 `TaskStatusChanged` + `TaskClaimed`）/ `complete` / `release`（发 `TaskReleased`）/ `pending` / `claimed_by` / `all_done` / `__len__` / `__contains__`。被 `HierarchicalPlanner`（串行认领）与 `SwarmPlanner`（并发认领）共用。
+- `SwarmPlanner` 新增 `autonomous` / `autonomous_workers` 参数与 `_execute_autonomous()`：把子任务上 `TaskBoard` → 启动 N 个通用 `RoleSpec(role="worker", file_scope=True)` worker 自驱 `claim→execute→complete→结果存入 w["results"]` → `asyncio.gather` 后 `merge_subtask_results` 汇总 → 发 `SwarmVerified`。指标通过迭代 `w["results"].values()` 滚动累加（修复空 results 误返回 dict 的 bug）。
+
+**3. s13 后台执行（`modules/tools/background.py` 新增 + `shell.py`/`react.py`/`library.py` 改造）**：
+- `BackgroundTaskManager`：`set_run_context(event_bus, session_id)`、`async run(command, cwd, sandbox, timeout=120) -> task_id`（内部 `asyncio.create_task(self._run(...))`）、`get_result` / `is_done`；`_run` 经 sandbox 或 `create_subprocess_shell` 执行，结束发 `BackgroundResult(success, stdout, stderr)`。`get_default_manager()` 模块单例。
+- `ShellTool` 增 `run_in_background` / `read_task_id` 参数：后台 → 立即返回 `Background task started: <id>`；读 → 返回已存结果。
+- `ReActPlanner.execute()` 在启动后 `set_run_context(event_bus, session.id)`；`library.build_planner` 注入 `background_manager=get_default_manager()`。
+
+**P1 · 单 agent 体验**
+
+**4. s07 Skill 加载（`modules/skill.py` 新增 + `tools/skill_tool.py` 新增 + `react.py`/`library.py` 改造）**：
+- `Skill(name, triggers, task_types, body)` + `SkillLoader(skills_dir=None)`：扫描 `skills/<name>/SKILL.md`，用极简 frontmatter 解析（name/triggers/task_types）；`match(task)` 用 `classify_task(task)` 结果 + 触发词命中；`render(task)` 产出 `## Skills (auto-loaded for this task)` 注入块。`get_default_skill_loader()` 扫描 `Path("skills")`（已带 `skills/pytest/SKILL.md` 样例）。
+- `SkillTool(name="load_skill", requires_sandbox=False, risk_level=RiskLevel.META, category=ToolCategory.CODE_UNDERSTANDING)` 供 LLM 显式拉取。
+- `ReActPlanner._build_system_prompt(context, task="")` 在 `skill_loader` 命中且 `task` 非空时把 skill 块拼入 system zone；`library._create_all_tools` 注册 `SkillTool(skill_loader=...)`。
+
+**5. s05 TodoWrite（`modules/todo.py` 新增 + `tools/todo_tool.py` 新增 + `cli.py`/`library.py` 改造）**：
+- `Todo(content, status, active_form)` + `TodoStore`：`set_todos(items)`（整列表快照替换）/ `list()` / `clear()` / `__len__`；`get_default_todo_store()` 单例。
+- `TodoWriteTool(name="todo_write", category=CODE_UNDERSTANDING)`（调 `store.set_todos`）、`TodoReadTool(name="todo_read")`。
+- `cli.py` 新增 `_show_todos` + `/todos` 帮助行 + REPL 分发；`library._create_all_tools` 注册两工具。
+
+**6. s04 用户钩子（`config/schema.py` 加 `HooksConfig` + `modules/hooks.py` 新增 + `library.py` 改造）**：
+- `HooksConfig(hooks: dict[str, list[str]])`，键为 `EventType` 字符串，payload 经环境变量 `SYNAPSE_EVENT` / `SYNAPSE_PAYLOAD` 传入（只读 PostToolUse 起步；PreToolUse 阻断待接 `ActionAuthorizer`）。
+- `HookRunner(hooks, timeout=5.0).attach(event_bus)`：按事件类型订阅，触发时 `await asyncio.to_thread(subprocess.run, cmd, shell=True, timeout, env, capture_output=True)`，best-effort try/except。
+- `library.build_container` 在 `config.hooks.hooks` 非空时 `HookRunner(...).attach(event_bus)`。
+
+**P2 · 运维与协议**
+
+**7. s14 Cron 调度（`modules/cron.py` 新增）**：
+- 纯 stdlib 实现：`_parse_field`（支持 `*` / `*/n` / `a-b` / `a,b` / `a-b/n`）、`_match`（5 字段 cron，日/周 OR 语义，`_WEEKDAY_MAP` 处理 cron 0/7=Sun 与 `datetime.weekday` Mon=0 的偏移）、`next_trigger(after, expr)`（分钟级扫描，1 年内）。
+- `CronScheduler(clock=None)`：`add_job(cron_expr, callback) -> int`、`start()` / `stop()`、内部 `_pump` 触发到期 job 并 `asyncio.iscoroutine` 区分同步/异步回调。
+- `ponytail:` 注明进程内调度，多实例需外部触发器（如系统 cron）才一致；已装 `APScheduler` 可作未来升级。
+
+**8. s16 团队协同协议完善（`protocols/events.py` 扩展）**：
+- 新增事件类型 `TASK_STATUS_CHANGED` / `TASK_CLAIMED` / `TASK_RELEASED` / `BACKGROUND_RESULT` / `AGENT_MESSAGE`，及对应 dataclass（`TaskStatusChanged` / `TaskClaimed` / `TaskReleased` / `BackgroundResult` / `AgentMessage`），统一事件契约，worker 间通信走事件而非隐含约定。
+
+### 测试（每批 check）
+
+- `tests/modules/test_worktree.py`（3 项）：非 git 隔离+清理、`git worktree` 隔离+清理、Swarm 建/清 worktree。
+- `tests/modules/test_board.py`（4 项）：并发认领无重复、单 agent 串行认领、状态事件发射、swarm autonomous 认领+合并。
+- `tests/modules/test_background.py`（4 项）：后台立即返回 handle 后发事件、前台无 flag 不变、`read_task_id` 未知报错、无 sandbox 时回退子进程。
+- `tests/modules/test_skill.py`（3 项）：触发词命中+渲染、skill 进入 system 提示、`load_skill` 工具。
+- `tests/modules/test_todo.py`（3 项）：写后持久化+可读、整列表替换、视图可见。
+- `tests/modules/test_hooks.py`（3 项）：PostToolUse 钩子执行并拿到 payload、无关事件不触发、config hooks 段解析。
+- `tests/modules/test_cron.py`（4 项）：每分钟触发、指定小时、周字段匹配、调度器时间推进触发（FakeClock + `_pump`）。
+- `tests/modules/test_protocol.py`（3 项）：AgentMessage 往返、TaskClaimed/Released 往返、广播空 recipient。
+- `tests/test_integration_phase3.py`：修复 legacy L.4 `get_run_score` mock（AsyncMock → MagicMock）回归，保持全量绿。
+
+### ponytail 已知上限
+
+- **s04**：仅只读 PostToolUse 钩子；PreToolUse 阻断需接 `ActionAuthorizer` 决策点（未做）。
+- **s07**：极简 frontmatter 解析（非完整 YAML），仅 name/triggers/task_types 三键。
+- **s13 / s14**：进程内实现，多实例需外部协调（如系统 cron / 共享任务队列）。
+- **s18**：仅 git 仓库真正 worktree 隔离；合并回 trunk 是后续工作（s17 board 关注点）。
+
+### 文件清单
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `synapse/modules/planning/worktree.py` | 新增 | `WorktreeManager` + `WorktreeError` |
+| `synapse/modules/planning/board.py` | 新增 | `TaskBoard` + `TaskStatus` + `BoardTask` |
+| `synapse/modules/planning/swarm.py` | 修改 | `autonomous` 模式 + worktree + TaskBoard 接入 |
+| `synapse/modules/tools/background.py` | 新增 | `BackgroundTaskManager` + `get_default_manager` |
+| `synapse/modules/tools/shell.py` | 修改 | `run_in_background` / `read_task_id` |
+| `synapse/modules/skill.py` | 新增 | `SkillLoader` + `Skill` + `get_default_skill_loader` |
+| `synapse/modules/tools/skill_tool.py` | 新增 | `SkillTool`（`load_skill`） |
+| `synapse/skills/pytest/SKILL.md` | 新增 | skill 样例 |
+| `synapse/modules/todo.py` | 新增 | `TodoStore` + `Todo` + `get_default_todo_store` |
+| `synapse/modules/tools/todo_tool.py` | 新增 | `TodoWriteTool` / `TodoReadTool` |
+| `synapse/modules/hooks.py` | 新增 | `HookRunner` |
+| `synapse/modules/cron.py` | 新增 | `CronScheduler` + 字段解析/匹配 |
+| `synapse/config/schema.py` | 修改 | `HooksConfig` |
+| `synapse/protocols/events.py` | 修改 | 5 个新事件 + dataclass |
+| `synapse/modules/planning/react.py` | 修改 | `background_manager` / `skill_loader` 注入 + system 提示 skill 块 |
+| `synapse/adapters/library.py` | 修改 | 装配 worktree/background/skill/todo/hooks |
+| `synapse/adapters/cli.py` | 修改 | `/todos` 视图 |
+| `tests/modules/test_worktree.py` | 新增 | s18 |
+| `tests/modules/test_board.py` | 新增 | s12/s17 |
+| `tests/modules/test_background.py` | 新增 | s13 |
+| `tests/modules/test_skill.py` | 新增 | s07 |
+| `tests/modules/test_todo.py` | 新增 | s05 |
+| `tests/modules/test_hooks.py` | 新增 | s04 |
+| `tests/modules/test_cron.py` | 新增 | s14 |
+| `tests/modules/test_protocol.py` | 新增 | s16 |
+
+### 当前状态（更新）
+
+| 指标 | 数值 |
+|------|------|
+| Tests | 295（+~27：8 个 harness 模块测试文件） |
+| Harness 覆盖 | s01–s20 全量覆盖（audit 结论：已实现 20 项，部分/未实现 0 项） |
+| 新增模块 | WorktreeManager / TaskBoard / BackgroundTaskManager / SkillLoader / TodoStore / HookRunner / CronScheduler |
+| 新增工具 | `load_skill` / `todo_write` / `todo_read`（+ shell `run_in_background` / `read_task_id`） |
+| CLI 入口 | REPL `/todos` 视图 |
+| 依赖新增 | 0（全程 stdlib） |
+
