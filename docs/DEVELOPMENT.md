@@ -1234,3 +1234,77 @@ TODO F 要求"系统化的攻击库 + 自动化安全评分"。调研先确认�
 | 评分信号 | 修复 `AuthDecisionMade`/`FileWritten` 发射缺口，`auth_blocks` 不再恒为 0 |
 | 越界访问指标 | `out_of_workspace_access` 已可经 `FileWritten` 事件采集 |
 
+## 2026-07-25 · UX 优化（L.1–L.5）
+
+### 背景
+
+TODO L 系列把"黑盒式一次性任务"和"晦涩异常"两类体验痛点一次性补齐：让 `run`/`chat`/HTTP 调用都能看到实时进度、Swarm 协作可见、确认语义安全、运行时评分可查、错误可懂。五项彼此独立但都落在 adapters 层（CLI / Server）与 library 的评分闭环上。
+
+### 设计取舍
+
+- **L.1 流式与进度**：复用 `cli.py` 已有的 `_run_task_streamed` helper 给 `run` 子命令；REPL 与 `chat` 子命令是另外两处流式站点，各自订阅同一组事件，不强行合并（三条路径差异足够大，合并反而增复杂度）。HTTP 侧用 FastAPI `StreamingResponse` 做 SSE，`_on_event` 做通用事件 dump（所有公开字段 + datetime 序列化），后端加事件类型只改 `_STREAM_EVENTS` 元组。
+- **L.2 Swarm 过程可视化**：新增 `_SwarmTracker` helper（DRY，跨 `run` 子命令与 REPL 两处复用），订阅 5 个 swarm 生命周期事件并渲染紧凑摘要；服务端把事件类型加进 `_STREAM_EVENTS` 即可，逻辑零改动。
+- **L.3 确认语义对齐**：`auth.py` docstring 原意为"非交互=自动拒绝"，但旧实现在 `requires_confirmation=True` 且无回调时会 fall-through 放行。改为硬拒；同时提供 `run --yes`（CLI）与 `RunRequest.auto_approve`（server）显式放行入口。`react.py` 把"denied"改用 `denied_result` 标志位而非 `continue`，规避 `try` 内 `continue` + 嵌套作用域偶发的 `UnboundLocalError`/`AttributeError`。
+- **L.4 暴露评分与 hint**：`ProcessQualityScored.hint` 由 `ProcessQualityVerifier` 经 EventBus 发射，`library` 在 `_build_container` 订阅 `process_quality_scored` 把最新 hint 存 `self._last_process_hint`；`get_run_score()` 输出末位追加 `process_hint`。CLI `/score` 与 server `run_score` 共用同一来源，无需新存储。
+- **L.5 友好错误**：新增 `_friendly_error()` + `_ERROR_GUIDE`，把 `SynapseError` 子类映射成「原因 + 建议」中文文案；三个用户可见错误点（`run` 子命令、`chat` 子命令、REPL 主循环）统一改用它，杜绝原始 traceback 泄漏。auth 危险命令拒绝原因点名命中模式（英文保留，供 LLM 稳定理解）。
+
+### 实现
+
+**1. CLI（`synapse/adapters/cli.py`，修改）** —
+- `_run_task_streamed` 为 `run` 子命令提供实时面板（复用 L.1）。
+- `_SwarmTracker` 类（订阅 `worker_spawned`/`worker_completed`/`review_submitted`/`vote_cast`/`swarm_verified`，`render_lines()` + `wire`/`unwire`）；`run` 子命令与 REPL 两处接入。
+- `_make_confirm_callback` 的 `_describe()` 展示 `tool [risk] → path/command`，加 `asyncio.Lock` 串行化并发 worker 提示；`run` 子命令加 `--yes/-y`（传 auto-approve 回调）。
+- `/score` 命令 + `_show_score()` helper（渲染 safety/process/quality/efficiency + hint），并加入 `/help` 表。
+- `_friendly_error()` + `_ERROR_GUIDE`：三处错误点改用。
+
+**2. Server（`synapse/adapters/server.py`，修改）** —
+- `_STREAM_EVENTS` 扩展为含 5 个 swarm 事件；`_on_event` 改为通用 dump（所有公开字段 + datetime → isoformat）。
+- `RunRequest` 加 `auto_approve: bool`；`/run` 与 `/run/stream` 透传给 `synapse.run(confirm_callback=...)`。
+- `RunResponse` 加 `run_score`；`/run` 与 `/run/stream` 的 `done` 事件均填 `synapse.get_run_score()`。
+
+**3. Library（`synapse/adapters/library.py`，修改）** —
+- `__init__` 加 `self._last_process_hint`；`_build_container` 订阅 `process_quality_scored → _on_process_quality_scored`；`run()` 开头清空该 hint；`get_run_score()` 输出追加 `process_hint`。
+- `run()` 支持 per-run `confirm_callback`（L.3），重建该次 planner 并事后还原。
+
+**4. 安全层（`synapse/modules/security/auth.py`，修改）** —
+- `_is_dangerous` 由返回 `bool` 改为返回命中的具体模式串；危险命令拒绝原因升级为 `Command matches dangerous pattern: '<pattern>'`。
+
+**5. 规划（`synapse/modules/planning/react.py`，修改）** —
+- 确认/拒绝分支改为 `denied_result` 标志位写法，消除 `continue` 作用域诡异；无回调且需确认时硬拒（与 docstring 一致）。
+
+**6. 测试（新增/修改）** —
+- `tests/adapters/test_cli_run.py`：`test_swarm_tracker_renders_lifecycle`、`test_friendly_error_maps_synapse_errors`。
+- `tests/adapters/test_server.py`：`test_run_task_includes_run_score`（/run 返回 run_score）、stream/swarm mock 同步修正。
+- `tests/test_auth_confirm_flow.py`：`test_no_confirm_callback_auto_denies`（无回调自动拒绝、文件不落盘）。
+- `tests/adapters/test_library_api.py`：`test_run_score_includes_process_hint`、扩键集含 `process_hint`。
+- `tests/modules/test_auth.py`：`test_dangerous_pattern_reason_names_pattern`（拒绝原因含具体模式）。
+
+### ponytail 已知上限
+
+- `library.run` 的 per-run planner 重建是**实例级**替换，并发请求下可能读到被覆盖的 planner（`ponytail:` 注释已注明）；改为 per-request `Synapse` 可消除，但属后续优化。
+- auth 拒绝原因保留英文（喂给 LLM），未翻成中文——LLM 对英文 pattern 名理解更稳；面向用户的最终解释由 LLM 用中文转述。
+- 危险模式匹配仍是基于子串的朴素扫描（`_is_dangerous`），非正则/语义级，已知可绕过边界（属既有设计，不在本次范围）。
+
+### 文件清单
+
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `synapse/adapters/cli.py` | 修改 | 流式面板 / `_SwarmTracker` / `--yes` / `/score` / `_friendly_error` |
+| `synapse/adapters/server.py` | 修改 | SSE swarm 事件 / `auto_approve` / `run_score` |
+| `synapse/adapters/library.py` | 修改 | `process_hint` 捕获 / per-run `confirm_callback` |
+| `synapse/modules/security/auth.py` | 修改 | `_is_dangerous` 点名模式 |
+| `synapse/modules/planning/react.py` | 修改 | `denied_result` 标志位 + 无回调硬拒 |
+| `tests/adapters/test_cli_run.py` | 修改 | swarm tracker / friendly error 测试 |
+| `tests/adapters/test_server.py` | 修改 | run_score / mock 同步 |
+| `tests/test_auth_confirm_flow.py` | 修改 | 无回调自动拒绝 |
+| `tests/adapters/test_library_api.py` | 修改 | run_score + hint |
+| `tests/modules/test_auth.py` | 修改 | 危险模式点名 |
+
+### 当前状态（更新）
+
+| 指标 | 数值 |
+|------|------|
+| UX 改进 | L.1–L.5 全部落地（流式 / Swarm 可视化 / 确认语义 / 评分可见 / 友好错误） |
+| 新增/修改测试 | ~6 项（覆盖 swarm tracker、run_score、无回调拒绝、friendly error、auth 点名） |
+| 文档 | README（中/英）、CHANGELOG、DEVELOPMENT 同步更新 |
+
