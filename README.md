@@ -103,8 +103,8 @@ accept a `RunRequest`:
   runtime score (`safety` / `process` / `quality` / `efficiency`) plus the latest
   `process_hint` for the next task.
 
-Errors are returned as friendly `原因 / 建议` messages; raw tracebacks are never
-surfaced to the user.
+Errors are returned as friendly `reason / suggested-action` messages; raw
+tracebacks are never surfaced to the user.
 
 ## Architecture
 
