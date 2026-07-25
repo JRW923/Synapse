@@ -356,16 +356,22 @@ _（暂无。后续如有暂不推进的需求，记录在此。）_
 
 ### I · Swarm 文件作用域硬隔离
 
-**状态**：待实现
+**状态**：已实现（2026-07-24）
 
-TODO C 的 Swarm 默认团队（2 并行 coder + 1 只读 reviewer）依赖 LLM 拆分的文件作用域，但 `file_scope` 仅作为分解提示传给 prompt，**未在 sandbox/workspace 层强制**。恶意或失误的 coder 仍可能写入其他 coder 的作用域。
+TODO C 的 Swarm 默认团队（2 并行 coder + 1 只读 reviewer）依赖 LLM 拆分的文件作用域。原先 `file_scope` 仅作为分解提示传给 prompt、未强制；现已在授权层硬隔离：
 
-**要点**：
-- 把 `RoleSpec.file_scope` 作为写白名单传给 `ProcessSandbox` / workspace 校验
-- worker 越界写 → 授权层硬拒（复用 `ActionAuthorizer` 的 out-of-workspace 路径）
-- 与现有 `--mode swarm` / `/mode swarm` 入口无缝衔接
+- `ActionAuthorizer` 新增 `allowed_paths` 写白名单参数，在 `WRITE_LOCAL` 分支最前对越界写**硬拒**（`allowed=False`）——同时覆盖 `write` 与 `edit` 两类工具（二者 `risk_level` 均为 `WRITE_LOCAL`，统一走 `react.py` 的 `authorize` 调用）。
+- `SwarmPlanner._decompose_scopes` 生成的 `file_scope` 现透传至每个 coder worker：经 `_spawn` → worker dict → `_make_planner` 为各 coder 构造 **per-worker** `ActionAuthorizer(allowed_paths=[scope])`，替换原先共享的单例；`file_scope=""`（单 coder / LLM 回退）时沿用共享 auth，行为不变。
+- 文件型 scope（如 `src/a.py`）按启发式归一化为其所在目录边界；`ponytail:` 注释已记录该上限与升级路径（更细的文件级粒度）。
 
-**难度**：中等（需把 scope 透传到 tool 执行的 auth 检查）
+**要点对照**：
+- 写白名单 → `ActionAuthorizer.allowed_paths`（非 `ProcessSandbox`，因写文件绕过了 sandbox 直接落盘）
+- worker 越界写 → 授权层硬拒（复用 `ActionAuthorizer` 路径，非 out-of-workspace 那条）
+- 与 `--mode swarm` / `/mode swarm` 入口无缝衔接（swarm.py 内部改动，入口不变）
+
+**测试**：`tests/modules/test_auth.py`（`test_scoped_write_inside_scope_allowed` / `test_scoped_write_outside_scope_denied` / `test_scoped_edit_outside_scope_denied` / `test_scope_as_file_path_allows_containing_dir` / `test_no_scope_unchanged`）、`tests/modules/test_swarm_planner.py`（`test_spawn_stores_file_scope` / `test_coder_file_scope_threaded_to_per_worker_auth`）。
+
+**难度**：中等（已落地）
 
 ---
 

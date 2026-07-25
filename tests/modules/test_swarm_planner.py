@@ -19,6 +19,8 @@ from synapse.protocols.events import (
 )
 from synapse.core.events import EventBus
 from synapse.modules.planning.swarm import SwarmPlanner, RoleSpec, FilteredToolRegistry
+from synapse.modules.security.auth import ActionAuthorizer
+from pathlib import Path
 
 
 def _result(output, status=ResultStatus.SUCCESS):
@@ -188,3 +190,35 @@ def test_filtered_tool_registry():
         pass
     names = {s["name"] for s in filtered.get_schemas()}
     assert names == {"read", "grep"}
+
+
+def test_spawn_stores_file_scope():
+    swarm = SwarmPlanner(react_planner=MagicMock(), roles=[RoleSpec(role="coder", file_scope=True, count=2)])
+    spec = RoleSpec(role="coder", file_scope=True)
+    w = swarm._spawn(spec, "coder-1", "task", MagicMock(), MagicMock(), file_scope="src/a.py")
+    assert w["file_scope"] == "src/a.py"
+    # Default (no scope) → empty string, no regression.
+    w2 = swarm._spawn(spec, "coder-2", "task", MagicMock(), MagicMock())
+    assert w2["file_scope"] == ""
+
+
+def test_coder_file_scope_threaded_to_per_worker_auth():
+    """Each coder with a scope gets its own ActionAuthorizer with that scope as
+    a write allow-list; an empty scope reuses the shared base authorizer."""
+    base_auth = ActionAuthorizer(workspace_root="/project", confirmation_enabled=True)
+    base = SimpleNamespace(
+        auth=base_auth,
+        max_iterations=10, thrashing_threshold=3, max_thrashing_events=3,
+        max_tokens_per_task=1000, _confirm=None, total_timeout_seconds=120,
+    )
+    swarm = SwarmPlanner(react_planner=base, roles=[RoleSpec(role="coder", file_scope=True, count=2)])
+
+    scoped = swarm._make_planner(RoleSpec(role="coder", file_scope=True), file_scope="src/a.py")
+    assert scoped.auth is not base_auth
+    assert len(scoped.auth._allowed_paths) == 1
+    # A file-named scope is normalized to its containing directory boundary.
+    assert scoped.auth._allowed_paths[0] == Path("/project/src").resolve()
+
+    # Reviewer / no-scope path keeps the shared base authorizer (no whitelist).
+    unscoped = swarm._make_planner(RoleSpec(role="coder", file_scope=True), file_scope="")
+    assert unscoped.auth is base_auth

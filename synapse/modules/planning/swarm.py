@@ -18,9 +18,11 @@ Design (lazy / reuse-first):
   coders write, and when there are several coders the task is decomposed into
   disjoint file scopes.
 
-ponytail: MVP does NOT hard-enforce file-scope isolation at the sandbox layer
-— it relies on the decomposition quality. Upgrade path: pass ``file_scope``
-to the sandbox/workspace as a write allow-list.
+ponytail: file-scope isolation IS now hard-enforced — each coder's
+``file_scope`` (from ``_decompose_scopes``) becomes a per-worker
+``ActionAuthorizer`` write allow-list, so an out-of-scope write is rejected at
+the auth layer (covers both ``write`` and ``edit``).  No scope (single coder or
+LLM fallback) reuses the shared base authorizer, unchanged.
 """
 
 from __future__ import annotations
@@ -40,6 +42,7 @@ from synapse.protocols.events import (
 )
 from synapse.modules.planning.hierarchical import merge_subtask_results
 from synapse.modules.planning.react import ReActPlanner
+from synapse.modules.security.auth import ActionAuthorizer
 
 
 @dataclass
@@ -146,7 +149,7 @@ class SwarmPlanner:
                 for i in range(spec.count):
                     sc = scopes[coder_idx]
                     coder_idx += 1
-                    workers.append(self._spawn(spec, sc["id"], sc["description"], session, tools))
+                    workers.append(self._spawn(spec, sc["id"], sc["description"], session, tools, file_scope=sc["file_scope"]))
             else:
                 workers.append(self._spawn(spec, spec.role, task, session, tools))
 
@@ -252,20 +255,32 @@ class SwarmPlanner:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _spawn(self, spec: RoleSpec, agent_id: str, task_desc: str, session, tools) -> dict:
+    def _spawn(self, spec: RoleSpec, agent_id: str, task_desc: str, session, tools, file_scope: str = "") -> dict:
         sub_session = session.fork(agent_id)
-        planner = self._make_planner(spec)
+        planner = self._make_planner(spec, file_scope)
         worker_tools = FilteredToolRegistry(tools, spec.tool_filter) if spec.tool_filter else tools
         return {
             "agent_id": agent_id, "role": spec.role, "task": task_desc,
             "session": sub_session, "planner": planner, "tools": worker_tools,
+            "file_scope": file_scope,
             "result": None,
         }
 
-    def _make_planner(self, spec: RoleSpec):
+    def _make_planner(self, spec: RoleSpec, file_scope: str = ""):
         if self._planner_factory is not None:
             return self._planner_factory(spec)
         base = self.react_planner
+        auth = base.auth
+        # Per-worker hard isolation: a coder with an assigned file scope gets its
+        # own ActionAuthorizer whose write allow-list is that scope.  Empty scope
+        # (single coder / LLM fallback) keeps the shared base authorizer.
+        if file_scope and isinstance(auth, ActionAuthorizer):
+            auth = ActionAuthorizer(
+                workspace_root=auth.workspace_root,
+                allowed_paths=[file_scope],
+                confirmation_enabled=auth.confirmation_enabled,
+                allow_external=auth.allow_external,
+            )
         return ReActPlanner(
             role=spec.role,
             system_prompt_suffix=spec.system_prompt_suffix,
@@ -273,7 +288,7 @@ class SwarmPlanner:
             thrashing_threshold=base.thrashing_threshold,
             max_thrashing_events=base.max_thrashing_events,
             max_tokens_per_task=base.max_tokens_per_task,
-            auth=base.auth,
+            auth=auth,
             confirm_callback=base._confirm,
             total_timeout_seconds=base.total_timeout_seconds,
         )

@@ -51,10 +51,12 @@ class ActionAuthorizer:
         workspace_root: str = ".",
         allow_external: bool = False,
         confirmation_enabled: bool = True,
+        allowed_paths: list[str] | None = None,
     ):
         self.workspace_root = Path(workspace_root).resolve()
         self.allow_external = allow_external
         self.confirmation_enabled = confirmation_enabled
+        self._allowed_paths = [self._resolve_scope_boundary(p) for p in (allowed_paths or [])]
 
     def create_request(
         self, tool_name: str, params: dict, risk_level: RiskLevel, session_id: str,
@@ -85,6 +87,14 @@ class ActionAuthorizer:
         # --- WRITE_LOCAL ------------------------------------------------------------
         if risk == RiskLevel.WRITE_LOCAL.value:
             target = request.tool_params.get("path", "")
+            # Hard isolation: if a write allow-list (file scope) is set, any
+            # target outside it is rejected outright — even if inside workspace.
+            if target and self._allowed_paths and not self._within_any_scope(target):
+                scopes = ", ".join(str(s) for s in self._allowed_paths)
+                return AuthDecision(
+                    allowed=False,
+                    reason=f"Write target '{target}' is outside the assigned file scope(s): {scopes}",
+                )
             if target and self._is_in_workspace(target):
                 return AuthDecision(
                     allowed=True,
@@ -139,6 +149,38 @@ class ActionAuthorizer:
             return resolved.is_relative_to(self.workspace_root)
         except (ValueError, OSError):
             return False
+
+    def _resolve_scope_boundary(self, scope: str) -> Path:
+        """Normalize a ``file_scope`` string into a directory boundary (resolved).
+
+        ponytail: scope is treated as a DIRECTORY boundary. A file-named scope
+        (an existing file, or a path whose name contains a dot) means "the
+        directory containing it"; a non-existent path without an extension is
+        treated as a directory. Finer file-level granularity is a future
+        upgrade.
+        """
+        p = Path(scope)
+        if not p.is_absolute():
+            p = self.workspace_root / p
+        p = p.resolve()
+        if p.is_dir():
+            return p
+        if p.is_file() or "." in p.name:
+            return p.parent
+        return p
+
+    def _within_any_scope(self, target: str) -> bool:
+        t = Path(target)
+        if not t.is_absolute():
+            t = self.workspace_root / t
+        try:
+            t = t.resolve()
+        except (ValueError, OSError):
+            return False
+        for scope in self._allowed_paths:
+            if t == scope or t.is_relative_to(scope):
+                return True
+        return False
 
     def _is_dangerous(self, command: str) -> bool:
         for pattern in self.DANGEROUS_PATTERNS:

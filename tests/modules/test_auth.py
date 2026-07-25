@@ -63,3 +63,47 @@ def test_dangerous_patterns_blocked():
         req = auth.create_request("shell", {"command": cmd}, RiskLevel.EXECUTE, "s1")
         decision = auth.authorize(req)
         assert not decision.allowed, f"Should block: {cmd}"
+
+
+def test_scoped_write_inside_scope_allowed():
+    auth = ActionAuthorizer(workspace_root="/project", allowed_paths=["src/foo"])
+    # A write within the allowed scope is permitted (subject to confirmation).
+    req = auth.create_request("write", {"path": "/project/src/foo/bar.py"}, RiskLevel.WRITE_LOCAL, "s1")
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert decision.requires_confirmation
+
+
+def test_scoped_write_outside_scope_denied():
+    auth = ActionAuthorizer(workspace_root="/project", allowed_paths=["src/foo"])
+    # A write to a sibling directory is hard-rejected, even though in-workspace.
+    req = auth.create_request("write", {"path": "/project/src/baz.py"}, RiskLevel.WRITE_LOCAL, "s1")
+    decision = auth.authorize(req)
+    assert not decision.allowed
+    assert "file scope" in decision.reason
+
+
+def test_scoped_edit_outside_scope_denied():
+    # The same allow-list governs `edit`, since it is also a WRITE_LOCAL tool.
+    auth = ActionAuthorizer(workspace_root="/project", allowed_paths=["src/foo"])
+    req = auth.create_request("edit", {"path": "/project/other/x.py"}, RiskLevel.WRITE_LOCAL, "s1")
+    decision = auth.authorize(req)
+    assert not decision.allowed
+
+
+def test_scope_as_file_path_allows_containing_dir():
+    # A file-named scope (e.g. "src/a.py") is normalized to its directory, so
+    # writing a sibling in the same directory is allowed.
+    auth = ActionAuthorizer(workspace_root="/project", allowed_paths=["src/a.py"])
+    req = auth.create_request("write", {"path": "/project/src/b.py"}, RiskLevel.WRITE_LOCAL, "s1")
+    decision = auth.authorize(req)
+    assert decision.allowed
+
+
+def test_no_scope_unchanged():
+    # Without allowed_paths the authorizer behaves exactly as before.
+    auth = ActionAuthorizer(workspace_root="/project", confirmation_enabled=True)
+    req = auth.create_request("write", {"path": "/project/anywhere.py"}, RiskLevel.WRITE_LOCAL, "s1")
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert decision.requires_confirmation
