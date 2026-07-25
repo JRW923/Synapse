@@ -283,7 +283,12 @@ class Synapse:
 
     # -- Public API ----------------------------------------------------------
 
-    async def run(self, task: str, session: Session | None = None) -> AgentResult:
+    async def run(
+        self,
+        task: str,
+        session: Session | None = None,
+        confirm_callback=None,
+    ) -> AgentResult:
         """Execute *task* asynchronously and return the result.
 
         Creates a fresh ``Session`` and ``Agent`` for each invocation,
@@ -292,30 +297,54 @@ class Synapse:
         If *session* is provided it is used directly; otherwise a new
         ``Session`` is created.  This allows the HTTP server to retain a
         reference to the session for later inspection.
+
+        *confirm_callback* (optional) overrides the instance-level callback
+        for this single run — used by headless opt-ins (``run --yes``, server
+        ``auto_approve``) so confirmation-required calls are approved without a
+        human.  The planner is rebuilt with it and restored afterwards.
         """
         if session is None:
             session = Session()
-        agent = Agent(self._container)
-        self._last_agent = agent   # Phase 4 — retained for /context-report
 
-        # Runtime scoring (TODO K): score each task independently, so reset the
-        # per-run collectors before executing and snapshot them afterwards.
-        for _m in self._run_metrics:
-            _m.reset()
+        # L.3: rebuild the planner with a per-run confirm callback when given.
+        override = confirm_callback is not None
+        prev_planner = None
+        if override:
+            self._confirm_callback = confirm_callback
+            auth = self._container.resolve(ActionAuthorizer)
+            planner = self._create_planner(auth)
+            prev_planner = self._container.resolve(Planner)
+            self._container.register(type(planner), planner)
 
-        result = await agent.run(task, session)
+        try:
+            agent = Agent(self._container)
+            self._last_agent = agent   # Phase 4 — retained for /context-report
 
-        status = result.status.value if hasattr(result.status, "value") else str(result.status)
-        self._last_run_score = RunScore(
-            task=task,
-            status=status,
-            safety=self._run_metrics[0].snapshot(),
-            process=self._run_metrics[1].snapshot(),
-            quality=self._run_metrics[2].snapshot(),
-            efficiency=self._run_metrics[3].snapshot(),
-        )
-        await self._persist_run_score(self._last_run_score)
-        return result
+            # Runtime scoring (TODO K): score each task independently, so reset the
+            # per-run collectors before executing and snapshot them afterwards.
+            for _m in self._run_metrics:
+                _m.reset()
+
+            result = await agent.run(task, session)
+
+            status = result.status.value if hasattr(result.status, "value") else str(result.status)
+            self._last_run_score = RunScore(
+                task=task,
+                status=status,
+                safety=self._run_metrics[0].snapshot(),
+                process=self._run_metrics[1].snapshot(),
+                quality=self._run_metrics[2].snapshot(),
+                efficiency=self._run_metrics[3].snapshot(),
+            )
+            await self._persist_run_score(self._last_run_score)
+            return result
+        finally:
+            # ponytail: the planner swap is instance-wide and not safe under
+            # concurrent requests (a parallel request could read the overridden
+            # planner during this run).  A per-request Synapse would remove the
+            # ceiling; for an explicit opt-in flag it is an acceptable trade-off.
+            if override and prev_planner is not None:
+                self._container.register(type(prev_planner), prev_planner)
 
     def get_citation_report(self) -> dict | None:
         """Phase 4 — return the citation/usage report for the last run, or None."""

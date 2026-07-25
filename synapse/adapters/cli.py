@@ -182,11 +182,26 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
     import sys as _sys
 
     _auto_allowed: set[str] = set()
+    # Serialize prompts so concurrent swarm workers can't interleave reads on
+    # the shared stdin (they all share this one callback instance).
+    _prompt_lock = asyncio.Lock()
+
+    def _describe(request) -> str:
+        """Human-readable summary of the risky call: tool, risk level, target."""
+        params = getattr(request, "tool_params", {}) or {}
+        risk = getattr(request, "risk_level", "") or ""
+        target = params.get("path") or params.get("command") or ""
+        desc = f"{request.tool_name}"
+        if risk:
+            desc += f" [{risk}]"
+        if target:
+            desc += f"  →  {target}"
+        return desc
 
     async def _confirm(request):
         tool_name = getattr(request, "tool_name", "unknown")
 
-        # Permanent allow list.
+        # Permanent allow list (session-scoped: "yes to all" for this tool).
         if tool_name in _auto_allowed:
             return True
 
@@ -206,16 +221,19 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
         try:
             loop = asyncio.get_running_loop()
 
-            _sys.stdout.write(f"\n  [auth] {tool_name}  (a)llow / (d)eny / (y)es to all: ")
-            _sys.stdout.flush()
+            prompt = f"\n  [auth] {_describe(request)}  (a)llow / (d)eny / (y)es to all: "
+            # One prompt at a time across all workers sharing this callback.
+            async with _prompt_lock:
+                _sys.stdout.write(prompt)
+                _sys.stdout.flush()
 
-            def _ask():
-                try:
-                    return input("").strip().lower()
-                except EOFError:
-                    return "d"
+                def _ask():
+                    try:
+                        return input("").strip().lower()
+                    except EOFError:
+                        return "d"
 
-            answer = await loop.run_in_executor(None, _ask)
+                answer = await loop.run_in_executor(None, _ask)
 
             if answer == "y":
                 _auto_allowed.add(tool_name)
@@ -542,6 +560,13 @@ def main():
             "command (args space-separated).  Repeat for multiple servers."
         ),
     )
+    run_parser.add_argument(
+        "--yes", "-y",
+        action="store_true",
+        default=False,
+        help="Auto-approve confirmation-required tool calls (write/execute) "
+             "instead of denying them in non-interactive mode.",
+    )
 
     sub.add_parser("version", help="Show version")
 
@@ -682,6 +707,13 @@ def main():
         mcp_servers = _parse_mcp_servers(args.mcp_servers)
         if mcp_servers is not None:
             kwargs["mcp_servers"] = mcp_servers
+
+        # L.3: non-interactive runs deny confirmation-required calls unless the
+        # user explicitly opts in with --yes (auto-approve callback).
+        if args.yes:
+            async def _auto_approve(request):
+                return True
+            kwargs["confirm_callback"] = _auto_approve
 
         synapse = Synapse(**kwargs)  # type: ignore[arg-type]
 

@@ -26,6 +26,18 @@ def _summarize_params(params: dict) -> str:
     return ", ".join(parts)
 
 
+def _denied_tool_result(tool_name: str, reason: str):
+    """Build a failed ToolResult for an authorization-denied tool call."""
+    return type("TR", (), {
+        "success": False,
+        "output": "",
+        "error": reason,
+        "metadata": type("M", (), {
+            "tool_name": tool_name, "files_touched": [], "sandbox_used": False,
+        })(),
+    })()
+
+
 class ReActPlanner:
     """Classic ReAct loop: the LLM thinks, calls tools, observes results, repeats.
 
@@ -332,7 +344,6 @@ class ReActPlanner:
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_input = tc["input"]
-
                 # Emit event
                 await event_bus.emit(ToolCallStarted(
                     session_id=session.id, tool_name=tool_name, tool_params=tool_input,
@@ -341,6 +352,7 @@ class ReActPlanner:
                 t0 = time.time()
                 self._log(f"  → {tool_name}({_summarize_params(tool_input)})")
                 try:
+                    denied_result = None
                     tool = await self._maybe_await(tools.get(tool_name))
 
                     # Action-time authorization check (C1)
@@ -351,128 +363,104 @@ class ReActPlanner:
                                 tool_name, tool_input, risk_level, session.id,
                             )
                             decision = self.auth.authorize(auth_req)
-
-                            # Emit the decision so security metrics / red-team
-                            # scoring can observe blocks (SafetyMetrics counts
-                            # allowed == False as auth_blocks).
                             await event_bus.emit(AuthDecisionMade(
                                 session_id=session.id,
                                 tool_name=tool_name,
                                 allowed=decision.allowed,
                                 reason=decision.reason,
                             ))
-
-                            # Hard deny
                             if not decision.allowed:
-                                result = type("TR", (), {
-                                    "success": False,
-                                    "output": "",
-                                    "error": f"Authorization denied: {decision.reason}",
-                                    "metadata": type("M", (), {
-                                        "tool_name": tool_name, "files_touched": [],
-                                        "sandbox_used": False,
-                                    })(),
-                                })()
-                                metrics.tool_call_count += 1
-                                duration_ms = int((time.time() - t0) * 1000)
-                                await event_bus.emit(ToolCallCompleted(
-                                    session_id=session.id,
-                                    tool_name=tool_name,
-                                    success=False,
-                                    duration_ms=duration_ms,
-                                    files_touched=[],
-                                ))
-                                tool_results.append((tc["id"], result))
-                                continue
-
-                            # Requires user confirmation → ask if callback available
-                            if decision.requires_confirmation and self._confirm is not None:
-                                approved = await self._confirm(auth_req)
+                                denied_result = _denied_tool_result(
+                                    tool_name, f"Authorization denied: {decision.reason}")
+                            elif decision.requires_confirmation:
+                                approved = (
+                                    await self._confirm(auth_req)
+                                    if self._confirm is not None else False
+                                )
                                 if not approved:
-                                    result = type("TR", (), {
-                                        "success": False,
-                                        "output": "",
-                                        "error": f"User denied: {decision.reason}",
-                                        "metadata": type("M", (), {
-                                            "tool_name": tool_name, "files_touched": [],
-                                            "sandbox_used": False,
-                                        })(),
-                                    })()
-                                    metrics.tool_call_count += 1
-                                    duration_ms = int((time.time() - t0) * 1000)
-                                    await event_bus.emit(ToolCallCompleted(
-                                        session_id=session.id,
-                                        tool_name=tool_name,
-                                        success=False,
-                                        duration_ms=duration_ms,
-                                        files_touched=[],
-                                    ))
-                                    tool_results.append((tc["id"], result))
-                                    continue
+                                    denied_result = _denied_tool_result(
+                                        tool_name,
+                                        f"User denied: {decision.reason}"
+                                        if self._confirm is not None
+                                        else f"Non-interactive confirmation required, "
+                                             f"no callback (auto-denied): {decision.reason}",
+                                    )
 
-                    result = await tool.execute(tool_input, sandbox=sandbox)
+                    if denied_result is not None:
+                        # Denied: record the blocked call and skip execution.
+                        metrics.tool_call_count += 1
+                        duration_ms = int((time.time() - t0) * 1000)
+                        await event_bus.emit(ToolCallCompleted(
+                            session_id=session.id,
+                            tool_name=tool_name,
+                            success=False,
+                            duration_ms=duration_ms,
+                            files_touched=[],
+                        ))
+                        tool_results.append((tc["id"], denied_result))
+                    else:
+                        result = await tool.execute(tool_input, sandbox=sandbox)
                 except KeyError:
-                    result = type("TR", (), {
-                        "success": False, "output": "", "error": f"Unknown tool: {tool_name}",
-                        "metadata": type("M", (), {"tool_name": tool_name, "files_touched": [], "sandbox_used": False})(),
-                    })()
+                    if denied_result is None:
+                        result = type("TR", (), {
+                            "success": False, "output": "", "error": f"Unknown tool: {tool_name}",
+                            "metadata": type("M", (), {"tool_name": tool_name, "files_touched": [], "sandbox_used": False})(),
+                        })()
 
-                metrics.tool_call_count += 1
-                if result.success:
-                    metrics.tool_success_count += 1
-                    # Surface successful writes so out-of-workspace access can
-                    # be detected by SecurityMetrics (SafetyMetrics.file_written).
-                    if tool_name == "write":
-                        await event_bus.emit(FileWritten(
-                            session_id=session.id,
-                            path=tool_input.get("path", ""),
-                            bytes_written=len(tool_input.get("content", "") or ""),
-                        ))
+                if denied_result is None:
+                    metrics.tool_call_count += 1
+                    if result.success:
+                        metrics.tool_success_count += 1
+                        # Surface successful writes so out-of-workspace access can
+                        # be detected by SecurityMetrics (SafetyMetrics.file_written).
+                        if tool_name == "write":
+                            await event_bus.emit(FileWritten(
+                                session_id=session.id,
+                                path=tool_input.get("path", ""),
+                                bytes_written=len(tool_input.get("content", "") or ""),
+                            ))
 
-                # Track file modifications for thrashing detection
-                for f in result.metadata.files_touched:
-                    file_touch_counts[f] = file_touch_counts.get(f, 0) + 1
-                    if file_touch_counts[f] >= self.thrashing_threshold:
-                        await event_bus.emit(ThrashingDetected(
-                            session_id=session.id,
-                            file_path=f,
-                            modification_count=file_touch_counts[f],
-                        ))
-                        metrics.thrashing_events += 1
+                    # Track file modifications for thrashing detection
+                    for f in result.metadata.files_touched:
+                        file_touch_counts[f] = file_touch_counts.get(f, 0) + 1
+                        if file_touch_counts[f] >= self.thrashing_threshold:
+                            await event_bus.emit(ThrashingDetected(
+                                session_id=session.id,
+                                file_path=f,
+                                modification_count=file_touch_counts[f],
+                            ))
+                            metrics.thrashing_events += 1
 
-                # Early-stop: too many thrashing events → abort the whole task.
-                if metrics.thrashing_events >= self.max_thrashing_events:
-                    thrash_files = sorted(
-                        {f for f, c in file_touch_counts.items()
-                         if c >= self.thrashing_threshold}
+                    # Early-stop: too many thrashing events → abort the whole task.
+                    if metrics.thrashing_events >= self.max_thrashing_events:
+                        thrash_files = sorted(
+                            {f for f, c in file_touch_counts.items()
+                             if c >= self.thrashing_threshold}
+                        )
+                        final_output = (
+                            f"Thrashing detected on: {', '.join(thrash_files)}. "
+                            f"Stopping to prevent wasted tokens."
+                        )
+                        result_status = ResultStatus.PARTIAL
+                        thrash_stop = True
+                        break
+
+                    tool_results.append((tc["id"], result))
+
+                    duration_ms = int((time.time() - t0) * 1000)
+                    status_icon = "[OK]" if result.success else "[FAIL]"
+                    self._log(
+                        f"  {status_icon} {tool_name}: {'OK' if result.success else 'FAILED'} "
+                        f"({duration_ms}ms)"
+                        f"{' - ' + result.error if not result.success else ''}"
                     )
-                    final_output = (
-                        f"Thrashing detected on: {', '.join(thrash_files)}. "
-                        f"Stopping to prevent wasted tokens."
-                    )
-                    result_status = ResultStatus.PARTIAL
-                    thrash_stop = True
-                    break
-
-                tool_results.append((tc["id"], result))
-
-            if thrash_stop:
-                break
-
-            duration_ms = int((time.time() - t0) * 1000)
-            status_icon = "[OK]" if result.success else "[FAIL]"
-            self._log(
-                f"  {status_icon} {tool_name}: {'OK' if result.success else 'FAILED'} "
-                f"({duration_ms}ms)"
-                f"{' - ' + result.error if not result.success else ''}"
-            )
-            await event_bus.emit(ToolCallCompleted(
-                session_id=session.id,
-                tool_name=tool_name,
-                success=result.success,
-                duration_ms=duration_ms,
-                files_touched=result.metadata.files_touched,
-            ))
+                    await event_bus.emit(ToolCallCompleted(
+                        session_id=session.id,
+                        tool_name=tool_name,
+                        success=result.success,
+                        duration_ms=duration_ms,
+                        files_touched=result.metadata.files_touched,
+                    ))
 
             # Feed tool results back as tool messages (after all tools executed)
             for tool_id, result in tool_results:

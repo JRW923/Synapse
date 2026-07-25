@@ -121,7 +121,7 @@ async def test_run_task_stream_includes_swarm_events():
     mock._container.resolve = MagicMock(return_value=bus)
     canned = AgentResult(status=ResultStatus.SUCCESS, output="ok", metrics=ExecutionMetrics())
 
-    async def _run(task, session=None):
+    async def _run(task, session=None, confirm_callback=None):
         sid = session.id if session is not None else "s"
         await bus.emit(WorkerSpawned(session_id=sid, agent_id="w1", role="coder", task="x"))
         return canned

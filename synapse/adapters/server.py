@@ -30,6 +30,11 @@ from synapse.protocols.planner import AgentResult, ExecutionMetrics
 from synapse.eval.experiments import Experiment, ExperimentResult
 
 
+# L.3: opt-in auto-approve for headless confirmation-required calls.
+async def _auto_approve(_request) -> bool:
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models for request / response
 # ---------------------------------------------------------------------------
@@ -37,6 +42,7 @@ from synapse.eval.experiments import Experiment, ExperimentResult
 
 class RunRequest(BaseModel):
     task: str
+    auto_approve: bool = False  # L.3: approve confirmation-required calls headlessly
 
 
 class MetricsResponse(BaseModel):
@@ -157,7 +163,10 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
     @app.post("/run", response_model=RunResponse)
     async def run_task(req: RunRequest):
         session = Session()
-        result: AgentResult = await synapse.run(req.task, session=session)
+        result: AgentResult = await synapse.run(
+            req.task, session=session,
+            confirm_callback=_auto_approve if req.auto_approve else None,
+        )
 
         # Store the session so it can be queried later
         sessions[session.id] = session
@@ -222,7 +231,10 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
         async def _run():
             try:
-                res = await synapse.run(req.task, session=session)
+                res = await synapse.run(
+                    req.task, session=session,
+                    confirm_callback=_auto_approve if req.auto_approve else None,
+                )
                 sessions[session.id] = session
                 await queue.put({"type": "done", "result": {
                     "status": res.status.value,

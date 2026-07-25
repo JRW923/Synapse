@@ -428,8 +428,14 @@ TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重
 - **难度**：中
 
 #### L.3 · 确认提示补风险 + 修复非交互语义
-- **要点**：确认回调给出将要写入的文件路径 / 执行的命令 / risk 等级；修复 `react.py:389` 与 `auth.py` docstring「非交互=auto-denied」声明不符（实际是无 callback 时静默放行）；修 swarm 并发确认抢 stdin、`y` 跨 worker 泄漏。
-- **现状痛点**：`cli.py:209` 确认提示仅显示工具名；非交互/server 模式下写/执行工具被静默放行（安全+UX 双坑）。
+**状态**：✅ 已实现（2026-07-24）
+- **要点**：确认回调给出将要写入的文件路径 / 执行的命令 / risk 等级；修复 `react.py` 与 `auth.py` docstring「非交互=auto-denied」声明不符（实际是无 callback 时静默放行）；修 swarm 并发确认抢 stdin。
+- **现状痛点**：`cli.py` 确认提示仅显示工具名；非交互/server 模式下写/执行工具被静默放行（安全+UX 双坑）。
+- **实现**：
+  - 语义对齐（用户选定「自动拒绝」）：`react.py` 中 `requires_confirmation` 且无确认回调 → 一律硬拒，绝不静默执行（修复前会 fall-through 直接执行）。`auth.py` docstring 同步改为「非交互无回调=自动拒绝，需调用方显式传确认回调才能批准」。
+  - 头less 放行入口：`run` 子命令新增 `--yes/-y`（传 auto-approve 回调）；`server` 的 `RunRequest` 新增 `auto_approve: bool`，`/run` 与 `/run/stream` 透传给 `synapse.run(confirm_callback=...)`。`Synapse.run()` 支持 per-run `confirm_callback`（重建该次 planner 并事后还原，`ponytail:` 注明并发请求下为已知上限）。
+  - 确认提示增强：`_make_confirm_callback` 的 `_describe()` 展示 `tool [risk] → path/command`；并加 `asyncio.Lock` 串行化并发 worker 的 stdin 提示（`base._confirm` 为 worker 共享实例，`y` 跨 worker 置位属预期 session 级行为）。
+  - 测试：`test_auth_confirm_flow.py::test_no_confirm_callback_auto_denies`（无回调自动拒绝、文件不落盘）、原 deny 链路测试保持通过；`react.py` 改为 `denied_result` 标志位写法消除 `continue` 在 try 内的作用域诡异（原先偶发 `UnboundLocalError`）。
 - **难度**：中（含语义对齐，需先定「无 callback 时硬拒还是硬放」）
 
 #### L.4 · 暴露运行时评分与过程质量 hint

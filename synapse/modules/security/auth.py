@@ -15,7 +15,9 @@ class ActionAuthorizer:
 
     In interactive mode (chat), workspace-bounded writes trigger a user
     confirmation instead of being hard-blocked.  In non-interactive mode
-    (run / serve), they are auto-denied.
+    (run / serve) there is no one to prompt, so a ``requires_confirmation``
+    decision is auto-denied unless the caller supplies a confirm callback
+    that approves it (e.g. an explicit opt-in like ``--yes``).
     """
 
     DANGEROUS_PATTERNS = [
