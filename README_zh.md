@@ -34,6 +34,8 @@ synapse -p anthropic -m claude-sonnet-4-6 "修复 auth.py 的 bug"
 | `/reset` | 清空会话 |
 | `/mode <名称>` | 切换规划模式 (react / plan_execute / hierarchical) |
 | `/tools` | 列出工具 |
+| `/context-report` | 显示 context 区块引用 / 使用热力图 |
+| `/score` | 显示运行时评分（safety / process / quality / efficiency）+ 过程质量 hint |
 | `/exit` | 退出 |
 
 ## 配置
@@ -74,6 +76,47 @@ provider:
 | ollama | qwen3.5:4b, llama4:8b |
 
 API key 填好后即为可用（绿色），未填者显示为灰色。
+
+## CLI
+
+```bash
+synapse                              # 主 REPL
+synapse setup                        # 安装启动器脚本
+synapse chat                         # 聊天会话
+synapse run "任务"                   # 一次性任务（实时流式展示进度）
+synapse serve                        # HTTP API（端口 8000）
+synapse version                      # 显示版本
+```
+
+```
+-c, --config  PATH     指定 synapse.yaml 路径
+-p, --provider NAME    指定 LLM 供应商
+-m, --model    NAME    指定模型 ID
+--mode         NAME    规划模式
+-y, --yes             （run）自动批准需要确认的操作（无交互场景下的显式放行）
+```
+
+`run` 与 `chat` 会以实时面板流式展示进度（工具调用、Swarm 生命周期、token），
+不再静默阻塞。当某工具需要确认而终端无人应答时，默认**自动拒绝**，除非你加
+`--yes` 显式放行。
+
+## HTTP API
+
+`/run` 与 `/run/stream`（SSE）是 `run` 的程序化等价物，二者均接受 `RunRequest`：
+
+```json
+{ "task": "重构 auth.py", "auto_approve": false }
+```
+
+- `auto_approve` —— 显式放行需确认的工具（等价于 `--yes`）。
+- `/run/stream` 会推送 `agent_progress`、`llm_token`、`tool_call_*` 以及 Swarm
+  事件（`worker_spawned`、`worker_completed`、`review_submitted`、`vote_cast`、
+  `swarm_verified`），让外部调用者看到与 CLI 一致的实时进度。
+- 响应（以及流式最终 `done` 事件）包含 `run_score` —— 运行时评分
+  （`safety` / `process` / `quality` / `efficiency`）及供下一次任务参考的
+  `process_hint`。
+
+错误以友好的「原因 / 建议」文案返回，绝不向用户暴露原始 traceback。
 
 ## 架构
 

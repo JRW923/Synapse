@@ -34,6 +34,8 @@ synapse -p anthropic -m claude-sonnet-4-6 "Fix the bug in auth.py"
 | `/reset` | Clear session |
 | `/mode <name>` | Switch planning mode (react / plan_execute / hierarchical) |
 | `/tools` | List tools |
+| `/context-report` | Show context-block citation / usage heatmap |
+| `/score` | Show runtime score (safety / process / quality / efficiency) + process hint |
 | `/exit` | Quit |
 
 ## Configuration
@@ -67,7 +69,7 @@ Or use environment variables: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_A
 synapse                              # Main REPL
 synapse setup                        # Install launcher scripts
 synapse chat                         # Chat session
-synapse run "task"                   # One-shot task
+synapse run "task"                   # One-shot task (streams progress live)
 synapse serve                        # HTTP API (port 8000)
 synapse version                      # Show version
 ```
@@ -77,7 +79,32 @@ synapse version                      # Show version
 -p, --provider NAME    LLM provider
 -m, --model    NAME    Model ID
 --mode         NAME    Planning mode
+-y, --yes            (run) auto-approve confirmation-required actions (headless opt-in)
 ```
+
+`run` and `chat` stream progress (tool calls, swarm lifecycle, tokens) in a live
+panel instead of blocking silently. When a tool needs confirmation and no human
+is at the terminal, the action is **auto-denied** unless you pass `--yes`.
+
+## HTTP API
+
+`/run` and `/run/stream` (SSE) are the programmatic equivalents of `run`. Both
+accept a `RunRequest`:
+
+```json
+{ "task": "Refactor auth.py", "auto_approve": false }
+```
+
+- `auto_approve` — opt-in to approve confirmation-required tools (mirrors `--yes`).
+- `/run/stream` emits `agent_progress`, `llm_token`, `tool_call_*`, and the swarm
+  events (`worker_spawned`, `worker_completed`, `review_submitted`, `vote_cast`,
+  `swarm_verified`) so external callers see the same live progress as the CLI.
+- The response (and the stream's final `done` event) includes `run_score` — the
+  runtime score (`safety` / `process` / `quality` / `efficiency`) plus the latest
+  `process_hint` for the next task.
+
+Errors are returned as friendly `原因 / 建议` messages; raw tracebacks are never
+surfaced to the user.
 
 ## Architecture
 
