@@ -421,8 +421,10 @@ TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重
 - **难度**：中（CLI 复用面板较易；server SSE 需加流式响应）
 
 #### L.2 · Swarm 过程可视化
+**状态**：✅ 已实现（2026-07-24）
 - **要点**：CLI 订阅 `WorkerSpawned/ReviewSubmitted/VoteCast/SwarmVerified` 等事件，在 live panel 展示"几个 worker、谁被 reject、重试几次、是否 verified"；server 用 SSE 推送。
 - **现状痛点**：`events.py:162-206` 已 emit 这些事件，但 CLI 只订阅 4 类基础事件，Swarm 并行/review/验证循环对用户全黑盒。
+- **实现**：新增 `_SwarmTracker`（维护 `workers/reviews/votes/verified` 状态并渲染紧凑行），`run` 子命令（`_run_task_streamed`）与 REPL 主界面各 `wire()` 5 个 swarm 事件，经 `_LiveDisplay.set_swarm_lines()` 在面板底部青色区展示；server `_run/stream` 的 `_STREAM_EVENTS` 纳入 5 个 swarm 事件且 `_on_event` 改为通用事件字段转储（含 `timestamp` 序列化）。测试 `test_cli_run.py::test_swarm_tracker_renders_lifecycle` + `test_server.py::test_run_task_stream_includes_swarm_events`。`chat` 子命令为瞬时状态条，未接入（避免刷屏）。
 - **难度**：中
 
 #### L.3 · 确认提示补风险 + 修复非交互语义

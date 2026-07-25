@@ -184,11 +184,18 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
     # L.1: expose the same streamed progress the CLI REPL shows, over HTTP, so
     # non-interactive / integrated callers are no longer a black box.
 
+    # L.2: include the swarm lifecycle events so parallel/review/verify loops
+    # are visible over SSE, not just the basic stream.
     _STREAM_EVENTS = (
         "agent_progress",
         "llm_token",
         "tool_call_started",
         "tool_call_completed",
+        "worker_spawned",
+        "worker_completed",
+        "review_submitted",
+        "vote_cast",
+        "swarm_verified",
     )
 
     @app.post("/run/stream")
@@ -198,11 +205,13 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
         queue: asyncio.Queue = asyncio.Queue()
 
         async def _on_event(event):
-            # Minimal, transport-agnostic view of the event for the stream.
-            fields = ("event_type", "phase", "message", "text", "tool_name",
-                      "success", "duration_ms", "agent_id", "role")
-            data = {k: getattr(event, k, None) for k in fields}
-            data = {k: v for k, v in data.items() if v is not None}
+            # Transport-agnostic dump of the event: every public field, with
+            # datetimes serialized so the SSE payload stays JSON-safe.
+            data = {k: v for k, v in event.__dict__.items() if not k.startswith("_")}
+            data["event_type"] = event.event_type
+            for k, v in list(data.items()):
+                if hasattr(v, "isoformat"):
+                    data[k] = v.isoformat()
             await queue.put({"type": "event", "event": data})
 
         subscribed = []

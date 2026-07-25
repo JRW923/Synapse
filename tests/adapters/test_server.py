@@ -110,6 +110,38 @@ async def test_run_task_stream(client, mock_synapse):
     mock_synapse.run.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_run_task_stream_includes_swarm_events():
+    """POST /run/stream also forwards swarm lifecycle events (L.2)."""
+    from synapse.adapters.server import create_app
+    from synapse.protocols.events import WorkerSpawned
+
+    bus = EventBus()
+    mock = AsyncMock()
+    mock._container.resolve = MagicMock(return_value=bus)
+    canned = AgentResult(status=ResultStatus.SUCCESS, output="ok", metrics=ExecutionMetrics())
+
+    async def _run(task, session=None):
+        sid = session.id if session is not None else "s"
+        await bus.emit(WorkerSpawned(session_id=sid, agent_id="w1", role="coder", task="x"))
+        return canned
+
+    mock.run = _run
+    app = create_app(synapse_instance=mock)
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    response = client.post("/run/stream", json={"task": "swarm it"})
+    assert response.status_code == 200
+    events = [json.loads(l[len("data: "):]) for l in response.text.splitlines() if l.startswith("data: ")]
+    types = [e["event"]["event_type"] for e in events if e["type"] == "event"]
+    assert "worker_spawned" in types
+    spawned = next(e["event"] for e in events
+                   if e["type"] == "event" and e["event"]["event_type"] == "worker_spawned")
+    assert spawned["role"] == "coder"
+    assert spawned["agent_id"] == "w1"
+
+
 # ---------------------------------------------------------------------------
 # Test 3: Session history
 # ---------------------------------------------------------------------------

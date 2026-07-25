@@ -45,3 +45,33 @@ async def test_run_task_streamed_rich_streams_and_cleans_up():
     # _handlers is a defaultdict, so assert every bucket is empty rather than
     # comparing to {} (empty keys persist).
     assert all(len(v) == 0 for v in bus._handlers.values())
+
+
+@pytest.mark.asyncio
+async def test_swarm_tracker_renders_lifecycle():
+    """_SwarmTracker turns swarm events into compact panel lines and cleans up."""
+    from synapse.adapters.cli import _SwarmTracker
+    from synapse.protocols.events import (
+        WorkerSpawned, WorkerCompleted, ReviewSubmitted, SwarmVerified,
+    )
+
+    updates = []
+    tracker = _SwarmTracker(updates.append)
+    bus = EventBus()
+    tracker.wire(bus)
+
+    await bus.emit(WorkerSpawned(session_id="s1", agent_id="w1", role="coder", task="x"))
+    await bus.emit(WorkerCompleted(session_id="s1", agent_id="w1", role="coder", status="success"))
+    await bus.emit(ReviewSubmitted(session_id="s1", agent_id="w2", reviewer_role="reviewer",
+                                   target_role="coder", verdict="reject", comments="nope"))
+    await bus.emit(SwarmVerified(session_id="s1", status="partial", issues="i"))
+
+    joined = "\n".join(tracker.render_lines())
+    assert "coder" in joined
+    assert "rejected=1" in joined
+    assert "verified: partial" in joined
+    # on_update fired once per event (spawn, complete, review, verify).
+    assert len(updates) == 4
+
+    tracker.unwire(bus)
+    assert all(len(v) == 0 for v in bus._handlers.values())

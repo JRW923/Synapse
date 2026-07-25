@@ -250,6 +250,7 @@ class _LiveDisplay:
         self._fmt_elapsed = fmt_elapsed
         self._buf: list[str] = []
         self._label = "Thinking..."
+        self._swarm_lines: list[str] = []
         self._live = Live(self._render(), console=console, auto_refresh=True, refresh_per_second=15)
 
     @property
@@ -277,6 +278,11 @@ class _LiveDisplay:
         self._buf = []
         self._refresh()
 
+    def set_swarm_lines(self, lines: list[str]) -> None:
+        """Replace the swarm-status footer lines shown under the streamed text."""
+        self._swarm_lines = list(lines)
+        self._refresh()
+
     def _refresh(self) -> None:
         try:
             self._live.update(self._render())
@@ -297,7 +303,83 @@ class _LiveDisplay:
             pieces.append(el)
         header = "  ·  ".join(pieces)
         text = Text(body, style="none") if body else Text("…", style="dim")
+        if self._swarm_lines:
+            text.append("\n\n")
+            for line in self._swarm_lines:
+                text.append(line + "\n", style="cyan")
         return Panel(text, title=header, border_style=_BORDER, expand=True)
+
+
+class _SwarmTracker:
+    """Collects swarm lifecycle events into a compact summary for the live panel.
+
+    Wires the five swarm event types on an EventBus, keeps just enough state to
+    render "how many workers / who was rejected / retried / verified", and calls
+    ``on_update`` with the rendered lines so the caller can push them to a
+    :class:`_LiveDisplay`.  Reused by the ``run`` subcommand and the REPL.
+    """
+
+    _EVENTS = ("worker_spawned", "worker_completed",
+               "review_submitted", "vote_cast", "swarm_verified")
+
+    def __init__(self, on_update):
+        self._on_update = on_update
+        self.workers: dict[str, dict] = {}
+        self.reviews: list = []
+        self.votes: list = []
+        self.verified: str | None = None
+        self._handlers: dict[str, object] = {}
+
+    def render_lines(self) -> list[str]:
+        if not self.workers and self.verified is None:
+            return []
+        lines = []
+        for wid, w in self.workers.items():
+            lines.append(f"[swarm] {w['role']} ({wid}): {w['status']}")
+        if self.reviews or self.votes:
+            rejects = sum(1 for r in self.reviews if getattr(r, "verdict", "") == "reject")
+            lines.append(f"[swarm] reviews={len(self.reviews)} rejected={rejects} votes={len(self.votes)}")
+        if self.verified is not None:
+            lines.append(f"[swarm] verified: {self.verified}")
+        return lines
+
+    def wire(self, event_bus) -> None:
+        async def _on_spawned(ev):
+            self.workers[ev.agent_id] = {"role": ev.role, "status": "running"}
+            self._on_update(self.render_lines())
+
+        async def _on_completed(ev):
+            w = self.workers.get(ev.agent_id)
+            if w:
+                w["status"] = ev.status
+            self._on_update(self.render_lines())
+
+        async def _on_review(ev):
+            self.reviews.append(ev)
+            self._on_update(self.render_lines())
+
+        async def _on_vote(ev):
+            self.votes.append(ev)
+            self._on_update(self.render_lines())
+
+        async def _on_verified(ev):
+            self.verified = ev.status
+            self._on_update(self.render_lines())
+
+        for et, h in (("worker_spawned", _on_spawned),
+                      ("worker_completed", _on_completed),
+                      ("review_submitted", _on_review),
+                      ("vote_cast", _on_vote),
+                      ("swarm_verified", _on_verified)):
+            event_bus.subscribe(et, h)
+            self._handlers[et] = h
+
+    def unwire(self, event_bus) -> None:
+        for et, h in self._handlers.items():
+            try:
+                event_bus.unsubscribe(et, h)
+            except Exception:
+                pass
 
 
 async def _run_task_streamed(synapse, task, session, console, use_rich, status_holder=None):
@@ -375,6 +457,8 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
         event_bus.subscribe("llm_token", _on_token)
         event_bus.subscribe("tool_call_started", _on_tool_started)
         event_bus.subscribe("tool_call_completed", _on_tool_completed)
+        swarm_tracker = _SwarmTracker(live.set_swarm_lines)
+        swarm_tracker.wire(event_bus)
 
     try:
         return await synapse.run(task, session=session)
@@ -398,6 +482,7 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
                     event_bus.unsubscribe(et, h)
                 except Exception:
                     pass
+            swarm_tracker.unwire(event_bus)
 
 
 def main():
@@ -1694,6 +1779,8 @@ async def _main_interface(config_path: str | None = None):
                 event_bus.subscribe("llm_token", _on_token)
                 event_bus.subscribe("tool_call_started", _on_tool_started)
                 event_bus.subscribe("tool_call_completed", _on_tool_completed)
+                swarm_tracker = _SwarmTracker(live.set_swarm_lines)
+                swarm_tracker.wire(event_bus)
 
         try:
             result = await synapse.run(user_input, session=session)
@@ -1731,6 +1818,7 @@ async def _main_interface(config_path: str | None = None):
                         event_bus.unsubscribe("llm_token", _on_token)
                         event_bus.unsubscribe("tool_call_started", _on_tool_started)
                         event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
+                        swarm_tracker.unwire(event_bus)
                     except Exception:
                         pass
 
