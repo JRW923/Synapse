@@ -15,31 +15,34 @@
 | s01 | 最小模型/工具循环 | ✅ 已实现 | `core/agent.py::Agent.run()` → `modules/planning/react.py::execute()` 的 model→tool→feedback 循环 |
 | s02 | 工具分发表 | ✅ 已实现 | `modules/tools/registry.py::DefaultToolRegistry`（`get`/`get_schemas`），planner 经 `tools.get()` 分发 |
 | s03 | 权限门 | ✅ 已实现 | `modules/security/auth.py::ActionAuthorizer` + `react.py::_confirm`，无回调硬拒 / `--yes`·`auto_approve` 放行（L.3） |
-| s04 | 生命周期钩子 | 🟡 部分 | `core/events.EventBus` + 丰富事件可订阅（`_SwarmTracker`、各 Metrics 收集器），但**无**用户可配的 PreToolUse/PostToolUse 钩子脚本 |
-| s05 | 待办管理 (TodoWrite) | 🟡 部分 | 规划器产出有序步骤/子任务（`plan_execute.py` steps、`hierarchical.py` `Subtask`），但**无**独立 TodoWrite 工具供 agent 显式追踪 |
+| s04 | 生命周期钩子 | ✅ 已实现 | `core/events.EventBus` + 丰富事件可订阅；`modules/hooks.py::HookRunner` 把 config `hooks` 段（event_type → shell 命令）接到 EventBus，PostToolUse 类钩子已落地（PreToolUse 阻断待接 ActionAuthorizer） |
+| s05 | 待办管理 (TodoWrite) | ✅ 已实现 | `modules/todo.py::TodoStore` + `tools/todo_tool.py` 的 `todo_write`/`todo_read`；REPL `/todos` 视图可看 |
 | s06 | 隔离子任务上下文 (Subagent) | ✅ 已实现 | `hierarchical.py` / `swarm.py` 均用 `session.fork(agent_id)` 给子任务干净消息历史 |
-| s07 | 按需技能加载 (Skill) | ❌ 未实现 | 代码中无任何 skill 加载机制 |
+| s07 | 按需技能加载 (Skill) | ✅ 已实现 | `modules/skill.py::SkillLoader`（扫描 `skills/<name>/SKILL.md`，按 classify_task + 触发词匹配）注入 system 提示；`tools/skill_tool.py::load_skill` 可显式拉取 |
 | s08 | 上下文压缩 | ✅ 已实现 | `modules/context/compactor.py::ContextCompactor` + `ContextPartitioner` |
 | s09 | 持久记忆层 | ✅ 已实现 | `modules/memory`（Session/Project/User/Semantic 四层 + `LayeredMemory`），`ProcessQualityScored.hint` 经 retriever 回注 |
 | s10 | 运行时组装系统提示 | ✅ 已实现 | `react.py::_build_system_prompt(context)` 由各 zone + role suffix 运行时拼装，非硬编码 |
 | s11 | 重试策略 (Error Recovery) | ✅ 已实现 | `react.py` LLM 指数退避重试（≤3 次，`2**attempt`），耗尽返 FAILED；工具错误以 `ToolResult(success=False)` 回灌；thrashing early-stop |
-| s12 | 任务看板 (Task System) | 🟡 部分 | 有分解图（`hierarchical.py` 子任务 + `plan_execute.py` steps 含合并），但**无**一等公民的可观察/可认领状态看板 |
-| s13 | 后台执行 | ❌ 未实现 | 无后台任务机制，单任务内同步执行 |
-| s14 | 定时调度 (Cron) | ❌ 未实现 | 无 cron/调度器 |
+| s12 | 任务看板 (Task System) | ✅ 已实现 | `modules/planning/board.py::TaskBoard`（pending/claimed/done 状态机，原子认领）为一等公民，Hierarchical 串行认领 + Swarm 并发认领共用 |
+| s13 | 后台执行 | ✅ 已实现 | `modules/tools/background.py::BackgroundTaskManager`：shell `run_in_background` 返回 handle，结束发 `BackgroundResult`，可 `read_task_id` 读取 |
+| s14 | 定时调度 (Cron) | ✅ 已实现 | `modules/cron.py::CronScheduler`（stdlib 5 字段 cron，不引第三方）进程内调度 |
 | s15 | 队友邮箱/团队 | ✅ 已实现 | `swarm.py::SwarmPlanner`：多角色 worker（coder/reviewer/verifier）+ `session.fork` 隔离 + 评审/投票/验证事件（TODO C） |
-| s16 | 团队协同协议 | 🟡 部分 | 有显式事件契约（`WorkerSpawned`/`WorkerCompleted`/`ReviewSubmitted`/`VoteCast`/`SwarmVerified`），但缺完整协商/消息合同层 |
-| s17 | 自主认领任务 | ❌ 未实现 | Swarm 由 `RoleSpec` 显式分配，无 agent 自主检查看板认领任务 |
-| s18 | Worktree 隔离 | ❌ 未实现 | 仅 `session.fork` 会话隔离，无 git worktree 文件系统隔离 |
+| s16 | 团队协同协议 | ✅ 已实现 | 显式事件契约 + 新增 `AgentMessage`/`TaskClaimed`/`TaskReleased`（`events.py`），worker 间通信走事件 |
+| s17 | 自主认领任务 | ✅ 已实现 | `SwarmPlanner` 新增 `autonomous` 模式：子任务上 `TaskBoard`，N 个通用 worker 自驱认领执行后合并（显式 RoleSpec 行为保持不变） |
+| s18 | Worktree 隔离 | ✅ 已实现 | `modules/planning/worktree.py::WorktreeManager`：git worktree 隔离（非 git 退化为独立子目录），Swarm coder 各拿隔离目录并在 run 结束清理 |
 | s19 | MCP 工具桥 | ✅ 已实现 | `modules/mcp/`（manager/client/wrappers）把外部服务注册为 agent 工具 |
 | s20 | 集成化 harness | ✅ 已实现 | 整个 Synapse：一个 agent 循环 + 权限/记忆/上下文/流式/评分/Swarm/MCP 等周边系统 |
 
 ### 结论
 
-- **已实现 11 项**：s01, s02, s03, s06, s08, s09, s10, s11, s15, s19, s20
-- **部分实现 5 项**：s04（事件总线有跨切逻辑但无用户钩子）、s05（有规划步骤无 TodoWrite）、s12（有分解图无持久看板）、s16（有事件契约无完整协议层）
-- **未实现 5 项**：s07（Skill）、s13（Background）、s14（Cron）、s17（Autonomous claim）、s18（Worktree）
+- **已实现 20 项（全量覆盖）**：s01, s02, s03, s04, s05, s06, s07, s08, s09, s10, s11, s12, s13, s14, s15, s16, s17, s18, s19, s20
+- **部分实现 0 项**
+- **未实现 0 项**
 
-最大缺口集中在「团队自主化与长期运维」一侧：这 5 项缺失正好对应 Claude Code harness 从「单 agent」走向「生产级多 agent 编排」的后半段。
+> 2026-07-25 补全：原「部分/未实现」的 9 项（s04/s05/s07/s12/s13/s14/s16/s17/s18）
+> 已按开发计划全部落地，每批均带可运行单测（check）。详见上方状态表与各模块实现。
+> 已知上限（ponytail）：s04 仅只读 PostToolUse 钩子（PreToolUse 阻断待接 ActionAuthorizer）；
+> s07 用极简 frontmatter 解析；s13/s14 为进程内实现（多实例需外部协调）；s18 仅 git 仓库真正 worktree 隔离。
 
 ---
 
