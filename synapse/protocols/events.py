@@ -26,6 +26,9 @@ class EventType(str, Enum):
     REVIEW_SUBMITTED = "review_submitted"
     VOTE_CAST = "vote_cast"
     SWARM_VERIFIED = "swarm_verified"
+    TASK_STATUS_CHANGED = "task_status_changed"
+    TASK_CLAIMED = "task_claimed"
+    TASK_RELEASED = "task_released"
 
 
 @dataclass(kw_only=True)
@@ -204,3 +207,28 @@ class SwarmVerified(BaseEvent):
     event_type: str = EventType.SWARM_VERIFIED
     status: str                      # "success" | "partial" | "failed"
     issues: str = ""
+
+
+@dataclass(kw_only=True)
+class TaskStatusChanged(BaseEvent):
+    """A board task moved to a new status (s12/s17 可观察任务系统)."""
+    event_type: str = EventType.TASK_STATUS_CHANGED
+    task_id: str
+    status: str                      # pending | claimed | done
+    owner: str = ""
+
+
+@dataclass(kw_only=True)
+class TaskClaimed(BaseEvent):
+    """A worker claimed a pending board task (s17 自主认领)."""
+    event_type: str = EventType.TASK_CLAIMED
+    task_id: str
+    owner: str = ""                  # agent_id that claimed it
+
+
+@dataclass(kw_only=True)
+class TaskReleased(BaseEvent):
+    """A claimed task was released back to the board (s17/s16)."""
+    event_type: str = EventType.TASK_RELEASED
+    task_id: str
+    owner: str = ""                  # agent_id that released it

@@ -120,6 +120,8 @@ class SwarmPlanner:
         vote_threshold: float = 0.5,
         max_verify_loops: int = 2,
         worktree_manager: WorktreeManager | None = None,
+        autonomous: bool = False,
+        autonomous_workers: int = 2,
     ):
         self.react_planner = react_planner
         self.roles = roles or list(DEFAULT_ROLES)
@@ -130,6 +132,10 @@ class SwarmPlanner:
         # s18 — when set, each writing (file-scoped) coder gets its own isolated
         # worktree; cleaned up after the swarm run finishes.
         self._worktree_manager = worktree_manager
+        # s17 — autonomous mode: tasks go on a board, N generic workers claim
+        # them (instead of explicit RoleSpec assignment).
+        self.autonomous = autonomous
+        self.autonomous_workers = autonomous_workers
 
     # ------------------------------------------------------------------
     # Public API
@@ -139,6 +145,8 @@ class SwarmPlanner:
         start_time = time.time()
         metrics = ExecutionMetrics()
         try:
+            if self.autonomous:
+                return await self._execute_autonomous(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
             return await self._execute_inner(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
         finally:
             # s18 — always tear down worker worktrees, success or failure.
@@ -269,12 +277,87 @@ class SwarmPlanner:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _execute_autonomous(self, task, context, tools, llm, sandbox, session, event_bus, start_time, metrics) -> AgentResult:
+        """s17 — drop subtasks on a board; N generic workers claim & execute.
+
+        Reuses ``_decompose_scopes`` (so disjoint file scopes still apply to
+        each board task) and the shared ``merge_subtask_results``.
+        """
+        from synapse.modules.planning.board import TaskBoard
+        from synapse.modules.planning.hierarchical import merge_subtask_results
+        from synapse.protocols.events import WorkerSpawned, WorkerCompleted
+
+        n = self.autonomous_workers
+        subs = await self._decompose_scopes(task, llm, event_bus, session, n)
+        board = TaskBoard(event_bus=event_bus, session_id=session.id)
+        for s in subs:
+            await board.add(s["id"], s["description"])
+
+        workers = [
+            self._spawn(RoleSpec(role="worker", file_scope=True), f"worker-{i}", "", session, tools)
+            for i in range(n)
+        ]
+        for w in workers:
+            await event_bus.emit(WorkerSpawned(
+                session_id=session.id, agent_id=w["agent_id"], role=w["role"], task="(autonomous board)",
+            ))
+
+        task_owner: dict[str, dict] = {}
+
+        async def _loop(w):
+            while True:
+                t = await board.claim(w["agent_id"])
+                if t is None:
+                    return
+                res = await w["planner"].execute(
+                    task=t.description, context=context, tools=w["tools"], llm=llm,
+                    sandbox=sandbox, session=w["session"], event_bus=event_bus,
+                )
+                await board.complete(t.id, res)
+                w["results"][t.id] = res
+                task_owner[t.id] = w
+                await event_bus.emit(WorkerCompleted(
+                    session_id=session.id, agent_id=w["agent_id"], role=w["role"],
+                    status=res.status.value, output_snippet=res.output[:200],
+                ))
+
+        await asyncio.gather(*[_loop(w) for w in workers])
+
+        items = [
+            (s["id"], s["description"], task_owner[s["id"]]["results"][s["id"]])
+            for s in subs
+        ]
+        merged = await merge_subtask_results(task, items, llm, event_bus, session)
+
+        for w in workers:
+            for res in w["results"].values():
+                m = res.metrics
+                metrics.tokens_input += m.tokens_input
+                metrics.tokens_output += m.tokens_output
+                metrics.tool_call_count += m.tool_call_count
+                metrics.tool_success_count += m.tool_success_count
+                metrics.thrashing_events += m.thrashing_events
+        metrics.duration_ms = int((time.time() - start_time) * 1000)
+
+        await event_bus.emit(SwarmVerified(
+            session_id=session.id, status="success", issues="",
+        ))
+
+        return AgentResult(
+            status=ResultStatus.SUCCESS,
+            output=merged,
+            metrics=metrics,
+            agent_id="swarm",
+            role="swarm",
+            contributors=[r for w in workers for r in w["results"].values()],
+        )
+
     def _spawn(self, spec: RoleSpec, agent_id: str, task_desc: str, session, tools, file_scope: str = "") -> dict:
         sub_session = session.fork(agent_id)
         # s18 — writing (file-scoped) coders get an isolated worktree; the
         # isolate lives for the whole swarm run and is removed in execute().
         worktree_path = ""
-        if self._worktree_manager is not None and spec.file_scope and file_scope:
+        if self._worktree_manager is not None and spec.file_scope:
             worktree_path = str(self._worktree_manager.create(agent_id))
         planner = self._make_planner(spec, file_scope, worktree_path)
         worker_tools = FilteredToolRegistry(tools, spec.tool_filter) if spec.tool_filter else tools
@@ -283,6 +366,7 @@ class SwarmPlanner:
             "session": sub_session, "planner": planner, "tools": worker_tools,
             "file_scope": file_scope,
             "worktree_path": worktree_path,
+            "results": {},
             "result": None,
         }
 
