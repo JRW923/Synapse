@@ -19,6 +19,7 @@ from synapse.core.container import Container
 from synapse.core.agent import Agent
 from synapse.core.session import Session
 from synapse.core.events import EventBus
+from synapse.protocols.events import BaseEvent
 
 from synapse.protocols.llm import LLMProvider
 from synapse.protocols.planner import Planner, AgentResult, PlanningMode
@@ -280,6 +281,7 @@ class Synapse:
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
         self._last_run_score = None  # TODO K — populated by run()
+        self._last_process_hint = None  # L.4 — last process-quality hint
 
     # -- Public API ----------------------------------------------------------
 
@@ -305,6 +307,9 @@ class Synapse:
         """
         if session is None:
             session = Session()
+
+        # L.4: the process-quality hint is per-run; clear it before this run.
+        self._last_process_hint = None
 
         # L.3: rebuild the planner with a per-run confirm callback when given.
         override = confirm_callback is not None
@@ -361,19 +366,27 @@ class Synapse:
         """TODO K — return the runtime score for the last run (or a live snapshot).
 
         The result is a serializable dict combining the four metric collectors
-        (safety / process / quality / efficiency).  Returns ``None`` only if the
-        container was built without the runtime collectors.
+        (safety / process / quality / efficiency) plus the L.4 process-quality
+        ``hint``.  Returns ``None`` only if the container was built without the
+        runtime collectors.
         """
-        if self._last_run_score is not None:
-            return self._last_run_score.to_dict()
-        if not getattr(self, "_run_metrics", None):
+        if self._last_run_score is None and not getattr(self, "_run_metrics", None):
             return None
-        return RunScore(
-            safety=self._run_metrics[0].snapshot(),
-            process=self._run_metrics[1].snapshot(),
-            quality=self._run_metrics[2].snapshot(),
-            efficiency=self._run_metrics[3].snapshot(),
-        ).to_dict()
+        if self._last_run_score is not None:
+            score = self._last_run_score.to_dict()
+        else:
+            score = RunScore(
+                safety=self._run_metrics[0].snapshot(),
+                process=self._run_metrics[1].snapshot(),
+                quality=self._run_metrics[2].snapshot(),
+                efficiency=self._run_metrics[3].snapshot(),
+            ).to_dict()
+        score["process_hint"] = self._last_process_hint
+        return score
+
+    async def _on_process_quality_scored(self, event: BaseEvent) -> None:
+        """L.4 — remember the latest process-quality hint for the user."""
+        self._last_process_hint = getattr(event, "hint", None) or None
 
     async def _persist_run_score(self, score: RunScore) -> None:
         """Persist a run score to ProjectMemory as a rolling per-project log.
@@ -491,6 +504,10 @@ class Synapse:
                 persist_feedback=not self._enable_eval,
             ),
         )
+
+        # L.4: capture the process-quality hint (emitted per task) so it can be
+        # surfaced to the user via get_run_score() / CLI /score / server /run.
+        event_bus.subscribe("process_quality_scored", self._on_process_quality_scored)
 
         # Context
         retriever = BasicContextRetriever()

@@ -1125,6 +1125,7 @@ def _show_help(console):
     t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical / swarm)")
     t.add_row("  /tools", "List available tools")
     t.add_row("  /context-report", "Show context block citation / usage heatmap")
+    t.add_row("  /score", "Show runtime score (safety/process/quality/efficiency) + hint")
     t.add_row("  /exit, /quit", "Exit")
     console.print(t)
     console.print()
@@ -1231,6 +1232,48 @@ def _show_context_report(console, synapse, use_rich: bool) -> None:
         rate = f"{total_cited}/{total_used} blocks cited"
         console.print(f"  [{_HINT}]Overall: {rate}[/{_HINT}]")
     console.print()
+
+
+def _show_score(console, synapse, use_rich: bool) -> None:
+    """L.4 — render the runtime score (safety/process/quality/efficiency) + hint."""
+    if synapse is None:
+        msg = "Run a task first — no score to show yet."
+        (console.print(f"[dim]{msg}[/dim]") if use_rich else print(msg))
+        return
+    try:
+        score = synapse.get_run_score()
+    except Exception as e:
+        (console.print(f"[red]Failed to read score: {e}[/red]") if use_rich
+         else print(f"Failed to read score: {e}"))
+        return
+    if not score:
+        msg = "No run score yet — run a task first."
+        (console.print(f"[dim]{msg}[/dim]") if use_rich else print(msg))
+        return
+
+    def _fmt(d: dict) -> str:
+        return "  ".join(f"{k}={v}" for k, v in d.items())
+
+    header = f"{score.get('status', '')} · {score.get('task', '')[:60]}"
+    if use_rich:
+        console.print()
+        console.print(f"  [bold {_BRAND}]Run score[/{_BRAND}]  [{_HINT}]{header}[/{_HINT}]")
+        t = Table(show_header=False, box=None, padding=(0, 2), pad_edge=False)
+        t.add_column(style=f"bold {_BRAND}", no_wrap=True)
+        t.add_column(style=_HINT)
+        for dim in ("safety", "process", "quality", "efficiency"):
+            t.add_row(f"  {dim}", _fmt(score.get(dim) or {}))
+        console.print(t)
+        hint = score.get("process_hint")
+        if hint:
+            console.print(f"  [{_HINT}]hint:[/{_HINT}] {hint}")
+        console.print()
+    else:
+        print(f"Run score — {header}")
+        for dim in ("safety", "process", "quality", "efficiency"):
+            print(f"  {dim}: {_fmt(score.get(dim) or {})}")
+        if score.get("process_hint"):
+            print(f"  hint: {score['process_hint']}")
 
 
 def _available_models(config):
@@ -1632,6 +1675,8 @@ async def _main_interface(config_path: str | None = None):
                     print(f"Session path: {session_dir}")
             elif cmd == "/context-report":
                 _show_context_report(console, _synapse, use_rich)
+            elif cmd == "/score":
+                _show_score(console, _synapse, use_rich)
             elif cmd == "/model":
                 if arg:
                     avail, _ = _available_models(config)

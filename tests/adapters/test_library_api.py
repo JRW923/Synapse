@@ -91,11 +91,14 @@ async def test_run_score_populated_after_run():
 
     score = synapse.get_run_score()
     assert score is not None
-    assert set(score.keys()) == {"task", "status", "safety", "process", "quality", "efficiency"}
+    assert set(score.keys()) == {"task", "status", "safety", "process", "quality", "efficiency", "process_hint"}
     assert score["status"] == "success"
     # Every category is present and itself a dict of metrics.
     for cat in ("safety", "process", "quality", "efficiency"):
         assert isinstance(score[cat], dict) and score[cat]
+    # L.4 — a real run emits ProcessQualityScored, so the closed-loop hint is
+    # surfaced (non-empty string).
+    assert isinstance(score["process_hint"], str) and score["process_hint"]
 
 
 @pytest.mark.asyncio
@@ -124,3 +127,40 @@ async def test_run_metrics_wired_and_collect():
 
         score = synapse.get_run_score()
         assert score["safety"]["out_of_workspace_access"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_score_includes_process_hint():
+    """L.4 — the last ProcessQualityScored hint is surfaced via get_run_score."""
+    from synapse.protocols.events import ProcessQualityScored
+    from synapse.protocols.llm import LLMResponse
+
+    mock_llm = AsyncMock()
+    mock_llm.model_id = "mock"
+    mock_llm.chat.return_value = LLMResponse(
+        content="Task completed successfully.", tool_calls=[],
+        stop_reason="end_turn", usage={"input": 10, "output": 5},
+    )
+
+    with patch(
+        "synapse.modules.providers.anthropic.AnthropicProvider",
+        return_value=mock_llm,
+    ):
+        from synapse.adapters.library import Synapse
+
+        synapse = Synapse(provider="anthropic")
+        bus = synapse._container.resolve(EventBus)
+
+        # No hint yet.
+        assert synapse.get_run_score()["process_hint"] is None
+
+        await bus.emit(ProcessQualityScored(
+            session_id="s1", task="t", score=0.1, reuse_ratio=0.0, write_without_lookup=3,
+            thrashing_events=0, success=True, tool_calls=5,
+            hint="下次请先 grep/read 定位可复用代码。",
+        ))
+
+        assert synapse.get_run_score()["process_hint"] == "下次请先 grep/read 定位可复用代码。"
+        # A subsequent run resets the hint, and the closed loop re-captures it.
+        await synapse.run("Say hello")
+        assert isinstance(synapse.get_run_score()["process_hint"], str) and synapse.get_run_score()["process_hint"]

@@ -439,8 +439,14 @@ TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重
 - **难度**：中（含语义对齐，需先定「无 callback 时硬拒还是硬放」）
 
 #### L.4 · 暴露运行时评分与过程质量 hint
+- **状态**：✅ 已实现（2026-07-24）
 - **要点**：加 `/score` 斜杠命令（CLI）与 server `/run` 响应字段，展示 TODO K 的 `RunScore`（safety/process/quality/efficiency）；把 `ProcessQualityScored.hint` 也展示给用户。
 - **现状痛点**：`library.get_run_score()` 每 run 计算并落 ProjectMemory，但 CLI 无命令、server 无字段，完全不可见。
+- **实现**：
+  - 评分闭环可视化：`library.py` 在 `_build_container` 中订阅 `process_quality_scored` 事件到 `_on_process_quality_scored`，把最新 `hint` 存 `self._last_process_hint`；`run()` 每次开头清空该 hint，`get_run_score()` 输出 dict 末位新增 `process_hint` 键（与四个快照一并序列化）。
+  - CLI：`/score` 斜杠命令（`_show_score` helper）渲染 safety/process/quality/efficiency 四组指标 + hint，并加入 `/help` 帮助表。
+  - server：`RunResponse` 新增 `run_score: dict | None`，`/run` 与 `/run/stream` 的 `done` 事件均透传 `synapse.get_run_score()`。
+  - 测试：`test_library_api.py::test_run_score_includes_process_hint`（订阅捕获 hint + run 后闭环重捕获）、`test_run_score_populated_after_run` 扩键集含 `process_hint`；`test_server.py::test_run_task_includes_run_score`（/run 返回 run_score）及 stream/mock 同步修正。
 - **难度**：低（接线为主）
 
 #### L.5 · 统一友好错误反馈

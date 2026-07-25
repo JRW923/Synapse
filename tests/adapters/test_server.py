@@ -30,6 +30,18 @@ def mock_synapse():
             duration_ms=1500,
         ),
     )
+    # L.4 — the /run handler surfaces this via RunResponse.run_score.
+    # get_run_score is a *sync* method, so it must return a plain dict (not a
+    # coroutine — AsyncMock would otherwise make it awaitable).
+    mock.get_run_score = MagicMock(return_value={
+        "task": "Say hello",
+        "status": "success",
+        "safety": {},
+        "process": {},
+        "quality": {},
+        "efficiency": {},
+        "process_hint": "复用率偏低，下次先检索现有实现。",
+    })
     return mock
 
 
@@ -81,6 +93,16 @@ async def test_run_task(client, mock_synapse):
     assert call_args[0][0] == "Say hello"
 
 
+@pytest.mark.asyncio
+async def test_run_task_includes_run_score(client, mock_synapse):
+    """L.4 — POST /run returns the runtime score including the process hint."""
+    response = client.post("/run", json={"task": "Say hello"})
+    assert response.status_code == 200
+    data = response.json()
+    assert "run_score" in data
+    assert data["run_score"]["process_hint"] == "复用率偏低，下次先检索现有实现。"
+
+
 # ---------------------------------------------------------------------------
 # Test 2b: SSE streaming run (L.1)
 # ---------------------------------------------------------------------------
@@ -119,6 +141,11 @@ async def test_run_task_stream_includes_swarm_events():
     bus = EventBus()
     mock = AsyncMock()
     mock._container.resolve = MagicMock(return_value=bus)
+    mock.get_run_score = MagicMock(return_value={
+        "task": "swarm it", "status": "success",
+        "safety": {}, "process": {}, "quality": {}, "efficiency": {},
+        "process_hint": None,
+    })
     canned = AgentResult(status=ResultStatus.SUCCESS, output="ok", metrics=ExecutionMetrics())
 
     async def _run(task, session=None, confirm_callback=None):

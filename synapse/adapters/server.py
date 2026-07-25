@@ -66,6 +66,7 @@ class RunResponse(BaseModel):
     session_id: str
     artifacts: list[ArtifactResponse] = []
     metrics: MetricsResponse = MetricsResponse()
+    run_score: dict[str, Any] | None = None  # L.4 — runtime score + process hint
 
 
 class SessionInfo(BaseModel):
@@ -179,7 +180,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
                 ArtifactResponse(path=a.path, content=a.content, action=a.action)
                 for a in result.artifacts
             ],
-            metrics=MetricsResponse(
+                metrics=MetricsResponse(
                 tokens_input=result.metrics.tokens_input,
                 tokens_output=result.metrics.tokens_output,
                 tool_call_count=result.metrics.tool_call_count,
@@ -187,6 +188,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
                 duration_ms=result.metrics.duration_ms,
                 thrashing_events=result.metrics.thrashing_events,
             ),
+            run_score=synapse.get_run_score(),  # L.4
         )
 
     # ---- POST /run/stream (SSE) -----------------------------------------
@@ -252,6 +254,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
                         "duration_ms": res.metrics.duration_ms,
                         "thrashing_events": res.metrics.thrashing_events,
                     },
+                    "run_score": synapse.get_run_score(),  # L.4
                 }})
             except Exception as exc:
                 await queue.put({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
