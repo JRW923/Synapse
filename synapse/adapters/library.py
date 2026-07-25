@@ -463,6 +463,11 @@ class Synapse:
         event_bus = EventBus()
         c.register(EventBus, event_bus)
 
+        # s04 — user hooks: run shell commands after the configured events fire.
+        if self._config.hooks.hooks:
+            from synapse.modules.hooks import HookRunner
+            HookRunner(self._config.hooks.hooks).attach(event_bus)
+
         # Make config available to components that need it (e.g. Agent reads ContextConfig).
         from synapse.config.schema import SynapseConfig
         c.register(SynapseConfig, self._config)

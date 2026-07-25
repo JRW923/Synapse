@@ -124,6 +124,17 @@ class SecurityConfig(BaseModel):
     allowed_paths: list[str] = Field(default_factory=lambda: ["."])
 
 
+class HooksConfig(BaseModel):
+    """User lifecycle hooks (s04).
+
+    Maps an event type (the ``EventType`` string, e.g. ``tool_call_completed``)
+    to a list of shell commands run after that event fires.  Payload is passed
+    via the ``SYNAPSE_EVENT`` / ``SYNAPSE_PAYLOAD`` env vars.  Start with
+    read-only PostToolUse hooks; PreToolUse blocking is future work.
+    """
+    hooks: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class SynapseConfig(BaseModel):
     """Root configuration."""
     provider: ProviderConfig = ProviderConfig()
@@ -131,3 +142,4 @@ class SynapseConfig(BaseModel):
     planning: PlanningConfig = PlanningConfig()
     security: SecurityConfig = SecurityConfig()
     context: ContextConfig = ContextConfig()
+    hooks: HooksConfig = HooksConfig()
