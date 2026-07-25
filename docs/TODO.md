@@ -392,16 +392,18 @@ TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重
 
 ### K · 运行时评分闭环
 
-**状态**：待实现
+**状态**：已实现（2026-07-24）
 
-4 个 eval 收集器（`ProcessMetrics` / `QualityMetrics` / `EfficiencyMetrics` / `SafetyMetrics`）目前只在测试里被构造并接收事件，真实运行不产生任何评分。把它们接入运行时 container，让每次任务都产出可观测的过程质量 / 效率 / 安全评分，闭环到记忆或报告。
+4 个 eval 收集器（`ProcessMetrics` / `QualityMetrics` / `EfficiencyMetrics` / `SafetyMetrics`）原先仅在 `_enable_eval` 时接线，真实运行不产生评分。现已闭环：
 
-**要点**：
-- container 构造时实例化 4 个收集器并订阅 EventBus
-- `synapse eval` / `/context-report` 之外，增加运行后评分汇总（可落 ProjectMemory）
-- 与 TODO B（过程质量验证闭环）打通，让评分驱动下一次执行
+- `library._build_container` 把 4 个收集器**统一改为始终实例化并订阅 EventBus**（移除 eval 门控，它们只是轻量计数器），存入 `self._run_metrics` 并注册到 container。
+- `Library.run()` 每次任务前 `reset()` 4 个收集器（独立计分），运行后构造 `RunScore`（task/status + 4 快照），存 `self._last_run_score`，并 `_persist_run_score` 落 `ProjectMemory`（滚动日志 `run-score-log.md`，`try/except` 兜底不阻塞主流程）。
+- 新增 `get_run_score()` 暴露评分（报告路径，总可调用）；`RunScore` 数据类在 `synapse/eval/metrics/__init__.py`，含 `to_dict()`。
+- 与 TODO B 的"评分驱动下一次执行"未打通（TODO B 尚未实现），本项仅完成"产出 + 可观测 + 落记忆"闭环。
 
-**难度**：中等
+**测试**：`tests/adapters/test_library_api.py`（`test_run_score_populated_after_run` / `test_run_metrics_wired_and_collect`）。
+
+**难度**：中等（已落地）
 
 ---
 

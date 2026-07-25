@@ -10,6 +10,8 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import json
+from datetime import datetime
 from typing import Any
 
 from synapse.config import load_config
@@ -21,7 +23,8 @@ from synapse.core.events import EventBus
 from synapse.protocols.llm import LLMProvider
 from synapse.protocols.planner import Planner, AgentResult, PlanningMode
 from synapse.protocols.tool import ToolRegistry
-from synapse.protocols.memory import MemoryStore, MemoryEntry, MemoryLevel
+from synapse.protocols.memory import MemoryStore, MemoryEntry, MemoryLevel, MemoryMetadata
+from synapse.eval.metrics import RunScore
 from synapse.protocols.retriever import ContextRetriever
 from synapse.protocols.sandbox import Sandbox
 
@@ -276,6 +279,7 @@ class Synapse:
         self._confirm_callback = confirm_callback
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
+        self._last_run_score = None  # TODO K — populated by run()
 
     # -- Public API ----------------------------------------------------------
 
@@ -293,7 +297,25 @@ class Synapse:
             session = Session()
         agent = Agent(self._container)
         self._last_agent = agent   # Phase 4 — retained for /context-report
-        return await agent.run(task, session)
+
+        # Runtime scoring (TODO K): score each task independently, so reset the
+        # per-run collectors before executing and snapshot them afterwards.
+        for _m in self._run_metrics:
+            _m.reset()
+
+        result = await agent.run(task, session)
+
+        status = result.status.value if hasattr(result.status, "value") else str(result.status)
+        self._last_run_score = RunScore(
+            task=task,
+            status=status,
+            safety=self._run_metrics[0].snapshot(),
+            process=self._run_metrics[1].snapshot(),
+            quality=self._run_metrics[2].snapshot(),
+            efficiency=self._run_metrics[3].snapshot(),
+        )
+        await self._persist_run_score(self._last_run_score)
+        return result
 
     def get_citation_report(self) -> dict | None:
         """Phase 4 — return the citation/usage report for the last run, or None."""
@@ -305,6 +327,47 @@ class Synapse:
         if tracker is None or context is None:
             return None
         return tracker.report(context)
+
+    def get_run_score(self) -> dict | None:
+        """TODO K — return the runtime score for the last run (or a live snapshot).
+
+        The result is a serializable dict combining the four metric collectors
+        (safety / process / quality / efficiency).  Returns ``None`` only if the
+        container was built without the runtime collectors.
+        """
+        if self._last_run_score is not None:
+            return self._last_run_score.to_dict()
+        if not getattr(self, "_run_metrics", None):
+            return None
+        return RunScore(
+            safety=self._run_metrics[0].snapshot(),
+            process=self._run_metrics[1].snapshot(),
+            quality=self._run_metrics[2].snapshot(),
+            efficiency=self._run_metrics[3].snapshot(),
+        ).to_dict()
+
+    async def _persist_run_score(self, score: RunScore) -> None:
+        """Persist a run score to ProjectMemory as a rolling per-project log.
+
+        Failures are swallowed so scoring never blocks a task.  All runs append
+        to a single ``run-score-log`` entry, forming a queryable history.
+        """
+        try:
+            pm = self._container.resolve(ProjectMemory)
+        except Exception:
+            return
+        try:
+            entry = MemoryEntry(
+                id="run-score-log",
+                content=json.dumps(score.to_dict(), ensure_ascii=False, indent=2),
+                level=MemoryLevel.PROJECT,
+                metadata=MemoryMetadata(
+                    timestamp=datetime.now(), priority=3, tags=["run_score"],
+                ),
+            )
+            await pm.store(entry)
+        except Exception:
+            return
 
     def run_sync(self, task: str) -> AgentResult:
         """Synchronous wrapper around :meth:`run`.
@@ -424,23 +487,23 @@ class Synapse:
         injection_guard = InjectionGuard()
         c.register(InjectionGuard, injection_guard)
 
-        # Security — SafetyMetrics always subscribes to the EventBus (cheap,
-        # counters only) so out-of-workspace / injection / auth-block signals
-        # are collected on every run, not just when eval is enabled.
+        # Runtime scoring (TODO K): all four EventBus-driven metric collectors
+        # are ALWAYS wired so every task yields an observable process/quality/
+        # efficiency/safety score.  They are cheap counters only — gating them
+        # behind _enable_eval meant real runs produced no scores.  _enable_eval
+        # still toggles the heavier experiment harness elsewhere.
         from synapse.eval.metrics.safety import SafetyMetrics as _SM
-        c.register(_SM, _SM(
-            bus=event_bus,
-            workspace_root=self._config.tools.workspace_root,
-        ))
-
-        # Eval — optionally wire the heavier metrics collectors (Phase 3)
-        if self._enable_eval:
-            from synapse.eval.metrics.process import ProcessMetrics as _PM
-            from synapse.eval.metrics.quality import QualityMetrics as _QM
-            from synapse.eval.metrics.efficiency import EfficiencyMetrics as _EM
-            c.register(_PM, _PM(bus=event_bus))
-            c.register(_QM, _QM(bus=event_bus))
-            c.register(_EM, _EM(bus=event_bus))
+        from synapse.eval.metrics.process import ProcessMetrics as _PM
+        from synapse.eval.metrics.quality import QualityMetrics as _QM
+        from synapse.eval.metrics.efficiency import EfficiencyMetrics as _EM
+        self._run_metrics = [
+            _SM(bus=event_bus, workspace_root=self._config.tools.workspace_root),
+            _PM(bus=event_bus),
+            _QM(bus=event_bus),
+            _EM(bus=event_bus),
+        ]
+        for _m in self._run_metrics:
+            c.register(type(_m), _m)
 
         # Planner (selected by planning mode)
         planner = self._create_planner(auth)
