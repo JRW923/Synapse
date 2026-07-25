@@ -29,6 +29,7 @@ class EventType(str, Enum):
     TASK_STATUS_CHANGED = "task_status_changed"
     TASK_CLAIMED = "task_claimed"
     TASK_RELEASED = "task_released"
+    BACKGROUND_RESULT = "background_result"
 
 
 @dataclass(kw_only=True)
@@ -232,3 +233,13 @@ class TaskReleased(BaseEvent):
     event_type: str = EventType.TASK_RELEASED
     task_id: str
     owner: str = ""                  # agent_id that released it
+
+
+@dataclass(kw_only=True)
+class BackgroundResult(BaseEvent):
+    """A backgrounded shell command finished (s13)."""
+    event_type: str = EventType.BACKGROUND_RESULT
+    task_id: str
+    success: bool
+    stdout: str = ""
+    stderr: str = ""

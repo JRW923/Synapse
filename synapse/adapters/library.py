@@ -87,6 +87,7 @@ from synapse.modules.planning.react import ReActPlanner
 from synapse.modules.planning.plan_execute import PlanExecutePlanner
 from synapse.modules.planning.hierarchical import HierarchicalPlanner
 from synapse.modules.planning.swarm import SwarmPlanner
+from synapse.modules.tools.background import get_default_manager
 
 # MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
@@ -619,13 +620,15 @@ class Synapse:
 
     def _create_all_tools(self):
         """Return the full set of tools, including external ones when enabled."""
+        # s13 — shared so ShellTool can start background tasks the planner tracks.
+        bg_manager = get_default_manager()
         tools: list = [
             ReadTool(),
             WriteTool(),
             EditTool(),
             GlobTool(),
             GrepTool(),
-            ShellTool(),
+            ShellTool(background_manager=bg_manager),
             GitTool(),
         ]
 
@@ -696,6 +699,7 @@ def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
         auth=auth,
         confirm_callback=confirm_callback,
         total_timeout_seconds=cfg.total_timeout_seconds,
+        background_manager=get_default_manager(),
     )
 
     if mode == PlanningMode.REACT:

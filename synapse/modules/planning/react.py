@@ -52,7 +52,8 @@ class ReActPlanner:
                  max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
                  verbose: bool = True,
-                 role: str = "", system_prompt_suffix: str = ""):
+                 role: str = "", system_prompt_suffix: str = "",
+                 background_manager=None):
         self.max_iterations = max_iterations
         self.thrashing_threshold = thrashing_threshold
         self.max_thrashing_events = max_thrashing_events
@@ -65,6 +66,8 @@ class ReActPlanner:
         # (e.g. "reviewer") without a separate class.
         self.role = role
         self.system_prompt_suffix = system_prompt_suffix
+        # s13 — shared with ShellTool so background tasks emit on the right bus.
+        self.background_manager = background_manager
 
     def _log(self, msg: str):
         """Print a progress message if verbose is enabled.
@@ -204,6 +207,9 @@ class ReActPlanner:
     async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
         start_time = time.time()
         metrics = ExecutionMetrics()
+        # s13 — let the shared background manager emit results on this run's bus.
+        if self.background_manager is not None:
+            self.background_manager.set_run_context(event_bus, session.id)
         file_touch_counts: dict[str, int] = {}
 
         # Phase 4 — citation tracking (tracks which context blocks the LLM cites)
