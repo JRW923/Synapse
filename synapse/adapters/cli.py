@@ -1134,6 +1134,7 @@ def _show_help(console):
     t.add_row("  /tools", "List available tools")
     t.add_row("  /context-report", "Show context block citation / usage heatmap")
     t.add_row("  /score", "Show runtime score (safety/process/quality/efficiency) + hint")
+    t.add_row("  /todos", "Show the current todo list (s05)")
     t.add_row("  /exit, /quit", "Exit")
     console.print(t)
     console.print()
@@ -1282,6 +1283,29 @@ def _show_score(console, synapse, use_rich: bool) -> None:
             print(f"  {dim}: {_fmt(score.get(dim) or {})}")
         if score.get("process_hint"):
             print(f"  hint: {score['process_hint']}")
+
+
+def _show_todos(console, use_rich: bool) -> None:
+    """s05 — render the current todo list (from the shared TodoStore)."""
+    from synapse.modules.todo import get_default_todo_store
+    todos = get_default_todo_store().list()
+    if not todos:
+        msg = "（当前没有待办）"
+        (console.print(f"[dim]{msg}[/dim]") if use_rich else print(msg))
+        return
+    if use_rich:
+        console.print()
+        console.print(f"  [bold {_BRAND}]Todos[/{_BRAND}]")
+        for t in todos:
+            style = {"completed": "green", "in_progress": "yellow", "pending": "dim"}.get(t["status"], "dim")
+            mark = {"completed": "x", "in_progress": ">", "pending": " "}.get(t["status"], " ")
+            console.print(f"  [{style}][{mark}] {t['content']}[/{style}]")
+        console.print()
+    else:
+        print("Todos:")
+        for t in todos:
+            mark = {"completed": "x", "in_progress": ">", "pending": " "}.get(t["status"], " ")
+            print(f"  [{mark}] {t['content']}")
 
 
 # L.5 — unified friendly error feedback: map SynapseError subclasses to a 中文
@@ -1711,6 +1735,8 @@ async def _main_interface(config_path: str | None = None):
                 _show_context_report(console, _synapse, use_rich)
             elif cmd == "/score":
                 _show_score(console, _synapse, use_rich)
+            elif cmd == "/todos":
+                _show_todos(console, use_rich)
             elif cmd == "/model":
                 if arg:
                     avail, _ = _available_models(config)

@@ -90,6 +90,8 @@ from synapse.modules.planning.swarm import SwarmPlanner
 from synapse.modules.tools.background import get_default_manager
 from synapse.modules.tools.skill_tool import SkillTool
 from synapse.modules.skill import get_default_skill_loader
+from synapse.modules.tools.todo_tool import TodoWriteTool, TodoReadTool
+from synapse.modules.todo import get_default_todo_store
 
 # MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
@@ -635,6 +637,8 @@ class Synapse:
             ShellTool(background_manager=bg_manager),
             GitTool(),
             SkillTool(skill_loader),
+            TodoWriteTool(get_default_todo_store()),
+            TodoReadTool(get_default_todo_store()),
         ]
 
         # Web search is always available (DuckDuckGo, no API key required).
