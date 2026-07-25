@@ -706,7 +706,12 @@ def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
         complex_planner = PlanExecutePlanner(react_planner=react)
         return HierarchicalPlanner(react_planner=react, complex_planner=complex_planner)
     if mode == PlanningMode.SWARM:
-        return SwarmPlanner(react_planner=react)
+        # s18 — give swarm workers filesystem isolation when we know the root.
+        wt = None
+        if isinstance(auth, ActionAuthorizer):
+            from synapse.modules.planning.worktree import WorktreeManager
+            wt = WorktreeManager(auth.workspace_root)
+        return SwarmPlanner(react_planner=react, worktree_manager=wt)
 
     raise ValueError(
         f"Unknown planning mode '{mode}'. "

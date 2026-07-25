@@ -31,6 +31,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from synapse.protocols.planner import (
     AgentResult, ExecutionMetrics, ResultStatus, PlanningMode,
@@ -42,6 +43,7 @@ from synapse.protocols.events import (
 )
 from synapse.modules.planning.hierarchical import merge_subtask_results
 from synapse.modules.planning.react import ReActPlanner
+from synapse.modules.planning.worktree import WorktreeManager
 from synapse.modules.security.auth import ActionAuthorizer
 
 
@@ -117,6 +119,7 @@ class SwarmPlanner:
         planner_factory=None,
         vote_threshold: float = 0.5,
         max_verify_loops: int = 2,
+        worktree_manager: WorktreeManager | None = None,
     ):
         self.react_planner = react_planner
         self.roles = roles or list(DEFAULT_ROLES)
@@ -124,6 +127,9 @@ class SwarmPlanner:
         self._planner_factory = planner_factory
         self.vote_threshold = vote_threshold
         self.max_verify_loops = max_verify_loops
+        # s18 — when set, each writing (file-scoped) coder gets its own isolated
+        # worktree; cleaned up after the swarm run finishes.
+        self._worktree_manager = worktree_manager
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,6 +138,14 @@ class SwarmPlanner:
     async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
         start_time = time.time()
         metrics = ExecutionMetrics()
+        try:
+            return await self._execute_inner(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
+        finally:
+            # s18 — always tear down worker worktrees, success or failure.
+            if self._worktree_manager is not None:
+                self._worktree_manager.remove_all()
+
+    async def _execute_inner(self, task, context, tools, llm, sandbox, session, event_bus, start_time, metrics) -> AgentResult:
 
         # 1. Decompose coder work into disjoint file scopes when parallel.
         coder_specs = [r for r in self.roles if r.file_scope]
@@ -257,24 +271,48 @@ class SwarmPlanner:
 
     def _spawn(self, spec: RoleSpec, agent_id: str, task_desc: str, session, tools, file_scope: str = "") -> dict:
         sub_session = session.fork(agent_id)
-        planner = self._make_planner(spec, file_scope)
+        # s18 — writing (file-scoped) coders get an isolated worktree; the
+        # isolate lives for the whole swarm run and is removed in execute().
+        worktree_path = ""
+        if self._worktree_manager is not None and spec.file_scope and file_scope:
+            worktree_path = str(self._worktree_manager.create(agent_id))
+        planner = self._make_planner(spec, file_scope, worktree_path)
         worker_tools = FilteredToolRegistry(tools, spec.tool_filter) if spec.tool_filter else tools
         return {
             "agent_id": agent_id, "role": spec.role, "task": task_desc,
             "session": sub_session, "planner": planner, "tools": worker_tools,
             "file_scope": file_scope,
+            "worktree_path": worktree_path,
             "result": None,
         }
 
-    def _make_planner(self, spec: RoleSpec, file_scope: str = ""):
+    def _make_planner(self, spec: RoleSpec, file_scope: str = "", worktree_path: str = ""):
         if self._planner_factory is not None:
             return self._planner_factory(spec)
         base = self.react_planner
         auth = base.auth
-        # Per-worker hard isolation: a coder with an assigned file scope gets its
-        # own ActionAuthorizer whose write allow-list is that scope.  Empty scope
-        # (single coder / LLM fallback) keeps the shared base authorizer.
-        if file_scope and isinstance(auth, ActionAuthorizer):
+        suffix = spec.system_prompt_suffix
+        # s18 — when a worktree is provided, the worker's whole filesystem root
+        # is the isolated dir; the file scope is narrowed *inside* it.
+        if worktree_path:
+            scope_root = Path(worktree_path)
+            allowed = [str(scope_root / file_scope)] if file_scope else []
+            if isinstance(auth, ActionAuthorizer):
+                auth = ActionAuthorizer(
+                    workspace_root=str(scope_root),
+                    allowed_paths=allowed,
+                    confirmation_enabled=auth.confirmation_enabled,
+                    allow_external=auth.allow_external,
+                )
+            suffix = (
+                f"{spec.system_prompt_suffix}\n"
+                f"你的隔离工作目录（worktree）是：{worktree_path}。"
+                "请在该目录内读写文件，不要写到目录之外。"
+            )
+        # Per-worker hard isolation without a worktree: a coder with an assigned
+        # file scope gets its own ActionAuthorizer whose write allow-list is
+        # that scope.  Empty scope (single coder / LLM fallback) reuses base.
+        elif file_scope and isinstance(auth, ActionAuthorizer):
             auth = ActionAuthorizer(
                 workspace_root=auth.workspace_root,
                 allowed_paths=[file_scope],
@@ -283,7 +321,7 @@ class SwarmPlanner:
             )
         return ReActPlanner(
             role=spec.role,
-            system_prompt_suffix=spec.system_prompt_suffix,
+            system_prompt_suffix=suffix,
             max_iterations=base.max_iterations,
             thrashing_threshold=base.thrashing_threshold,
             max_thrashing_events=base.max_thrashing_events,
