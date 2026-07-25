@@ -88,6 +88,8 @@ from synapse.modules.planning.plan_execute import PlanExecutePlanner
 from synapse.modules.planning.hierarchical import HierarchicalPlanner
 from synapse.modules.planning.swarm import SwarmPlanner
 from synapse.modules.tools.background import get_default_manager
+from synapse.modules.tools.skill_tool import SkillTool
+from synapse.modules.skill import get_default_skill_loader
 
 # MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
@@ -622,6 +624,8 @@ class Synapse:
         """Return the full set of tools, including external ones when enabled."""
         # s13 — shared so ShellTool can start background tasks the planner tracks.
         bg_manager = get_default_manager()
+        # s07 — shared so prompt injection and the load_skill tool agree.
+        skill_loader = get_default_skill_loader()
         tools: list = [
             ReadTool(),
             WriteTool(),
@@ -630,6 +634,7 @@ class Synapse:
             GrepTool(),
             ShellTool(background_manager=bg_manager),
             GitTool(),
+            SkillTool(skill_loader),
         ]
 
         # Web search is always available (DuckDuckGo, no API key required).
@@ -700,6 +705,7 @@ def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
         confirm_callback=confirm_callback,
         total_timeout_seconds=cfg.total_timeout_seconds,
         background_manager=get_default_manager(),
+        skill_loader=get_default_skill_loader(),
     )
 
     if mode == PlanningMode.REACT:

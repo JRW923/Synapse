@@ -51,9 +51,9 @@ class ReActPlanner:
                  max_thrashing_events: int = 2,
                  max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
-                 verbose: bool = True,
-                 role: str = "", system_prompt_suffix: str = "",
-                 background_manager=None):
+        verbose: bool = True,
+        role: str = "", system_prompt_suffix: str = "",
+        background_manager=None, skill_loader=None):
         self.max_iterations = max_iterations
         self.thrashing_threshold = thrashing_threshold
         self.max_thrashing_events = max_thrashing_events
@@ -68,6 +68,8 @@ class ReActPlanner:
         self.system_prompt_suffix = system_prompt_suffix
         # s13 — shared with ShellTool so background tasks emit on the right bus.
         self.background_manager = background_manager
+        # s07 — inject matched skills into the system prompt when set.
+        self.skill_loader = skill_loader
 
     def _log(self, msg: str):
         """Print a progress message if verbose is enabled.
@@ -220,7 +222,7 @@ class ReActPlanner:
 
         # Build initial messages — reuse session history if available.
         # Repair incomplete tool chains first (critical for model switching).
-        system_prompt = self._build_system_prompt(context)
+        system_prompt = self._build_system_prompt(context, task)
         if session.messages:
             repaired = self._repair_session(session.messages)
             repaired.append(Message(role="user", content=task))
@@ -500,13 +502,13 @@ class ReActPlanner:
             metrics=metrics,
         )
 
-    def _build_system_prompt(self, context) -> str:
+    def _build_system_prompt(self, context, task: str = "") -> str:
         """Build system prompt from all context zones.
 
         Phase E: injects system → core → reference (overflow is not
         injected — it is reserved for low-priority blocks that the
         compactor processes). Each block is annotated with its source
-        so the LLM can gauge provenance.
+        so the LLM can gauge provenance. s07 appends matched skills.
         """
         blocks = []
 
@@ -519,6 +521,12 @@ class ReActPlanner:
             if self.system_prompt_suffix:
                 role_block += self.system_prompt_suffix + "\n"
             blocks.append(role_block.strip())
+
+        # s07 — auto-inject skills matched to this task.
+        if self.skill_loader is not None and task:
+            skill_block = self.skill_loader.render(task)
+            if skill_block:
+                blocks.append(skill_block)
 
         # Add tools usage instruction
         tools_instruction = (
