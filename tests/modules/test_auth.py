@@ -65,6 +65,15 @@ def test_dangerous_patterns_blocked():
         assert not decision.allowed, f"Should block: {cmd}"
 
 
+def test_dangerous_pattern_reason_names_pattern():
+    """L.5 — the denial reason names the matched dangerous pattern, not a generic message."""
+    auth = ActionAuthorizer(workspace_root="/project")
+    req = auth.create_request("shell", {"command": "rm -rf /"}, RiskLevel.EXECUTE, "s1")
+    decision = auth.authorize(req)
+    assert not decision.allowed
+    assert "rm -rf" in decision.reason
+
+
 def test_scoped_write_inside_scope_allowed():
     auth = ActionAuthorizer(workspace_root="/project", allowed_paths=["src/foo"])
     # A write within the allowed scope is permitted (subject to confirmation).

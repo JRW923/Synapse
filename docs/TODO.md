@@ -450,8 +450,13 @@ TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重
 - **难度**：低（接线为主）
 
 #### L.5 · 统一友好错误反馈
+- **状态**：✅ 已实现（2026-07-24）
 - **要点**：`run` 子命令加异常兜底（不再抛原始 traceback）；把 `SynapseError` 子类（`core/exceptions.py`）转成「原因 + 建议动作（查 API key / 网络 / 放宽 scope）」；授权拒绝 / 危险命令说清命中哪条 pattern。
 - **现状痛点**：`run` 子命令无异常兜底；REPL 仅打印 `类型: 消息`；授权/危险命令原因晦涩，异常层次未被转译为面向用户文案。
+- **实现**：
+  - `cli.py` 新增 `_friendly_error(exc)` + `_ERROR_GUIDE`：将 `SynapseError` 子类（ConfigError / ProviderError / ToolError / SandboxError / PlannerError）统一转成「原因：xxx\n建议：yyy」中文文案，非 Synapse 异常也只给消息不给 traceback。三个用户可见错误点（`run` 子命令、`chat` 子命令、REPL 主循环）全部改用该 helper。
+  - `auth.py`：`_is_dangerous` 改为返回命中的具体危险模式串（而非布尔）；拒绝原因升级为 `Command matches dangerous pattern: '<pattern>'`，说清命中哪条（L.5 的「授权拒绝 / 危险命令说清 pattern」）。
+  - 测试：`test_cli_run.py::test_friendly_error_maps_synapse_errors`（五类 + 普通异常均中文化、无 traceback 泄漏）；`test_auth.py::test_dangerous_pattern_reason_names_pattern`（拒绝原因含具体模式）。
 - **难度**：低
 
 ---

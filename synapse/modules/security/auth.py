@@ -116,8 +116,12 @@ class ActionAuthorizer:
         # --- EXECUTE ----------------------------------------------------------------
         if risk == RiskLevel.EXECUTE.value:
             command = request.tool_params.get("command", "")
-            if self._is_dangerous(command):
-                return AuthDecision(allowed=False, reason="Command matches dangerous pattern")
+            matched = self._is_dangerous(command)
+            if matched:
+                return AuthDecision(
+                    allowed=False,
+                    reason=f"Command matches dangerous pattern: '{matched}'",
+                )
             if not self._is_allowlisted(command):
                 return AuthDecision(
                     allowed=False,
@@ -184,11 +188,16 @@ class ActionAuthorizer:
                 return True
         return False
 
-    def _is_dangerous(self, command: str) -> bool:
+    def _is_dangerous(self, command: str) -> str | None:
+        """Return the first dangerous pattern matched by *command*, else None.
+
+        L.5 — naming the matched pattern (not just "dangerous") makes the
+        denial reason self-explanatory to both the agent and the user.
+        """
         for pattern in self.DANGEROUS_PATTERNS:
             if pattern in command:
-                return True
-        return False
+                return pattern
+        return None
 
     def _is_sensitive(self, path_str: str) -> bool:
         normalized = path_str.replace("\\", "/")

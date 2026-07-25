@@ -75,3 +75,26 @@ async def test_swarm_tracker_renders_lifecycle():
 
     tracker.unwire(bus)
     assert all(len(v) == 0 for v in bus._handlers.values())
+
+
+def test_friendly_error_maps_synapse_errors():
+    """L.5 — SynapseError subclasses render as 中文 原因+建议, no traceback."""
+    from synapse.adapters.cli import _friendly_error
+    from synapse.core.exceptions import (
+        ProviderError, ConfigError, ToolError, SandboxError, PlannerError,
+    )
+
+    for exc in (
+        ProviderError("401 auth"),
+        ConfigError("bad yaml"),
+        ToolError("boom"),
+        SandboxError("blocked"),
+        PlannerError("loop"),
+    ):
+        out = _friendly_error(exc)
+        assert "原因：" in out and "建议：" in out
+        assert "Traceback" not in out
+
+    # A plain (non-Synapse) error still hides the traceback and gives a hint.
+    assert "原因：" in _friendly_error(RuntimeError("kaboom"))
+    assert "建议：" in _friendly_error(RuntimeError("kaboom"))

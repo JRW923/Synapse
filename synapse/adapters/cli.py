@@ -93,6 +93,14 @@ from synapse.protocols.mcp import McpServerConfig
 from synapse.core.agent import Agent
 from synapse.core.session import Session
 from synapse.core.events import EventBus
+from synapse.core.exceptions import (
+    SynapseError,
+    ConfigError,
+    ProviderError,
+    ToolError,
+    SandboxError,
+    PlannerError,
+)
 
 
 
@@ -733,9 +741,9 @@ def main():
             return
         except Exception as exc:
             if use_rich:
-                console.print(f"[bold red]{type(exc).__name__}:[/bold red] {exc}")
+                console.print(f"[bold red]{_friendly_error(exc)}[/bold red]")
             else:
-                print(f"Error: {exc}")
+                print(_friendly_error(exc))
             return
 
         if use_rich:
@@ -849,9 +857,9 @@ def main():
                 except Exception as exc:
                     if use_rich:
                         status.stop()
-                        console.print(f"[bold red]Error:[/bold red] {exc}")
+                        console.print(f"[bold red]{_friendly_error(exc)}[/bold red]")
                     else:
-                        print(f"Error: {exc}")
+                        print(_friendly_error(exc))
                     continue
                 finally:
                     if use_rich:
@@ -1274,6 +1282,32 @@ def _show_score(console, synapse, use_rich: bool) -> None:
             print(f"  {dim}: {_fmt(score.get(dim) or {})}")
         if score.get("process_hint"):
             print(f"  hint: {score['process_hint']}")
+
+
+# L.5 — unified friendly error feedback: map SynapseError subclasses to a 中文
+# "原因 + 建议动作" string so the CLI never dumps a raw traceback at the user.
+_ERROR_GUIDE: dict[type[BaseException], tuple[str, str]] = {
+    ConfigError: ("配置无效，启动即失败", "检查配置文件与环境变量（API key / provider / workspace_root 等），修正后重试。"),
+    ProviderError: ("LLM 接口调用失败（限流 / 超时 / 鉴权）", "确认 API key 有效、网络通畅、账户未欠费或触发限流；稍后重试。"),
+    ToolError: ("工具执行失败", "查看工具返回详情，确认参数与运行环境是否正确。"),
+    SandboxError: ("操作被沙箱拦截", "目标路径或命令超出沙箱允许边界，请调整后再试。"),
+    PlannerError: ("规划器失败（迭代上限 / 子任务死锁）", "尝试简化任务、切换规划模式（/mode），或分段下达指令。"),
+}
+
+
+def _friendly_error(exc: BaseException) -> str:
+    """Translate an exception into a user-facing 中文 reason + suggested action.
+
+    ``SynapseError`` subclasses get a dedicated entry from ``_ERROR_GUIDE``;
+    everything else keeps a plain message (the traceback still stays hidden).
+    """
+    if isinstance(exc, SynapseError):
+        reason, action = _ERROR_GUIDE.get(
+            type(exc), ("Synapse 内部错误", "查看日志，必要时精简任务后重试。")
+        )
+        detail = f" — {exc}" if str(exc) else ""
+        return f"原因：{reason}{detail}\n建议：{action}"
+    return f"原因：{type(exc).__name__} — {exc}\n建议：若为偶发可重试；若持续，请检查输入或运行环境。"
 
 
 def _available_models(config):
@@ -1870,9 +1904,9 @@ async def _main_interface(config_path: str | None = None):
         except Exception as exc:
             if use_rich:
                 live.stop()
-                console.print(f"  [bold red]{type(exc).__name__}:[/bold red] {exc}")
+                console.print(f"  [bold red]{_friendly_error(exc)}[/bold red]")
             else:
-                print(f"Error: {exc}")
+                print(_friendly_error(exc))
             continue
         finally:
             if use_rich:
