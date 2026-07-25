@@ -30,6 +30,7 @@ class EventType(str, Enum):
     TASK_CLAIMED = "task_claimed"
     TASK_RELEASED = "task_released"
     BACKGROUND_RESULT = "background_result"
+    AGENT_MESSAGE = "agent_message"
 
 
 @dataclass(kw_only=True)
@@ -243,3 +244,16 @@ class BackgroundResult(BaseEvent):
     success: bool
     stdout: str = ""
     stderr: str = ""
+
+
+@dataclass(kw_only=True)
+class AgentMessage(BaseEvent):
+    """Explicit agent-to-agent message (s16 团队协同协议).
+
+    Workers communicate intent over the shared EventBus instead of implicit
+    shared state. ``recipient`` is empty for broadcast.
+    """
+    event_type: str = EventType.AGENT_MESSAGE
+    recipient: str = ""                # target agent_id; "" = broadcast
+    message: str = ""
+    kind: str = "notify"               # notify | request | response

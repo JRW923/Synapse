@@ -151,6 +151,12 @@ def test_http_server_run():
 
     # Build a mock Synapse
     mock_synapse = AsyncMock()
+    # L.4 — get_run_score 必须返回 dict（非协程），否则 RunResponse 校验失败。
+    from unittest.mock import MagicMock
+    mock_synapse.get_run_score = MagicMock(return_value={
+        "status": "success", "task": "hi", "safety": {}, "process": {},
+        "quality": {}, "efficiency": {}, "process_hint": None,
+    })
     mock_synapse.run.return_value = AgentResult(
         status=ResultStatus.SUCCESS,
         output="Hello, world!",
