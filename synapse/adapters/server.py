@@ -14,14 +14,17 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from synapse.adapters.library import Synapse
+from synapse.core.events import EventBus
 from synapse.core.session import Session
 from synapse.protocols.planner import AgentResult, ExecutionMetrics
 from synapse.eval.experiments import Experiment, ExperimentResult
@@ -176,6 +179,81 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
                 thrashing_events=result.metrics.thrashing_events,
             ),
         )
+
+    # ---- POST /run/stream (SSE) -----------------------------------------
+    # L.1: expose the same streamed progress the CLI REPL shows, over HTTP, so
+    # non-interactive / integrated callers are no longer a black box.
+
+    _STREAM_EVENTS = (
+        "agent_progress",
+        "llm_token",
+        "tool_call_started",
+        "tool_call_completed",
+    )
+
+    @app.post("/run/stream")
+    async def run_task_stream(req: RunRequest):
+        session = Session()
+        event_bus = synapse._container.resolve(EventBus)
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _on_event(event):
+            # Minimal, transport-agnostic view of the event for the stream.
+            fields = ("event_type", "phase", "message", "text", "tool_name",
+                      "success", "duration_ms", "agent_id", "role")
+            data = {k: getattr(event, k, None) for k in fields}
+            data = {k: v for k, v in data.items() if v is not None}
+            await queue.put({"type": "event", "event": data})
+
+        subscribed = []
+        if event_bus is not None:
+            for et in _STREAM_EVENTS:
+                event_bus.subscribe(et, _on_event)
+                subscribed.append(et)
+
+        async def _run():
+            try:
+                res = await synapse.run(req.task, session=session)
+                sessions[session.id] = session
+                await queue.put({"type": "done", "result": {
+                    "status": res.status.value,
+                    "output": res.output,
+                    "session_id": session.id,
+                    "artifacts": [
+                        {"path": a.path, "content": a.content, "action": a.action}
+                        for a in res.artifacts
+                    ],
+                    "metrics": {
+                        "tokens_input": res.metrics.tokens_input,
+                        "tokens_output": res.metrics.tokens_output,
+                        "tool_call_count": res.metrics.tool_call_count,
+                        "tool_success_count": res.metrics.tool_success_count,
+                        "duration_ms": res.metrics.duration_ms,
+                        "thrashing_events": res.metrics.thrashing_events,
+                    },
+                }})
+            except Exception as exc:
+                await queue.put({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
+            finally:
+                for et in subscribed:
+                    try:
+                        event_bus.unsubscribe(et, _on_event)
+                    except Exception:
+                        pass
+
+        async def _event_stream():
+            run_task = asyncio.create_task(_run())
+            while True:
+                item = await queue.get()
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                if item["type"] in ("done", "error"):
+                    break
+            try:
+                await run_task
+            except Exception:
+                pass
+
+        return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
     # ---- GET /sessions/{session_id} --------------------------------------
 

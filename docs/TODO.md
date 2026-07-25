@@ -407,4 +407,39 @@ TODO F 落地了确定性的种子库（~19 案例）+ 脚本化 `AttackLLM` 重
 
 ---
 
+### L · 使用体验（UX）优化
+
+**状态**：进行中（2026-07-24 起，逐子项实现）
+
+项目有 CLI / HTTP server / 库 API 三种用法，但可观测性严重不均：REPL 主界面（流式 + Rich live 面板）较完善，而 `run` 子命令、server、`get_run_score()`（TODO K）与 Swarm 并行过程对用户几乎不可见。以下 5 个子项均复用现有基建（REPL 的 `_LiveDisplay`、EventBus 事件、`get_run_score`/`get_citation_report`），属"接线"而非新建。
+
+#### L.1 · `run` 子命令 / server 补齐流式与进度
+**状态**：✅ 已实现（2026-07-24）
+- **要点**：把 REPL 已成熟的 `_LiveDisplay` 事件订阅面板复用到 `run` 子命令；server 的 `POST /run` 增加 SSE 流式。
+- **现状痛点**：`cli.py:503` 打印 `Working...` 后阻塞、无异常兜底（抛原始 traceback）；`server.py:154` 阻塞返回最终 JSON，过程全黑盒。
+- **实现**：抽出复用型异步 helper `_run_task_streamed()`（`cli.py`），`run` 子命令改用 Rich live 面板订阅 `agent_progress/llm_token/tool_call_started/tool_call_completed`，带友好异常兜底（不抛原始 traceback）；server 新增 `POST /run/stream` SSE 端点，推送过程事件 + `done/error` 终态。测试 `tests/adapters/test_cli_run.py`（2 项）+ `tests/adapters/test_server.py::test_run_task_stream`（1 项）。REPL 主界面未改动（已流式，避免回归）。
+- **难度**：中（CLI 复用面板较易；server SSE 需加流式响应）
+
+#### L.2 · Swarm 过程可视化
+- **要点**：CLI 订阅 `WorkerSpawned/ReviewSubmitted/VoteCast/SwarmVerified` 等事件，在 live panel 展示"几个 worker、谁被 reject、重试几次、是否 verified"；server 用 SSE 推送。
+- **现状痛点**：`events.py:162-206` 已 emit 这些事件，但 CLI 只订阅 4 类基础事件，Swarm 并行/review/验证循环对用户全黑盒。
+- **难度**：中
+
+#### L.3 · 确认提示补风险 + 修复非交互语义
+- **要点**：确认回调给出将要写入的文件路径 / 执行的命令 / risk 等级；修复 `react.py:389` 与 `auth.py` docstring「非交互=auto-denied」声明不符（实际是无 callback 时静默放行）；修 swarm 并发确认抢 stdin、`y` 跨 worker 泄漏。
+- **现状痛点**：`cli.py:209` 确认提示仅显示工具名；非交互/server 模式下写/执行工具被静默放行（安全+UX 双坑）。
+- **难度**：中（含语义对齐，需先定「无 callback 时硬拒还是硬放」）
+
+#### L.4 · 暴露运行时评分与过程质量 hint
+- **要点**：加 `/score` 斜杠命令（CLI）与 server `/run` 响应字段，展示 TODO K 的 `RunScore`（safety/process/quality/efficiency）；把 `ProcessQualityScored.hint` 也展示给用户。
+- **现状痛点**：`library.get_run_score()` 每 run 计算并落 ProjectMemory，但 CLI 无命令、server 无字段，完全不可见。
+- **难度**：低（接线为主）
+
+#### L.5 · 统一友好错误反馈
+- **要点**：`run` 子命令加异常兜底（不再抛原始 traceback）；把 `SynapseError` 子类（`core/exceptions.py`）转成「原因 + 建议动作（查 API key / 网络 / 放宽 scope）」；授权拒绝 / 危险命令说清命中哪条 pattern。
+- **现状痛点**：`run` 子命令无异常兜底；REPL 仅打印 `类型: 消息`；授权/危险命令原因晦涩，异常层次未被转译为面向用户文案。
+- **难度**：低
+
+---
+
 *最后更新：2026-07-24*

@@ -300,6 +300,106 @@ class _LiveDisplay:
         return Panel(text, title=header, border_style=_BORDER, expand=True)
 
 
+async def _run_task_streamed(synapse, task, session, console, use_rich, status_holder=None):
+    """Run *task* with a Rich live panel (REPL-style streaming).
+
+    Shared by the REPL and the ``run`` subcommand so a one-shot task shows the
+    same streamed LLM text + tool activity as an interactive session.  Without
+    rich (or ``console is None``) it falls back to a plain run and lets the
+    caller print the result.
+
+    Exceptions are NOT swallowed here — the caller decides how to surface them
+    (so the REPL keeps its Ctrl+C / error semantics, and ``run`` can print a
+    friendly message instead of a raw traceback).
+    """
+    if not use_rich or console is None:
+        return await synapse.run(task, session=session)
+
+    tokens = {"input": 0, "output": 0}
+    elapsed = {"start": _time.monotonic()}
+
+    def _fmt_tokens() -> str:
+        t = tokens["input"] + tokens["output"]
+        return f"{t / 1000:.1f}k" if t >= 1000 else str(t)
+
+    def _fmt_elapsed() -> str:
+        s = _time.monotonic() - elapsed["start"]
+        return f"{s:.0f}s" if s < 60 else f"{int(s // 60)}m{int(s % 60):02d}s"
+
+    live = _LiveDisplay(console, _fmt_tokens, _fmt_elapsed)
+    live.start()
+    if status_holder is not None:
+        status_holder[:] = [live.live]
+
+    async def _tick():
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                live._refresh()
+        except asyncio.CancelledError:
+            return
+
+    tick_task = asyncio.create_task(_tick())
+
+    event_bus = synapse._container.resolve(EventBus)
+
+    async def _on_progress(event):
+        msg = event.message
+        if event.phase == "calling_llm":
+            live.reset_text()
+            live.set_label("Working...")
+            return
+        if msg.startswith("tokens="):
+            try:
+                a, b = msg[7:].split("+", 1)
+                tokens["input"] = int(a)
+                tokens["output"] = int(b)
+                live.set_label("Working...")
+                return
+            except (ValueError, IndexError):
+                pass
+        live.set_label(msg)
+
+    async def _on_token(event):
+        live.add_text(event.text)
+
+    async def _on_tool_started(event):
+        live.set_label(f"{event.tool_name} ...")
+
+    async def _on_tool_completed(event):
+        icon = "ok" if event.success else "FAIL"
+        live.set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
+
+    if event_bus is not None:
+        event_bus.subscribe("agent_progress", _on_progress)
+        event_bus.subscribe("llm_token", _on_token)
+        event_bus.subscribe("tool_call_started", _on_tool_started)
+        event_bus.subscribe("tool_call_completed", _on_tool_completed)
+
+    try:
+        return await synapse.run(task, session=session)
+    finally:
+        tick_task.cancel()
+        try:
+            await tick_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        live.stop()
+        if status_holder is not None:
+            status_holder[:] = []
+        if event_bus is not None:
+            for et, h in (
+                ("agent_progress", _on_progress),
+                ("llm_token", _on_token),
+                ("tool_call_started", _on_tool_started),
+                ("tool_call_completed", _on_tool_completed),
+            ):
+                try:
+                    event_bus.unsubscribe(et, h)
+                except Exception:
+                    pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="synapse",
@@ -500,17 +600,33 @@ def main():
 
         synapse = Synapse(**kwargs)  # type: ignore[arg-type]
 
-        async def _exec():
-            print("Working...", flush=True)
-            result = await synapse.run(task)
-            return result
+        # Stream the run with a Rich live panel when available, so a one-shot
+        # task shows the same progress as the REPL; fall back to plain output.
+        try:
+            from rich.console import Console
+            console = Console()
+            use_rich = True
+        except ImportError:
+            console = None
+            use_rich = False
 
         try:
-            result = asyncio.run(_exec())
+            result = asyncio.run(_run_task_streamed(synapse, task, None, console, use_rich))
         except KeyboardInterrupt:
             return
-        print(f"\n[Status: {result.status.value}]")
-        print(result.output)
+        except Exception as exc:
+            if use_rich:
+                console.print(f"[bold red]{type(exc).__name__}:[/bold red] {exc}")
+            else:
+                print(f"Error: {exc}")
+            return
+
+        if use_rich:
+            from rich.markdown import Markdown
+            console.print(Markdown(result.output))
+        else:
+            print(f"\n[Status: {result.status.value}]")
+            print(result.output)
         return
 
     if args.command == "chat":

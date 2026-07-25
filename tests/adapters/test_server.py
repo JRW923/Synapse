@@ -1,10 +1,13 @@
 """Tests for the FastAPI HTTP server adapter."""
 
+import json
+
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from synapse.protocols.llm import LLMResponse, Message
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
+from synapse.core.events import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +79,35 @@ async def test_run_task(client, mock_synapse):
     mock_synapse.run.assert_called_once()
     call_args = mock_synapse.run.call_args
     assert call_args[0][0] == "Say hello"
+
+
+# ---------------------------------------------------------------------------
+# Test 2b: SSE streaming run (L.1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_task_stream(client, mock_synapse):
+    """POST /run/stream yields SSE events and a final 'done' with the result."""
+    # The mock Synapse's _container is an AsyncMock, whose resolve() returns a
+    # coroutine when called synchronously. The real Container.resolve is sync,
+    # so substitute a sync MagicMock returning a real EventBus.
+    mock_synapse._container.resolve = MagicMock(return_value=EventBus())
+    response = client.post("/run/stream", json={"task": "Say hello"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    events = []
+    for line in response.text.splitlines():
+        if line.startswith("data: "):
+            events.append(json.loads(line[len("data: "):]))
+
+    dones = [e for e in events if e["type"] == "done"]
+    assert dones, "expected a 'done' event"
+    assert dones[0]["result"]["status"] == "success"
+    assert "Task completed" in dones[0]["result"]["output"]
+    assert dones[0]["result"]["metrics"]["tokens_input"] == 10
+    mock_synapse.run.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
