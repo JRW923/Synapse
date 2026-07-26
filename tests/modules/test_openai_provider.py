@@ -97,10 +97,10 @@ async def test_chat_with_tools():
     assert result.tool_calls[0]["input"] == {"path": "/test.txt"}
 
 
-def _make_chunk(content=None, tool_calls=None):
+def _make_chunk(content=None, tool_calls=None, usage=None):
     delta = type("Delta", (), {"content": content, "tool_calls": tool_calls})()
     choice = type("Choice", (), {"delta": delta})()
-    return type("Chunk", (), {"choices": [choice]})()
+    return type("Chunk", (), {"choices": [choice], "usage": usage})()
 
 
 def _make_tool_call(index=0, id="call_1", name="read", arguments='{"path": "/x"}'):
@@ -130,3 +130,37 @@ async def test_stream_yields_text_and_tool_chunks():
     assert [c.content for c in out] == ["Hello", " world", ""]
     assert out[2].tool_call_delta is not None
     assert out[2].tool_call_delta["name"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_usage_per_chunk():
+    """Usage must be emitted on every chunk that carries it (not buffered to
+    the end). Standard OpenAI only puts usage on the final chunk, but servers
+    that stream cumulative usage per chunk (vLLM, llama.cpp, Ollama native, …)
+    then drive a smooth CLI token counter. DeepSeek/Ollama inherit this method.
+    """
+    provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
+
+    def _usage(inp, out):
+        return type("U", (), {"prompt_tokens": inp, "completion_tokens": out})()
+
+    chunks = [
+        _make_chunk(content="Hello"),
+        _make_chunk(content=" world", usage=_usage(10, 1)),
+        _make_chunk(content="!", usage=_usage(10, 2)),
+        _make_chunk(usage=_usage(10, 3)),  # final, usage-only chunk
+    ]
+    with patch.object(
+        provider._client.chat.completions, "create",
+        new=MagicMock(return_value=_chunk_stream(chunks)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    usage_chunks = [c for c in out if c.usage]
+    assert [c.usage for c in usage_chunks] == [
+        {"input": 10, "output": 1},
+        {"input": 10, "output": 2},
+        {"input": 10, "output": 3},
+    ]
+    # Text must still stream alongside usage.
+    assert "".join(c.content or "" for c in out) == "Hello world!"

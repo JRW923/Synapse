@@ -87,14 +87,20 @@ class OpenAICompatibleProvider:
         if openai_tools:
             kwargs["tools"] = openai_tools
 
-        usage: dict[str, int] = {}
         try:
             async for chunk in self._client.chat.completions.create(**kwargs):
+                # Emit usage as soon as a chunk carries it. Standard OpenAI only
+                # puts usage on the final chunk (stream_options.include_usage),
+                # so this still fires once at the end there — but OpenAI-compatible
+                # servers (vLLM, llama.cpp, Ollama's native stream, …) often emit
+                # cumulative usage per chunk, which makes the CLI token counter
+                # tick up smoothly instead of jumping once. The CLI reconciles
+                # with the authoritative total afterwards.
                 if getattr(chunk, "usage", None):
-                    usage = {
+                    yield LLMChunk(usage={
                         "input": chunk.usage.prompt_tokens or 0,
                         "output": chunk.usage.completion_tokens or 0,
-                    }
+                    })
                 if not chunk.choices:
                     continue
                 delta = chunk.choices[0].delta
@@ -110,8 +116,6 @@ class OpenAICompatibleProvider:
                     }
                 if content or tool_delta:
                     yield LLMChunk(content=content, tool_call_delta=tool_delta)
-            if usage:
-                yield LLMChunk(usage=usage)
         except Exception as e:
             raise ProviderError(f"{self._error_prefix} streaming error: {e}") from e
 
