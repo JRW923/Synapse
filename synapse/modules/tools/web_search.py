@@ -86,7 +86,13 @@ class WebSearchTool:
         },
     )
     requires_sandbox = False
-    risk_level = RiskLevel.EXTERNAL
+    # web_search is a read-only query to a search engine (no local side effects,
+    # no API key, no data exfiltration beyond the query string). Classifying it
+    # READ_ONLY lets it run by default; EXTERNAL would hard-deny it unless
+    # allow_external is set, which made the LLM fall back to writing Python
+    # scripts to search — burning tokens. The heavier external tools (web,
+    # browser, db) stay EXTERNAL and keep their allow_external gate.
+    risk_level = RiskLevel.READ_ONLY
     category = ToolCategory.INTEGRATION
 
     async def execute(self, params: dict, sandbox=None) -> ToolResult:

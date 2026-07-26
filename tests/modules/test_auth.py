@@ -16,6 +16,20 @@ def test_read_only_auto_allow(auth):
     assert not decision.requires_confirmation
 
 
+def test_web_search_allowed_by_default(auth):
+    """web_search must run under the default authorizer. When it was
+    RiskLevel.EXTERNAL the default allow_external=False hard-denied it
+    ('External tools are disabled'), so the LLM fell back to writing Python
+    scripts to search — burning tokens. Demoted to READ_ONLY it runs by
+    default. This test fails if web_search is reverted to EXTERNAL."""
+    from synapse.modules.tools.web_search import WebSearchTool
+    req = auth.create_request(
+        "web_search", {"query": "南京下周天气"}, WebSearchTool.risk_level, "s1",
+    )
+    decision = auth.authorize(req)
+    assert decision.allowed, f"web_search denied: {decision.reason}"
+
+
 def test_write_in_workspace_requires_confirmation(auth):
     req = auth.create_request("write", {"path": "/project/new.py"}, RiskLevel.WRITE_LOCAL, "s1")
     decision = auth.authorize(req)
