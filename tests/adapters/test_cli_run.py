@@ -1,10 +1,13 @@
 """Tests for the CLI streaming helper (TODO L.1)."""
 
+import io
+
 import pytest
 from unittest.mock import AsyncMock
 
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
 from synapse.core.events import EventBus
+from synapse.protocols.events import AgentProgress, LLMToken
 
 
 @pytest.mark.asyncio
@@ -45,6 +48,72 @@ async def test_run_task_streamed_rich_streams_and_cleans_up():
     # _handlers is a defaultdict, so assert every bucket is empty rather than
     # comparing to {} (empty keys persist).
     assert all(len(v) == 0 for v in bus._handlers.values())
+
+
+@pytest.mark.asyncio
+async def test_run_task_streamed_increments_tokens_from_stream():
+    """End-to-end: streamed per-chunk usage must tick the token counter up
+    (12 = 10 in + 2 out) instead of staying at 0 until the final 'tokens='."""
+    from synapse.adapters.cli import _run_task_streamed
+    from rich.console import Console
+
+    bus = EventBus()
+
+    class _Container:
+        def resolve(self, _t):
+            return bus
+
+    async def _run(task, session=None):
+        await bus.emit(AgentProgress(session_id="s", phase="calling_llm", message="calling"))
+        await bus.emit(LLMToken(session_id="s", text="Hi", usage={"input": 10, "output": 1}))
+        await bus.emit(LLMToken(session_id="s", text=" there", usage={"input": 10, "output": 2}))
+        # Authoritative reconciliation at end of request.
+        await bus.emit(AgentProgress(session_id="s", phase="token_update", message="tokens=10+2"))
+        return AgentResult(status=ResultStatus.SUCCESS, output="done", metrics=ExecutionMetrics())
+
+    class _Syn:
+        _container = _Container()
+        run = staticmethod(_run)
+
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    result = await _run_task_streamed(_Syn(), "t", None, console, True)
+    assert result.status.value == "success"
+    assert "12 tok" in console.file.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_run_task_streamed_resets_baseline_per_request():
+    """A second request must increment from the first request's total (no
+    double-count, no reset to zero)."""
+    from synapse.adapters.cli import _run_task_streamed
+    from rich.console import Console
+
+    bus = EventBus()
+
+    class _Container:
+        def resolve(self, _t):
+            return bus
+
+    async def _run(task, session=None):
+        # request 1: 10 in + 2 out -> 12
+        await bus.emit(AgentProgress(session_id="s", phase="calling_llm", message="c1"))
+        await bus.emit(LLMToken(session_id="s", text="a", usage={"input": 10, "output": 2}))
+        await bus.emit(AgentProgress(session_id="s", phase="token_update", message="tokens=10+2"))
+        # request 2: 5 in + 3 out -> baseline(12) + 8 = 20
+        await bus.emit(AgentProgress(session_id="s", phase="calling_llm", message="c2"))
+        await bus.emit(LLMToken(session_id="s", text="b", usage={"input": 5, "output": 3}))
+        await bus.emit(AgentProgress(session_id="s", phase="token_update", message="tokens=15+5"))
+        return AgentResult(status=ResultStatus.SUCCESS, output="done", metrics=ExecutionMetrics())
+
+    class _Syn:
+        _container = _Container()
+        run = staticmethod(_run)
+
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    await _run_task_streamed(_Syn(), "t", None, console, True)
+    # Final authoritative total is 15 in + 5 out = 20; counter must reach it
+    # via baseline + streamed usage, not reset per request.
+    assert "20 tok" in console.file.getvalue()
 
 
 @pytest.mark.asyncio

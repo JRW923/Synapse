@@ -469,6 +469,12 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
         return await synapse.run(task, session=session)
 
     tokens = {"input": 0, "output": 0}
+    # Session total before the current LLM request. Captured at the start of
+    # each request so streamed per-chunk usage (which is cumulative for that
+    # request) can be shown as baseline + request_usage, ticking up smoothly
+    # instead of jumping once at the end. The authoritative "tokens=" message
+    # still overwrites with the real cumulative total as a safety net.
+    baseline = {"in": 0, "out": 0}
     elapsed = {"start": _time.monotonic()}
 
     def _fmt_tokens() -> str:
@@ -489,6 +495,11 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     async def _on_progress(event):
         msg = event.message
         if event.phase == "calling_llm":
+            # Snapshot the session total before this request so streamed usage
+            # increments from this baseline. The preceding request's "tokens="
+            # message already set the authoritative cumulative here.
+            baseline["in"] = tokens["input"]
+            baseline["out"] = tokens["output"]
             live.reset_text()
             live.set_label("Working...")
             return
@@ -505,6 +516,11 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
 
     async def _on_token(event):
         live.add_text(event.text)
+        if event.usage:
+            u_in = event.usage.get("input", 0) or 0
+            u_out = event.usage.get("output", 0) or 0
+            tokens["input"] = baseline["in"] + u_in
+            tokens["output"] = baseline["out"] + u_out
 
     async def _on_tool_started(event):
         live.set_label(f"{event.tool_name} ...")
@@ -1882,6 +1898,7 @@ async def _main_interface(config_path: str | None = None):
         if use_rich:
             from rich.status import Status
             tokens = {"input": 0, "output": 0}
+            baseline = {"in": 0, "out": 0}
             elapsed = {"start": _time.monotonic(), "label": "Thinking..."}
 
             def _fmt_tokens() -> str:
@@ -1910,6 +1927,10 @@ async def _main_interface(config_path: str | None = None):
                     # Reset streamed text at the start of each LLM call so the
                     # panel always shows the current turn.
                     if event.phase == "calling_llm":
+                        # Snapshot session total before this request so streamed
+                        # usage increments from this baseline (smooth counter).
+                        baseline["in"] = tokens["input"]
+                        baseline["out"] = tokens["output"]
                         live.reset_text()
                         live.set_label("Working...")
                         return
@@ -1926,6 +1947,11 @@ async def _main_interface(config_path: str | None = None):
                     live.set_label(msg)
                 async def _on_token(event):
                     live.add_text(event.text)
+                    if event.usage:
+                        u_in = event.usage.get("input", 0) or 0
+                        u_out = event.usage.get("output", 0) or 0
+                        tokens["input"] = baseline["in"] + u_in
+                        tokens["output"] = baseline["out"] + u_out
                 async def _on_tool_started(event):
                     live.set_label(f"{event.tool_name} ...")
                 async def _on_tool_completed(event):

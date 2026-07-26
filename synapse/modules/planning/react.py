@@ -119,8 +119,15 @@ class ReActPlanner:
                 usage = chunk.usage
             if chunk.content:
                 content_parts.append(chunk.content)
-                if event_bus is not None:
-                    await event_bus.emit(LLMToken(session_id=session_id, text=chunk.content))
+            # Emit one token event per chunk (text and/or usage). Usage-only
+            # chunks carry the running token total so the CLI counter can tick
+            # up smoothly during generation.
+            if event_bus is not None:
+                await event_bus.emit(LLMToken(
+                    session_id=session_id,
+                    text=chunk.content or "",
+                    usage=chunk.usage or None,
+                ))
             if chunk.tool_call_delta:
                 d = chunk.tool_call_delta
                 idx = d.get("index", 0)

@@ -141,6 +141,11 @@ class LLMToken(BaseEvent):
     """Streaming LLM text chunk — emitted per token for live CLI display."""
     event_type: str = EventType.LLM_TOKEN
     text: str
+    # When the provider streams usage, this carries the cumulative
+    # {"input": N, "output": M} for the current request so the CLI can tick
+    # the token counter up smoothly instead of jumping once per response.
+    # None when the provider does not expose per-chunk usage.
+    usage: dict | None = None
 
 
 @dataclass(kw_only=True)

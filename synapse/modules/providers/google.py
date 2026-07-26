@@ -87,16 +87,22 @@ if _GOOGLE_AVAILABLE:
             config = self._build_config(system_instruction, tools)
 
             try:
-                usage: dict[str, int] = {}
                 async for chunk in await self._client.aio.models.generate_content_stream(
                     model=self._model,
                     contents=contents,
                     config=config,
                 ):
+                    # Gemini exposes running token totals on each chunk's
+                    # usage_metadata; emit them as they arrive so the CLI token
+                    # counter ticks up during generation instead of jumping at
+                    # the end. The planning loop still reconciles with the
+                    # authoritative cumulative total afterwards.
                     um = getattr(chunk, "usage_metadata", None)
-                    if um:
-                        usage["input"] = usage.get("input", 0) + (um.prompt_token_count or 0)
-                        usage["output"] = usage.get("output", 0) + (um.candidates_token_count or 0)
+                    if um and (um.prompt_token_count or um.candidates_token_count):
+                        yield LLMChunk(usage={
+                            "input": um.prompt_token_count or 0,
+                            "output": um.candidates_token_count or 0,
+                        })
                     if not chunk.candidates:
                         continue
                     candidate = chunk.candidates[0]
@@ -111,8 +117,6 @@ if _GOOGLE_AVAILABLE:
                                 "name": fc.name,
                                 "input": fc.args,
                             })
-                if usage:
-                    yield LLMChunk(usage=usage)
             except Exception as e:
                 raise ProviderError(f"Gemini streaming error: {e}") from e
 

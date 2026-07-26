@@ -54,6 +54,33 @@ async def test_call_llm_stream_reconstructs_tool_calls_and_emits_tokens():
 
     token_events = [e for e in bus.events if e.event_type == "llm_token"]
     assert "".join(e.text for e in token_events) == "Let me search."
+    # The usage-only chunk must surface as a token event carrying usage, so the
+    # CLI can tick the counter up smoothly (incremental display).
+    assert any(e.usage == {"input": 10, "output": 5} for e in token_events)
+    # Events without usage must leave usage as None (backward compatible).
+    assert all(e.usage is None for e in token_events if e.text == "Let me ")
+    assert all(e.usage is None for e in token_events if e.text == "search.")
+
+
+@pytest.mark.asyncio
+async def test_call_llm_stream_emits_incremental_usage_events():
+    """A provider that streams usage per chunk (e.g. Gemini) must produce one
+    usage-carrying token event per usage chunk, in order, so the CLI counter
+    increments smoothly rather than jumping once at the end."""
+    chunks = [
+        LLMChunk(content="Hi"),
+        LLMChunk(usage={"input": 10, "output": 1}),
+        LLMChunk(content=" there"),
+        LLMChunk(usage={"input": 10, "output": 2}),
+        LLMChunk(usage={"input": 10, "output": 3}),
+    ]
+    llm = _FakeLLM(chunks)
+    bus = _FakeEventBus()
+    await ReActPlanner()._call_llm_stream(
+        llm, [Message(role="user", content="x")], None, bus, "sess5")
+
+    usage_events = [e for e in bus.events if e.event_type == "llm_token" and e.usage]
+    assert [e.usage["output"] for e in usage_events] == [1, 2, 3]
 
 
 @pytest.mark.asyncio

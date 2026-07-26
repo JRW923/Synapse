@@ -76,6 +76,40 @@ async def _gchunk_stream(chunks):
         yield c
 
 
+def _make_gchunk_with_usage(text, prompt_tokens, candidates_tokens):
+    """A Gemini stream chunk whose usage_metadata carries running totals."""
+    part = type("Part", (), {"text": text, "function_call": None})()
+    content = type("Content", (), {"parts": [part]})()
+    candidate = type("Candidate", (), {"content": content})()
+    usage = type(
+        "UM", (),
+        {"prompt_token_count": prompt_tokens, "candidates_token_count": candidates_tokens},
+    )()
+    return type("Chunk", (), {"candidates": [candidate], "usage_metadata": usage})()
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_incremental_usage():
+    """Regression: Gemini exposes running token totals on each chunk's
+    usage_metadata; the provider must emit them as they arrive so the CLI
+    counter ticks up during generation (not only at the end)."""
+    provider = GoogleProvider(model="gemini-pro", api_key="test-key")
+    chunks = [
+        _make_gchunk_with_usage("Hello", 10, 1),
+        _make_gchunk_with_usage(" world", 10, 2),
+        _make_gchunk_with_usage("!", 10, 3),
+    ]
+    with patch.object(
+        provider._client.aio.models, "generate_content_stream",
+        new=AsyncMock(return_value=_gchunk_stream(chunks)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    usage_chunks = [c for c in out if c.usage]
+    assert [c.usage["output"] for c in usage_chunks] == [1, 2, 3]
+    assert all(c.usage["input"] == 10 for c in usage_chunks)
+
+
 @pytest.mark.asyncio
 async def test_stream_yields_text_and_tool_chunks():
     provider = GoogleProvider(model="gemini-pro", api_key="test-key")
