@@ -33,9 +33,7 @@ class BasicContextRetriever:
         ctx.reference = await self._build_reference(task, memory)
 
         # 4. OVERFLOW: route reference results that exceed the reference budget
-        #    into the overflow zone so the ContextCompactor can summarize them
-        #    (TODO E Phase 0/1).  Without this the overflow zone is never
-        #    populated and the compactor never runs.
+        #    into the overflow zone so the ContextCompactor can summarize them.
         #    ponytail: overflow is populated here, but react.py does NOT inject
         #    it directly — agent._build_context folds the *compacted* overflow
         #    back into `reference` so the LLM actually consumes the summary.
