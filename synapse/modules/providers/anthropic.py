@@ -84,8 +84,16 @@ class AnthropicProvider:
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
+                input_tokens = 0
                 async for event in stream:
-                    if event.type == "content_block_start":
+                    if event.type == "message_start":
+                        # Input token count is known up front; surface it so the
+                        # CLI counter shows input immediately, before any output.
+                        msg_usage = getattr(getattr(event, "message", None), "usage", None)
+                        if msg_usage is not None:
+                            input_tokens = getattr(msg_usage, "input_tokens", 0) or 0
+                        yield LLMChunk(usage={"input": input_tokens, "output": 0})
+                    elif event.type == "content_block_start":
                         block = event.content_block
                         if getattr(block, "type", None) == "tool_use":
                             yield LLMChunk(tool_call_delta={
@@ -108,6 +116,14 @@ class AnthropicProvider:
                                 "index": event.index,
                                 "input": delta.partial_json,
                             })
+                    elif event.type == "message_delta":
+                        # Incremental usage: output_tokens is cumulative for the
+                        # message so far, so emitting it per delta ticks the CLI
+                        # token counter up smoothly instead of jumping at the end.
+                        delta_usage = getattr(event, "usage", None)
+                        if delta_usage is not None:
+                            out_tokens = getattr(delta_usage, "output_tokens", 0) or 0
+                            yield LLMChunk(usage={"input": input_tokens, "output": out_tokens})
                 try:
                     final = await stream.get_final_message()
                     if getattr(final, "usage", None):

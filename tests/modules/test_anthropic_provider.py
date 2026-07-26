@@ -95,23 +95,41 @@ async def test_chat_converts_tool_results():
 
 
 class _StreamCM:
-    def __init__(self, events):
+    def __init__(self, events, final=None):
         self._events = events
+        self._final = final
 
     async def __aenter__(self):
-        return self._event_stream()
+        return self
 
     async def __aexit__(self, *args):
         return False
+
+    def __aiter__(self):
+        return self._event_stream()
 
     async def _event_stream(self):
         for e in self._events:
             yield e
 
+    async def get_final_message(self):
+        return self._final
+
 
 def _make_event(delta_type, text=None, partial_json=None, index=0):
     delta = type("Delta", (), {"type": delta_type, "text": text, "partial_json": partial_json})()
     return type("Event", (), {"type": "content_block_delta", "delta": delta, "index": index})()
+
+
+def _make_message_start(input_tokens):
+    usage = type("Usage", (), {"input_tokens": input_tokens, "output_tokens": 0})()
+    msg = type("Message", (), {"usage": usage})()
+    return type("Event", (), {"type": "message_start", "message": msg})()
+
+
+def _make_message_delta(output_tokens):
+    usage = type("DeltaUsage", (), {"input_tokens": 0, "output_tokens": output_tokens})()
+    return type("Event", (), {"type": "message_delta", "usage": usage})()
 
 
 @pytest.mark.asyncio
@@ -132,6 +150,40 @@ async def test_stream_yields_text_and_tool_chunks():
     # input_json_delta must carry the content-block index so parallel tool_use
     # inputs route to the correct accumulator slot (regression for crossed calls).
     assert out[2].tool_call_delta == {"index": 0, "input": '{"path": "/x"}'}
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_incremental_usage():
+    """Regression: Anthropic exposes running usage via message_start (input
+    tokens) and message_delta (cumulative output tokens). The provider must
+    emit them as they arrive so the CLI token counter ticks up during
+    generation instead of jumping once at the end."""
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="test-key")
+    final = type("Msg", (), {"usage": type("U", (), {"input_tokens": 10, "output_tokens": 3})()})()
+    events = [
+        _make_message_start(10),
+        _make_event("text_delta", text="Hello"),
+        _make_message_delta(1),
+        _make_event("text_delta", text=" world"),
+        _make_message_delta(2),
+        _make_message_delta(3),
+    ]
+    with patch.object(
+        provider._client.messages, "stream",
+        new=MagicMock(return_value=_StreamCM(events, final=final)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    usage_chunks = [c for c in out if c.usage]
+    assert [c.usage for c in usage_chunks] == [
+        {"input": 10, "output": 0},   # message_start
+        {"input": 10, "output": 1},   # message_delta #1
+        {"input": 10, "output": 2},   # message_delta #2
+        {"input": 10, "output": 3},   # message_delta #3
+        {"input": 10, "output": 3},   # final reconciliation
+    ]
+    # Text must still stream alongside usage.
+    assert "".join(c.content or "" for c in out) == "Hello world"
 
 
 @pytest.mark.asyncio
