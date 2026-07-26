@@ -122,6 +122,10 @@ class SecurityConfig(BaseModel):
     sandbox_mode: str = "enforce"  # enforce | warn | off
     auth_confirmation: bool = True  # require user confirmation for risky ops
     allowed_paths: list[str] = Field(default_factory=lambda: ["."])
+    # Gate for RiskLevel.EXTERNAL tools (web, browser, db). False by default so
+    # the heavier external tools stay blocked unless explicitly opted in;
+    # web_search is READ_ONLY and works regardless of this switch.
+    allow_external: bool = False
 
 
 class HooksConfig(BaseModel):

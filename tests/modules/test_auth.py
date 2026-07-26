@@ -130,3 +130,37 @@ def test_no_scope_unchanged():
     decision = auth.authorize(req)
     assert decision.allowed
     assert decision.requires_confirmation
+
+
+def test_security_config_allow_external_default_false():
+    """security.allow_external defaults to False so the heavier external
+    tools (web/browser/db) stay blocked unless explicitly opted in."""
+    from synapse.config.schema import SecurityConfig
+    assert SecurityConfig().allow_external is False
+    assert SecurityConfig(allow_external=True).allow_external is True
+
+
+def test_synapse_wires_allow_external_from_config_override():
+    """Synapse(config_path=None, allow_external=True) must propagate to the
+    resolved ActionAuthorizer so EXTERNAL tools are allowed at runtime."""
+    from synapse.adapters.library import Synapse
+    from synapse.modules.security.auth import ActionAuthorizer
+
+    off = Synapse(provider="deepseek", model="deepseek-chat", config_path=None)
+    assert off._container.resolve(ActionAuthorizer).allow_external is False
+
+    on = Synapse(provider="deepseek", model="deepseek-chat", config_path=None, allow_external=True)
+    assert on._container.resolve(ActionAuthorizer).allow_external is True
+
+
+def test_enable_external_tools_flag_also_allows_auth():
+    """The enable_external_tools flag registers the external tools AND must
+    also let them through auth (otherwise they'd register but be denied)."""
+    from synapse.adapters.library import Synapse
+    from synapse.modules.security.auth import ActionAuthorizer
+
+    on = Synapse(
+        provider="deepseek", model="deepseek-chat", config_path=None,
+        enable_external_tools=True,
+    )
+    assert on._container.resolve(ActionAuthorizer).allow_external is True

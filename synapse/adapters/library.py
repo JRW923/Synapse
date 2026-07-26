@@ -536,6 +536,11 @@ class Synapse:
         auth = ActionAuthorizer(
             workspace_root=self._config.tools.workspace_root,
             confirmation_enabled=self._config.security.auth_confirmation,
+            # EXTERNAL tools (web/browser/db) run only when explicitly opted in
+            # via config (security.allow_external) or the enable_external_tools
+            # flag (which also registers them). web_search is READ_ONLY and is
+            # not affected by this switch.
+            allow_external=self._config.security.allow_external or self._enable_external_tools,
         )
         c.register(ActionAuthorizer, auth)
 
