@@ -99,7 +99,15 @@ class AnthropicProvider:
                             if delta.text:
                                 yield LLMChunk(content=delta.text)
                         elif delta.type == "input_json_delta":
-                            yield LLMChunk(tool_call_delta={"input": delta.partial_json})
+                            # Carry the content-block index so parallel tool_use
+                            # inputs route to the correct slot in the accumulator.
+                            # Without this, every input_json_delta defaults to
+                            # index 0 and tool calls get crossed (wrong name/input
+                            # pairing, empty tool_call_id -> Anthropic 400).
+                            yield LLMChunk(tool_call_delta={
+                                "index": event.index,
+                                "input": delta.partial_json,
+                            })
                 try:
                     final = await stream.get_final_message()
                     if getattr(final, "usage", None):
@@ -134,13 +142,19 @@ class AnthropicProvider:
         for msg in messages:
             if msg.role == "system":
                 continue
-            if msg.role == "tool" and msg.tool_call_id:
-                block = {"type": "tool_result", "tool_use_id": msg.tool_call_id, "content": msg.content}
-                if (tmp and tmp[-1].get("role") == "user"
-                        and isinstance(tmp[-1].get("content"), list)):
-                    tmp[-1]["content"].append(block)
+            if msg.role == "tool":
+                if msg.tool_call_id:
+                    block = {"type": "tool_result", "tool_use_id": msg.tool_call_id, "content": msg.content}
+                    if (tmp and tmp[-1].get("role") == "user"
+                            and isinstance(tmp[-1].get("content"), list)):
+                        tmp[-1]["content"].append(block)
+                    else:
+                        tmp.append({"role": "user", "content": [block]})
                 else:
-                    tmp.append({"role": "user", "content": [block]})
+                    # Orphan tool result without a tool_use_id — Anthropic has no
+                    # role="tool", so surface it as plain user text instead of
+                    # crashing with 'unknown variant `tool`'.
+                    tmp.append({"role": "user", "content": msg.content or "[tool result]"})
                 continue
 
             if msg.role == "assistant" and msg.tool_calls:

@@ -109,9 +109,9 @@ class _StreamCM:
             yield e
 
 
-def _make_event(delta_type, text=None, partial_json=None):
+def _make_event(delta_type, text=None, partial_json=None, index=0):
     delta = type("Delta", (), {"type": delta_type, "text": text, "partial_json": partial_json})()
-    return type("Event", (), {"type": "content_block_delta", "delta": delta})()
+    return type("Event", (), {"type": "content_block_delta", "delta": delta, "index": index})()
 
 
 @pytest.mark.asyncio
@@ -120,7 +120,7 @@ async def test_stream_yields_text_and_tool_chunks():
     events = [
         _make_event("text_delta", text="Hello"),
         _make_event("text_delta", text=" world"),
-        _make_event("input_json_delta", partial_json='{"path": "/x"}'),
+        _make_event("input_json_delta", partial_json='{"path": "/x"}', index=0),
     ]
     with patch.object(
         provider._client.messages, "stream",
@@ -129,4 +129,52 @@ async def test_stream_yields_text_and_tool_chunks():
         out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
 
     assert [c.content for c in out] == ["Hello", " world", ""]
-    assert out[2].tool_call_delta == {"input": '{"path": "/x"}'}
+    # input_json_delta must carry the content-block index so parallel tool_use
+    # inputs route to the correct accumulator slot (regression for crossed calls).
+    assert out[2].tool_call_delta == {"index": 0, "input": '{"path": "/x"}'}
+
+
+@pytest.mark.asyncio
+async def test_stream_parallel_tool_uses_keep_index_on_input():
+    """Two parallel tool_use blocks: each input_json_delta must carry its own
+    block index so the accumulator doesn't merge both inputs into slot 0."""
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="test-key")
+
+    def block_start(idx, tool_id, name):
+        blk = type("Block", (), {"type": "tool_use", "id": tool_id, "name": name})()
+        return type("Event", (), {"type": "content_block_start", "index": idx, "content_block": blk})()
+
+    events = [
+        block_start(0, "toolu_A", "web_search"),
+        _make_event("input_json_delta", partial_json='{"query": "a"}', index=0),
+        block_start(1, "toolu_B", "read"),
+        _make_event("input_json_delta", partial_json='{"path": "/b"}', index=1),
+    ]
+    with patch.object(
+        provider._client.messages, "stream",
+        new=MagicMock(return_value=_StreamCM(events)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="x")])]
+
+    # Two input deltas, each tagged with its own index — not collapsed onto 0.
+    input_deltas = [c.tool_call_delta for c in out if c.tool_call_delta and "input" in c.tool_call_delta]
+    assert [d["index"] for d in input_deltas] == [0, 1]
+    assert input_deltas[0]["input"] == '{"query": "a"}'
+    assert input_deltas[1]["input"] == '{"path": "/b"}'
+
+
+@pytest.mark.asyncio
+async def test_convert_messages_orphan_tool_without_id_becomes_user():
+    """A tool result message without tool_call_id must NOT be sent as
+    role="tool" (Anthropic rejects it with 'unknown variant `tool`'); it is
+    surfaced as a user message instead."""
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="test-key")
+    converted = provider._convert_messages([
+        Message(role="user", content="do task"),
+        Message(role="assistant", content="ok"),
+        Message(role="tool", content="orphan result", tool_call_id=""),
+    ])
+    roles = [m["role"] for m in converted]
+    assert "tool" not in roles
+    # The orphan is surfaced as user text so its content is not lost.
+    assert any(m["role"] == "user" and "orphan result" in str(m["content"]) for m in converted)
