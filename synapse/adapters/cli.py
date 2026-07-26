@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import os as _os
 import sys
+import threading
 import time as _time
 from pathlib import Path
 
@@ -264,7 +265,23 @@ class _LiveDisplay:
     The footer reports the current activity label plus optional token/elapsed
     readouts supplied by the caller. Used to render the agent's streaming
     output in real time (replaces the old spinner-only status).
+
+    Refresh cadence is owned by a dedicated background thread (see
+    ``_refresh_loop``), NOT by rich's ``auto_refresh`` and NOT by an asyncio
+    task. Rationale: the elapsed clock only advances when the panel is
+    actually redrawn, and the redraw must happen on a steady cadence
+    *independent* of the asyncio event loop. The old design relied on rich's
+    auto_refresh thread plus a per-0.5s asyncio ``_tick`` that merely set the
+    renderable (``live.update(refresh=False)`` performs no screen write), so
+    during a fast token stream the main thread hogged the GIL doing
+    ``"".join(self._buf)`` on a growing buffer and starved the redraw thread —
+    the clock froze, then snapped forward when the burst ended. Owning the
+    thread and bounding the buffer keeps redraws cheap and steady.
     """
+
+    # Keep the rendered transcript bounded so each redraw is O(1) regardless of
+    # how long a single generation runs. Older text scrolls out of the panel.
+    _MAX_BUF_CHARS = 4000
 
     def __init__(self, console, fmt_tokens, fmt_elapsed):
         from rich.live import Live
@@ -275,9 +292,14 @@ class _LiveDisplay:
         self._fmt_tokens = fmt_tokens
         self._fmt_elapsed = fmt_elapsed
         self._buf: list[str] = []
+        self._buf_len = 0
         self._label = "Thinking..."
         self._swarm_lines: list[str] = []
-        self._live = Live(self._render(), console=console, auto_refresh=True, refresh_per_second=15)
+        # auto_refresh=False: we drive screen writes from our own thread so the
+        # cadence never depends on the event loop or on event-handler storms.
+        self._live = Live(self._render(), console=console, auto_refresh=False)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
 
     @property
     def live(self):
@@ -285,12 +307,29 @@ class _LiveDisplay:
 
     def start(self):
         self._live.start()
+        self._thread.start()
 
     def stop(self):
+        self._stop.set()
+        try:
+            self._thread.join(timeout=0.5)
+        except Exception:
+            pass
         try:
             self._live.stop()
         except Exception:
             pass
+
+    def _refresh_loop(self):
+        """Force a screen write every ~0.2s on a thread independent of the
+        event loop, so the clock/token readouts stay live even while the agent
+        loop is busy streaming or executing tools."""
+        while not self._stop.is_set():
+            self._stop.wait(0.2)
+            try:
+                self._live.refresh()
+            except Exception:
+                pass
 
     def set_label(self, text: str) -> None:
         self._label = text
@@ -298,10 +337,16 @@ class _LiveDisplay:
 
     def add_text(self, text: str) -> None:
         self._buf.append(text)
+        self._buf_len += len(text)
+        # Drop oldest chunks once we exceed the cap so joins stay bounded.
+        while self._buf_len > self._MAX_BUF_CHARS and len(self._buf) > 1:
+            dropped = self._buf.pop(0)
+            self._buf_len -= len(dropped)
         self._refresh()
 
     def reset_text(self) -> None:
         self._buf = []
+        self._buf_len = 0
         self._refresh()
 
     def set_swarm_lines(self, lines: list[str]) -> None:
@@ -439,16 +484,6 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     if status_holder is not None:
         status_holder[:] = [live.live]
 
-    async def _tick():
-        try:
-            while True:
-                await asyncio.sleep(0.5)
-                live._refresh()
-        except asyncio.CancelledError:
-            return
-
-    tick_task = asyncio.create_task(_tick())
-
     event_bus = synapse._container.resolve(EventBus)
 
     async def _on_progress(event):
@@ -489,11 +524,6 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     try:
         return await synapse.run(task, session=session)
     finally:
-        tick_task.cancel()
-        try:
-            await tick_task
-        except (asyncio.CancelledError, Exception):
-            pass
         live.stop()
         if status_holder is not None:
             status_holder[:] = []
@@ -1870,17 +1900,6 @@ async def _main_interface(config_path: str | None = None):
             live.start()
             status_holder[:] = [live.live]
 
-            async def _tick():
-                """Refresh the live footer every 0.5s so elapsed time stays live."""
-                try:
-                    while True:
-                        await asyncio.sleep(0.5)
-                        live._refresh()
-                except asyncio.CancelledError:
-                    return
-
-            tick_task = asyncio.create_task(_tick())
-
             def _set_label(text: str) -> None:
                 live.set_label(text)
 
@@ -1936,14 +1955,6 @@ async def _main_interface(config_path: str | None = None):
             continue
         finally:
             if use_rich:
-                try:
-                    tick_task.cancel()
-                    try:
-                        await tick_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                except Exception:
-                    pass
                 try:
                     live.stop()
                 except Exception:
