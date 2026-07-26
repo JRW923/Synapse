@@ -239,7 +239,7 @@ class Agent:
                     pass
         return Context(system=system)
 
-    async def _fallback_context_event(self, session, task: str):
+    def _fallback_context_event(self, session, task: str):
         """Emit a warning event when retrieval times out."""
         from synapse.protocols.events import AgentProgress
         return AgentProgress(

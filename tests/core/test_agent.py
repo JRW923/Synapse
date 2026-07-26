@@ -78,3 +78,38 @@ async def test_agent_persists_memory_after_run():
     result = await agent.run("test", Session())
 
     assert mock_memory.store.called
+
+
+@pytest.mark.asyncio
+async def test_fallback_context_event_returns_event_not_coroutine():
+    """Regression: _fallback_context_event was ``async def`` but contained no
+    await, so calling it returned a coroutine. event_bus.emit then crashed with
+    ``AttributeError: 'coroutine' object has no attribute 'event_type'`` and
+    the coroutine was orphaned (RuntimeWarning). It must return a real event."""
+    import asyncio
+    container = Container()
+
+    mock_llm = AsyncMock(spec=LLMProvider)
+    mock_planner = AsyncMock(spec=Planner)
+    mock_tools = AsyncMock(spec=ToolRegistry)
+    mock_memory = AsyncMock(spec=MemoryStore)
+    mock_retriever = AsyncMock(spec=ContextRetriever)
+    mock_sandbox = AsyncMock(spec=Sandbox)
+    event_bus = EventBus()
+
+    container.register(LLMProvider, mock_llm)
+    container.register(Planner, mock_planner)
+    container.register(ToolRegistry, mock_tools)
+    container.register(MemoryStore, mock_memory)
+    container.register(ContextRetriever, mock_retriever)
+    container.register(Sandbox, mock_sandbox)
+    container.register(EventBus, event_bus)
+
+    agent = Agent(container)
+    evt = agent._fallback_context_event(Session(), "test task")
+    # Must NOT be a coroutine (the bug returned a coroutine).
+    assert not asyncio.iscoroutine(evt)
+    # emit reads .event_type; a coroutine had no such attr -> AttributeError.
+    assert hasattr(evt, "event_type")
+    # Emitting must not raise.
+    await event_bus.emit(evt)
