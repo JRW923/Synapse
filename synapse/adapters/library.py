@@ -285,7 +285,7 @@ class Synapse:
         self._confirm_callback = confirm_callback
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
-        self._last_run_score = None  # TODO K — populated by run()
+        self._last_run_score = None  # populated by run()
         self._last_process_hint = None  # L.4 — last process-quality hint
 
     # -- Public API ----------------------------------------------------------
@@ -330,7 +330,7 @@ class Synapse:
             agent = Agent(self._container)
             self._last_agent = agent   # Phase 4 — retained for /context-report
 
-            # Runtime scoring (TODO K): score each task independently, so reset the
+            # Runtime scoring: score each task independently, so reset the
             # per-run collectors before executing and snapshot them afterwards.
             for _m in self._run_metrics:
                 _m.reset()
@@ -368,7 +368,7 @@ class Synapse:
         return tracker.report(context)
 
     def get_run_score(self) -> dict | None:
-        """TODO K — return the runtime score for the last run (or a live snapshot).
+        """Return the runtime score for the last run (or a live snapshot).
 
         The result is a serializable dict combining the four metric collectors
         (safety / process / quality / efficiency) plus the L.4 process-quality
@@ -502,7 +502,7 @@ class Synapse:
         layered = LayeredMemory(session_memory, project_memory, user_memory, semantic_memory)
         c.register(MemoryStore, layered)
 
-        # Process-quality verification closed loop (TODO B) — live, not eval-gated.
+        # Process-quality verification closed loop — live, not eval-gated.
         # Skip persisting feedback during eval benchmarks so the loop does not
         # leak into later benchmark tasks' prompts.
         from synapse.modules.process_quality import ProcessQualityVerifier
@@ -543,7 +543,7 @@ class Synapse:
         injection_guard = InjectionGuard()
         c.register(InjectionGuard, injection_guard)
 
-        # Runtime scoring (TODO K): all four EventBus-driven metric collectors
+        # Runtime scoring: all four EventBus-driven metric collectors
         # are ALWAYS wired so every task yields an observable process/quality/
         # efficiency/safety score.  They are cheap counters only — gating them
         # behind _enable_eval meant real runs produced no scores.  _enable_eval

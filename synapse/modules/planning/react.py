@@ -62,7 +62,7 @@ class ReActPlanner:
         self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
         self.total_timeout_seconds = total_timeout_seconds
         self.verbose = verbose
-        # TODO C — role lets one ReActPlanner act as a specialized swarm worker
+        # role lets one ReActPlanner act as a specialized swarm worker
         # (e.g. "reviewer") without a separate class.
         self.role = role
         self.system_prompt_suffix = system_prompt_suffix
@@ -512,7 +512,7 @@ class ReActPlanner:
         """
         blocks = []
 
-        # TODO C — prepend role instruction so this planner acts as a
+        # prepend role instruction so this planner acts as a
         # specialized swarm worker (reviewer/tester/security/...).
         if self.role or self.system_prompt_suffix:
             role_block = "## Your role\n"

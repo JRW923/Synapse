@@ -1,4 +1,4 @@
-"""Security red-team / adversarial testing framework (TODO F).
+"""Security red-team / adversarial testing framework.
 
 A curated attack library plus a deterministic, reproducible runner that drives
 the agent with a scripted LLM and scores whether the existing defenses

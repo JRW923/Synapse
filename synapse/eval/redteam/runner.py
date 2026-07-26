@@ -1,4 +1,4 @@
-"""Deterministic red-team runner + security scoring (TODO F).
+"""Deterministic red-team runner + security scoring.
 
 The runner drives each :class:`~synapse.eval.redteam.attacks.AttackCase` through
 a caller-supplied ``run_attack`` callable (typically an ``Agent`` wired with an

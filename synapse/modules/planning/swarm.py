@@ -1,4 +1,4 @@
-"""Swarm / Team planner (TODO C) — core closed loop MVP.
+"""Swarm / Team planner — core closed loop MVP.
 
 Multiple peer agents work on one task at the same time, then a verifier
 agent checks the merged result and — if it rejects — the weakest worker is

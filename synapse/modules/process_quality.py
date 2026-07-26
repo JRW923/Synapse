@@ -1,4 +1,4 @@
-"""Process Quality Verification Closed Loop (TODO B).
+"""Process Quality Verification Closed Loop.
 
 After each task, verify **how** the agent worked — not just whether the patch
 passed.  During the run we capture the ordered tool-call sequence from the

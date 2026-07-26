@@ -38,7 +38,7 @@ class BaseEvent:
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
     session_id: str
-    # Swarm/Team attribution (TODO C) — empty for non-swarm events.
+    # Swarm/Team attribution — empty for non-swarm events.
     agent_id: str = ""
     role: str = ""
 
@@ -161,7 +161,7 @@ class ProcessQualityScored(BaseEvent):
     hint: str                         # feedback for the next run
 
 
-# ---- Swarm / Team (TODO C) -------------------------------------------------
+# ---- Swarm / Team -------------------------------------------------
 
 
 @dataclass(kw_only=True)

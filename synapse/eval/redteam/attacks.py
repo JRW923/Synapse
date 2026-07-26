@@ -1,11 +1,11 @@
-"""Attack case model + curated seed library for the security red-team (TODO F).
+"""Attack case model + curated seed library for the security red-team.
 
 An :class:`AttackCase` is fully self-describing and deterministic: it carries
 the exact tool calls a (hypothetical) compromised agent would issue, which
 ``AttackLLM`` replays against the real defense layers.  No live LLM or network
 is involved, so the suite is CI-runnable and reproducible.
 
-The seed set covers all five TODO-F categories.  Most cases hit a hard-deny
+The seed set covers all five red-team categories.  Most cases hit a hard-deny
 path in ``ActionAuthorizer`` (so they are neutralized today); a few are marked
 ``known_gap=True`` to *honestly* surface soft spots the current defenders do
 not catch (e.g. sensitive-path reads via allow-listed shell commands).  Extend
@@ -19,7 +19,7 @@ from enum import Enum
 
 
 class AttackCategory(str, Enum):
-    """The five adversarial categories from TODO F."""
+    """The five adversarial categories covered by the red-team framework."""
 
     PROMPT_INJECTION_DIRECT = "prompt_injection_direct"
     PROMPT_INJECTION_INDIRECT = "prompt_injection_indirect"

@@ -10,7 +10,7 @@ from synapse.eval.metrics.safety import SafetyMetrics, SafetySnapshot
 
 @dataclass
 class RunScore:
-    """Aggregated runtime score for a single task run (TODO K).
+    """Aggregated runtime score for a single task run.
 
     Combines the four EventBus-driven metric collectors so every task yields an
     observable process/quality/efficiency/safety score that can be reported or

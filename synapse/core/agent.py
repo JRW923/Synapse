@@ -74,7 +74,7 @@ class Agent:
         self._citation_tracker = None
         self._last_context = None
 
-        # TODO B — process-quality verification closed loop (optional service).
+        # process-quality verification closed loop（可选服务）。
         self._quality_verifier = None
         try:
             from synapse.modules.process_quality import ProcessQualityVerifier

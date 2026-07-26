@@ -41,7 +41,7 @@ class AgentResult:
     output: str
     artifacts: list[Artifact] = field(default_factory=list)
     metrics: ExecutionMetrics = field(default_factory=ExecutionMetrics)
-    # Swarm/Team: attribution +溯源 for merge/vote (TODO C).
+    # Swarm/Team: attribution +溯源 for merge/vote.
     agent_id: str = ""
     role: str = ""
     contributors: list["AgentResult"] = field(default_factory=list)

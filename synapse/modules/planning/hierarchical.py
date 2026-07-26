@@ -207,7 +207,7 @@ async def merge_subtask_results(
 ) -> str:
     """Merge ``(id, description, AgentResult)`` items into one coherent output.
 
-    Shared by :class:`HierarchicalPlanner` and the Swarm planner (TODO C) so
+    Shared by :class:`HierarchicalPlanner` and the Swarm planner so
     the same "synthesize subtask results" prompt is reused.
     """
     parts: list[str] = []
