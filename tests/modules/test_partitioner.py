@@ -72,3 +72,33 @@ class TestContextPartitioner:
         assert len(result.system) == 2
         assert result.system[0].content == "sys1"
         assert result.system[1].content == "sys2"
+
+    def test_protects_compacted_overflow_summaries(self):
+        """Compacted OVERFLOW summaries (derived_from set) must survive
+        partitioning even when a higher-priority reference block wins the
+        budget — otherwise the ContextCompactor's summary is lost."""
+        high_ref = make_block("important reference", ContextSource.MEMORY, priority=9, token_count=400)
+        # A compacted summary: tiny, low priority, but derived_from is set.
+        summary = make_block("zzz", ContextSource.GREP, priority=2, token_count=120)
+        summary.derived_from = "orig123"  # mark as compacted overflow
+
+        # reference budget = 25% of 2000 = 500; high_ref(400)+summary(120)=520,
+        # so only one fits. Without protection the priority-9 ref wins and the
+        # summary is dropped; with protection the summary survives.
+        ctx = Context(reference=[high_ref, summary])
+        budget = ContextBudget(total_tokens=2000, reference_pct=0.25)
+        result = ContextPartitioner().partition(ctx, budget)
+
+        derived = [b for b in result.reference if b.derived_from]
+        assert derived, "compacted overflow summary must survive partitioning"
+        assert derived[0].content == "zzz"
+
+    def test_unmarked_blocks_trim_as_before(self):
+        """Blocks without derived_from still trim by priority (no regression)."""
+        big = make_block("big", ContextSource.MEMORY, priority=10, token_count=1000)
+        small = make_block("small", ContextSource.MEMORY, priority=1, token_count=10)
+        ctx = Context(reference=[big, small])
+        # budget=20 -> big can't fit, small can.
+        result = ContextPartitioner().partition(ctx, ContextBudget(total_tokens=80, reference_pct=0.25))
+        assert small in result.reference
+        assert big not in result.reference

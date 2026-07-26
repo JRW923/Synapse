@@ -113,6 +113,27 @@ class TestOverflowRouting:
         assert compacted.derived_from == overflow_block.id
         assert len(compacted.content) <= 500 + len("...[truncated]")
 
+    def test_compacted_overflow_survives_partition(self):
+        # Full slice of agent._build_context tail: compact overflow, fold the
+        # summaries into reference, then run the partitioner. The compacted
+        # summary must NOT be re-evicted by budget trimming (TODO E protection).
+        high_ref = make_block("important reference details", priority=9, token_count=400)
+        overflow_block = make_block("x" * 1000, priority=2, token_count=1000)
+        ctx = Context(reference=[high_ref], overflow=[overflow_block])
+
+        ctx = ContextCompactor().compact(ctx, ContextBudget())
+        ctx.reference = ctx.reference + ctx.overflow  # fold
+        ctx.overflow = []
+
+        # reference budget = 25% of 2000 = 500; high_ref(400) + summary(~128)
+        # = 528 -> only one fits. The summary (derived) must survive.
+        budget = ContextBudget(total_tokens=2000, reference_pct=0.25)
+        ctx = ContextPartitioner().partition(ctx, budget)
+
+        derived = [b for b in ctx.reference if b.derived_from]
+        assert derived, "compacted overflow summary must survive partitioning"
+        assert len(derived[0].content) <= 500 + len("...[truncated]")
+
 
 # ---- Phase 1: LLMCompactor ----------------------------------------------
 

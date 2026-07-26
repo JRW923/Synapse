@@ -208,6 +208,8 @@ class Agent:
             # zone directly (ponytail: overflow is non-injected by design).
             context.reference = context.reference + context.overflow
             context.overflow = []
+            # The folded summaries carry `derived_from`, so ContextPartitioner
+            # treats them as protected and keeps them through budget trimming.
 
         # Apply budget via partitioner.
         if self._partitioner is not None:

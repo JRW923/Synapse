@@ -53,16 +53,29 @@ class ContextPartitioner:
         doesn't fit we continue scanning for smaller blocks that might.
         This fixes the previous `break` bug which dropped higher-priority
         blocks that appeared later in the sort order.
+
+        Compacted OVERFLOW summaries (``derived_from`` set) are protected:
+        they are always kept so the ContextCompactor's summary survives
+        partitioning and reaches the LLM. That is the whole point of
+        compaction — keep a dense summary when the full reference did not
+        fit. ponytail: summaries are tiny (~truncation limit) and bounded by
+        the overflow count, so the hard guarantee cannot blow the budget in
+        practice; if they ever did, they still win over eviction.
         """
         total = sum(b.token_count for b in blocks)
         if total <= token_budget:
             return list(blocks)
 
-        # Highest priority first; preserve original order for ties via stable sort.
-        sorted_blocks = sorted(blocks, key=lambda b: -b.priority)
+        # Protected = compacted overflow summaries; always kept.
+        protected = [b for b in blocks if b.derived_from is not None]
+        normal = [b for b in blocks if b.derived_from is None]
+        protected_tokens = sum(b.token_count for b in protected)
 
-        kept: list[ContextBlock] = []
-        running = 0
+        # Highest priority first; preserve original order for ties via stable sort.
+        sorted_blocks = sorted(normal, key=lambda b: -b.priority)
+
+        kept: list[ContextBlock] = list(protected)
+        running = protected_tokens
         for block in sorted_blocks:
             if running + block.token_count <= token_budget:
                 kept.append(block)
