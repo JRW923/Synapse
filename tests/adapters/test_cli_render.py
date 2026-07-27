@@ -61,3 +61,30 @@ def test_live_display_restartable():
     live.start()  # must not raise "threads can only be started once"
     live.stop()
 
+
+def test_spinner_advances_for_in_progress():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80),
+                        lambda: "1.2k", lambda: "12s")
+    live.set_label("Thinking...")
+    live._spin = 0
+    a = live._render().title
+    live._spin = 1
+    b = live._render().title
+    assert a != b  # spinner frame moved
+
+
+def test_final_state_uses_static_dot():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay, _SPINNER
+
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80),
+                        lambda: "1.2k", lambda: "12s")
+    live.set_label("web_fetch [ok] (820ms)")
+    title = live._render().title
+    assert not any(ch in title for ch in _SPINNER)  # settled, no spinner glyph
+

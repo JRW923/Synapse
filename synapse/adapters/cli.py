@@ -294,6 +294,7 @@ class _LiveDisplay:
         self._buf: list[str] = []
         self._buf_len = 0
         self._label = "Thinking..."
+        self._spin = 0
         self._swarm_lines: list[str] = []
         # auto_refresh=False: we drive screen writes from our own thread so the
         # cadence never depends on the event loop or on event-handler storms.
@@ -328,12 +329,15 @@ class _LiveDisplay:
 
     def _refresh_loop(self):
         """Force a screen write every ~0.2s on a thread independent of the
-        event loop, so the clock/token readouts stay live even while the agent
-        loop is busy streaming or executing tools."""
+        event loop, so the clock/token readouts AND the spinner stay live even
+        while the agent loop is busy streaming or executing tools."""
         while not self._stop.is_set():
             self._stop.wait(0.2)
             try:
-                self._live.refresh()
+                self._spin = (self._spin + 1) % len(_SPINNER)
+                # Regenerate the renderable so the spinner frame advances, then
+                # write it to the screen.
+                self._live.update(self._render(), refresh=True)
             except Exception:
                 pass
 
@@ -372,7 +376,10 @@ class _LiveDisplay:
 
         body = "".join(self._buf)
         style = _status_style_for(self._label)
-        pieces = [f"[{style}]● {self._label}[/{style}]"]
+        # Spin only while in-progress (cyan); final states (ok/fail) show a
+        # static dot so the panel reads as "settled" the moment it completes.
+        dot = _SPINNER[self._spin % len(_SPINNER)] if style == _BRAND else "●"
+        pieces = [f"[{style}]{dot} {self._label}[/{style}]"]
         tk = self._fmt_tokens()
         if tk:
             pieces.append(f"[dim]{tk} tok[/dim]")
@@ -1043,6 +1050,11 @@ _BRAND = "bright_cyan"          # primary accent (art, name, prompt)
 _LABEL = "bold bright_cyan"     # field labels in the banner (same blue family)
 _BORDER = "cyan"                # box border — same blue tone as the art
 _HINT = "dim"                   # secondary text / hints
+
+# Braille spinner — animates continuously while the agent works so the panel
+# never looks frozen (e.g. while the model is "thinking" before the first
+# token). Unicode braille, not an emoji, so it renders in any terminal.
+_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 
 def _status_style_for(label: str) -> str:
