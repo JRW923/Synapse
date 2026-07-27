@@ -6,6 +6,7 @@ from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadat
 
 MAX_RESPONSE_BYTES = 100_000
 DEFAULT_TIMEOUT = 30.0
+_FETCH_TIMEOUT = 20.0  # ponytail: fail fast instead of hanging to the 120s command timeout
 
 
 class HTTPTool:
@@ -88,3 +89,62 @@ class HTTPTool:
                     )
         except Exception as exc:
             return ToolResult(success=False, output="", error=str(exc), metadata=meta)
+
+
+class WebFetchTool:
+    """GET-only, read-only URL fetcher.
+
+    ponytail: this exists so the LLM can read a *specific* URL's content
+    (e.g. github.com/trending?since=weekly) without falling back to writing
+    python/curl scripts. It is GET-only and classified READ_ONLY, so it runs
+    by default — unlike HTTPTool (EXTERNAL, GET/POST) which is gated behind
+    allow_external. Network failures fail fast via a short httpx timeout
+    rather than hanging to the 120s command timeout and burning the 300s
+    task budget.
+    """
+
+    name = "web_fetch"
+    description = (
+        "Fetch the content of a single URL via GET and return its text. "
+        "Read-only — use this to read a specific web page when you already "
+        "know the URL, instead of writing scripts to fetch it. "
+        "Response is limited to 100 KB."
+    )
+    parameters = ToolSchema(
+        name="web_fetch",
+        description="Fetch a URL's content via GET",
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to fetch"},
+            },
+            "required": ["url"],
+        },
+    )
+    requires_sandbox = False
+    risk_level = RiskLevel.READ_ONLY
+    category = ToolCategory.INTEGRATION
+
+    async def execute(self, params: dict, sandbox=None) -> ToolResult:
+        meta = ToolCallMetadata(tool_name="web_fetch")
+        url = (params.get("url") or "").strip()
+        if not url:
+            return ToolResult(success=False, output="", error="Empty url.", metadata=meta)
+
+        timeout = httpx.Timeout(_FETCH_TIMEOUT)
+        limits = httpx.Limits(max_keepalive_connections=0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True) as client:
+                resp = await client.get(url)
+        except Exception as exc:
+            return ToolResult(success=False, output="", error=str(exc), metadata=meta)
+
+        text = resp.text
+        if len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
+            text = text[:MAX_RESPONSE_BYTES] + "\n\n[Response truncated — exceeded 100 KB limit]"
+
+        if resp.is_success:
+            return ToolResult(success=True, output=text, metadata=meta)
+        return ToolResult(
+            success=False, output=text, error=f"HTTP {resp.status_code}", metadata=meta
+        )

@@ -40,9 +40,10 @@ from synapse.modules.tools.git_ import GitTool
 
 # External tools — optional dependencies (httpx, playwright, sqlite3)
 try:
-    from synapse.modules.tools.web import HTTPTool
+    from synapse.modules.tools.web import HTTPTool, WebFetchTool
 except ImportError:  # pragma: no cover
     HTTPTool = None  # type: ignore[assignment]
+    WebFetchTool = None  # type: ignore[assignment]
 
 try:
     from synapse.modules.tools.web_search import WebSearchTool
@@ -655,7 +656,13 @@ class Synapse:
         if WebSearchTool is not None:
             tools.append(WebSearchTool())
 
-        if self._enable_external_tools:
+        # Read-only URL fetch is always available (GET-only, READ_ONLY). It lets
+        # the LLM read a specific page without scripting python/curl. Heavier
+        # external tools (web/browser/db) stay gated behind allow_external.
+        if WebFetchTool is not None:
+            tools.append(WebFetchTool())
+
+        if self._enable_external_tools or self._config.security.allow_external:
             if HTTPTool is not None:
                 tools.append(HTTPTool())
             if DBTool is not None:
