@@ -365,13 +365,14 @@ class _LiveDisplay:
         from rich.text import Text
 
         body = "".join(self._buf)
-        pieces = [self._label]
+        style = _status_style_for(self._label)
+        pieces = [f"[{style}]● {self._label}[/{style}]"]
         tk = self._fmt_tokens()
         if tk:
-            pieces.append(f"{tk} tok")
+            pieces.append(f"[dim]{tk} tok[/dim]")
         el = self._fmt_elapsed()
         if el:
-            pieces.append(el)
+            pieces.append(f"[dim]{el}[/dim]")
         header = "  ·  ".join(pieces)
         text = Text(body, style="none") if body else Text("…", style="dim")
         if self._swarm_lines:
@@ -792,12 +793,7 @@ def main():
                 print(_friendly_error(exc))
             return
 
-        if use_rich:
-            from rich.markdown import Markdown
-            console.print(Markdown(result.output))
-        else:
-            print(f"\n[Status: {result.status.value}]")
-            print(result.output)
+        _print_result(console, result, use_rich)
         return
 
     if args.command == "chat":
@@ -916,15 +912,7 @@ def main():
                         event_bus.unsubscribe("tool_call_started", _on_tool_started)
                         event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
 
-                if use_rich:
-                    status_color = "green" if result.status.value == "success" else "yellow"
-                    console.print(f"[dim]Status:[/dim] [{status_color}]{result.status.value}[/{status_color}]")
-                    console.print(Markdown(result.output))
-                    console.print()
-                else:
-                    print(f"\n[Status: {result.status.value}]")
-                    print(result.output)
-                    print()
+                _print_result(console, result, use_rich)
 
         try:
             asyncio.run(_chat())
@@ -1046,6 +1034,34 @@ _BRAND = "bright_cyan"          # primary accent (art, name, prompt)
 _LABEL = "bold bright_cyan"     # field labels in the banner (same blue family)
 _BORDER = "cyan"                # box border — same blue tone as the art
 _HINT = "dim"                   # secondary text / hints
+
+
+def _status_style_for(label: str) -> str:
+    """Pick a Rich style for a live-panel status label."""
+    low = (label or "").lower()
+    if "fail" in low or "error" in low or "budget" in low or "denied" in low:
+        return "red"
+    if "ok" in low or "completed" in low or "done" in low:
+        return "green"
+    return _BRAND  # cyan — in-progress / neutral activity
+
+
+def _print_result(console, result, use_rich: bool) -> None:
+    """Render a finished task result consistently across run/chat/REPL."""
+    if not use_rich or console is None:
+        print(f"\n[Status: {result.status.value}]")
+        print(result.output)
+        return
+    from rich.markdown import Markdown
+    from rich.rule import Rule
+    color = {"success": "green", "partial": "yellow", "failed": "red"}.get(
+        result.status.value, "dim"
+    )
+    console.print()
+    console.print(Rule(style=_BORDER))
+    console.print(f"  [{color}]● {result.status.value.upper()}[/{color}]")
+    console.print(Markdown(result.output))
+    console.print()
 
 
 def _middle(text: str, limit: int) -> str:
@@ -1996,12 +2012,7 @@ async def _main_interface(config_path: str | None = None):
                     except Exception:
                         pass
 
-        if use_rich:
-            from rich.markdown import Markdown
-            console.print(Markdown(result.output))
-        else:
-            print(f"\n[Status: {result.status.value}]")
-            print(result.output)
+        _print_result(console, result, use_rich)
 
 
 # ---- Eval command handler -------------------------------------------------
