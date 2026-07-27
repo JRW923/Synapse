@@ -641,7 +641,7 @@ class Synapse:
         skill_loader = get_default_skill_loader()
         tools: list = [
             ReadTool(),
-            WriteTool(),
+            WriteTool(workspace_root=self._config.tools.workspace_root),
             EditTool(),
             GlobTool(),
             GrepTool(),

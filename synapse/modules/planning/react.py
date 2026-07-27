@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 from synapse.protocols.planner import (
     AgentResult, ExecutionMetrics, ResultStatus, PlanningMode
 )
@@ -27,6 +28,20 @@ def _truncate_tool_result(text: str, limit: int) -> str:
     if not limit or len(text) <= limit:
         return text
     return text[:limit] + f"\n\n[tool output truncated to {limit} chars]"
+
+
+def _working_directory(auth) -> str:
+    """Resolve the directory the agent should treat as 'here'.
+
+    Prefers the authorizer's resolved workspace root; falls back to the
+    process cwd. This is what gets injected into the system prompt so the LLM
+    knows where relative file paths land — without it the model is forced to
+    invent an absolute path (often ~/Desktop) and writes to the wrong place.
+    """
+    wd = getattr(auth, "workspace_root", None)
+    if wd:
+        return str(wd)
+    return str(Path.cwd())
 
 
 def _summarize_params(params: dict) -> str:
@@ -555,6 +570,7 @@ class ReActPlanner:
                 blocks.append(skill_block)
 
         # Add tools usage instruction
+        wd = _working_directory(self.auth)
         tools_instruction = (
             "You are an AI coding agent with access to tools. "
             "You MUST use the available tools to complete tasks — "
@@ -565,7 +581,9 @@ class ReActPlanner:
             "For web search, call the 'web_search' tool with a query — "
             "do NOT write Python scripts or use curl to call search engines. "
             "Use 'web' only when you already have a specific URL to fetch. "
-            "Always provide absolute paths when using file tools."
+            f"Your working directory is {wd}. "
+            "When writing files, provide an absolute path or a path relative "
+            "to this working directory."
         )
         blocks.append(tools_instruction)
 

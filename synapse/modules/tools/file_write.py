@@ -9,11 +9,17 @@ class WriteTool:
     description = "Create or overwrite a file with new content. Use to generate code, save results, or create config files."
     parameters = ToolSchema(
         name="write",
-        description="Create or overwrite a file. Provide absolute path and full content. Creates parent directories if needed.",
+        description=(
+            "Create or overwrite a file. Provide an absolute path, or a path "
+            "relative to the workspace root. Creates parent directories if needed."
+        ),
         parameters={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Absolute path to the file"},
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path, or a path relative to the workspace root",
+                },
                 "content": {"type": "string", "description": "Content to write"},
             },
             "required": ["path", "content"],
@@ -23,8 +29,20 @@ class WriteTool:
     risk_level = RiskLevel.WRITE_LOCAL
     category = ToolCategory.FILE
 
+    def __init__(self, workspace_root: str | None = None):
+        # Resolve relative write paths against the workspace root so files land
+        # in the project dir, not the (often unrelated) process cwd.
+        self._workspace_root = Path(workspace_root).resolve() if workspace_root else None
+
+    def _resolve_path(self, raw: str) -> Path:
+        path = Path(raw)
+        if not path.is_absolute() and self._workspace_root is not None:
+            path = self._workspace_root / path
+        return path
+
     async def execute(self, params: dict, sandbox=None) -> ToolResult:
-        path = Path(params["path"])
+        raw = params["path"]
+        path = self._resolve_path(raw)
         content = params["content"]
         meta = ToolCallMetadata(tool_name="write")
         meta.files_touched = [str(path)]
