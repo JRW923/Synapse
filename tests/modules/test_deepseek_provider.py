@@ -175,8 +175,12 @@ async def test_chat_api_error():
             await provider.chat(messages=[Message(role="user", content="Hi")])
 
 
-def _make_chunk(content=None, tool_calls=None):
-    delta = type("Delta", (), {"content": content, "tool_calls": tool_calls})()
+def _make_chunk(content=None, tool_calls=None, reasoning_content=None):
+    delta = type("Delta", (), {
+        "content": content,
+        "tool_calls": tool_calls,
+        "reasoning_content": reasoning_content,
+    })()
     choice = type("Choice", (), {"delta": delta})()
     return type("Chunk", (), {"choices": [choice]})()
 
@@ -208,3 +212,31 @@ async def test_stream_yields_text_and_tool_chunks():
     assert [c.content for c in out] == ["Hello", " world", ""]
     assert out[2].tool_call_delta is not None
     assert out[2].tool_call_delta["name"] == "read"
+
+
+@pytest.mark.asyncio
+async def test_stream_counts_reasoning_content_via_tiktoken():
+    """deepseek-reasoner streams reasoning_content (CoT) before the answer.
+    Those tokens are output tokens too and must be counted live so the CLI
+    ticks up during thinking, not just during the final answer.
+    """
+    provider = DeepSeekProvider(model="deepseek-reasoner", api_key="test-key")
+    chunks = [
+        _make_chunk(reasoning_content="Let me think"),
+        _make_chunk(reasoning_content=" step by step"),
+        _make_chunk(content="The answer is 42"),
+    ]
+    with patch.object(
+        provider._client.chat.completions, "create",
+        new=MagicMock(return_value=_chunk_stream(chunks)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    usage_chunks = [c for c in out if c.usage]
+    assert len(usage_chunks) == 3
+    outputs = [c.usage["output"] for c in usage_chunks]
+    assert outputs == sorted(outputs)  # monotonic, non-decreasing
+    assert outputs[-1] > 0
+    # The first two chunks carry only reasoning -> no visible content.
+    assert out[0].content == ""
+    assert out[0].usage["output"] > 0

@@ -17,10 +17,10 @@ dependencies = [
 [project.optional-dependencies]
 # ---- LLM Providers -------------------------------------------------
 anthropic = ["anthropic>=0.40.0"]
-openai     = ["openai>=1.0.0"]
-deepseek   = ["openai>=1.0.0"]    # OpenAI-compatible API
+openai     = ["openai>=1.0.0", "tiktoken>=0.7.0"]
+deepseek   = ["openai>=1.0.0", "tiktoken>=0.7.0"]    # OpenAI-compatible API
 google     = ["google-genai>=2.0"]
-ollama     = ["openai>=1.0.0"]    # OpenAI-compatible API
+ollama     = ["openai>=1.0.0", "tiktoken>=0.7.0"]    # OpenAI-compatible API
 
 # ---- Memory backends -------------------------------------------------
 chromadb   = ["chromadb>=1.5.0"]
@@ -50,6 +50,7 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
     "pytest-httpx>=0.30.0",
+    "tiktoken>=0.7.0",
 ]
 
 # ---- Everything --------------------------------------------------------

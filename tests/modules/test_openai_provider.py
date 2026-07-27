@@ -134,10 +134,10 @@ async def test_stream_yields_text_and_tool_chunks():
 
 @pytest.mark.asyncio
 async def test_stream_emits_usage_per_chunk():
-    """Usage must be emitted on every chunk that carries it (not buffered to
-    the end). Standard OpenAI only puts usage on the final chunk, but servers
-    that stream cumulative usage per chunk (vLLM, llama.cpp, Ollama native, …)
-    then drive a smooth CLI token counter. DeepSeek/Ollama inherit this method.
+    """Authoritative server usage (per-chunk or final) must win over tiktoken.
+    The first chunk has no server usage, so it gets a tiktoken live count; the
+    remaining chunks carry server usage and are emitted verbatim. DeepSeek/Ollama
+    inherit this method.
     """
     provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
 
@@ -157,10 +157,40 @@ async def test_stream_emits_usage_per_chunk():
         out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
 
     usage_chunks = [c for c in out if c.usage]
-    assert [c.usage for c in usage_chunks] == [
+    # First live count comes from tiktoken (no server usage yet).
+    assert usage_chunks[0].usage["input"] == 0
+    assert usage_chunks[0].usage["output"] > 0
+    # Then the server's authoritative per-chunk usage, verbatim.
+    assert [c.usage for c in usage_chunks[1:]] == [
         {"input": 10, "output": 1},
         {"input": 10, "output": 2},
         {"input": 10, "output": 3},
     ]
     # Text must still stream alongside usage.
     assert "".join(c.content or "" for c in out) == "Hello world!"
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_tiktoken_usage_when_no_server_usage():
+    """When the server reports no usage until the end (standard OpenAI/DeepSeek),
+    streamed text is counted live with tiktoken so the CLI ticks up smoothly.
+    Cumulative, monotonic, and input stays 0 until a server usage arrives.
+    """
+    provider = OpenAIProvider(model="gpt-4o", api_key="test-key")
+    chunks = [
+        _make_chunk(content="Hello"),
+        _make_chunk(content=" world"),
+        _make_chunk(content="!"),
+    ]
+    with patch.object(
+        provider._client.chat.completions, "create",
+        new=MagicMock(return_value=_chunk_stream(chunks)),
+    ):
+        out = [c async for c in provider.stream(messages=[Message(role="user", content="Hi")])]
+
+    usage_chunks = [c for c in out if c.usage]
+    assert len(usage_chunks) == 3
+    outputs = [c.usage["output"] for c in usage_chunks]
+    assert outputs == sorted(outputs)  # monotonic, non-decreasing
+    assert outputs[-1] > 0
+    assert all(c.usage["input"] == 0 for c in usage_chunks)
