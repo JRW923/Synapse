@@ -98,6 +98,11 @@ class PlanningConfig(BaseModel):
     max_thrashing_events: int = 2        # stop when this many thrashing events fire
     max_tokens_per_task: int = 200_000   # stop task when total tokens exceed this
     total_timeout_seconds: int = 300
+    # Cap on tool-output chars fed into the conversation context. ReAct re-sends
+    # the full context every iteration, so an unbounded tool result (e.g. a 100
+    # KB HTML page) is re-counted each turn and blows the token budget fast.
+    # 0 = no cap. This is the universal safety net for ALL tools.
+    max_tool_result_chars: int = 16_000
 
 
 class ContextConfig(BaseModel):

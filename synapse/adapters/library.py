@@ -725,6 +725,7 @@ def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
         auth=auth,
         confirm_callback=confirm_callback,
         total_timeout_seconds=cfg.total_timeout_seconds,
+        max_tool_result_chars=cfg.max_tool_result_chars,
         background_manager=get_default_manager(),
         skill_loader=get_default_skill_loader(),
     )

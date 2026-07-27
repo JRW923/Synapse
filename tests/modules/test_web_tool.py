@@ -107,3 +107,37 @@ async def test_web_fetch_rejects_post(httpx_mock):
     )
     result = await WebFetchTool().execute({"url": "https://example.com/x", "method": "POST"})
     assert result.success
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_returns_plain_text(httpx_mock):
+    """web_fetch must strip HTML and return visible text, not raw markup —
+    raw HTML would be tens of thousands of tokens and blow the budget."""
+    html = (
+        "<html><head><title>x</title></head>"
+        "<body><script>var a=1;</script>"
+        "<div><h1>Trending</h1><p>Some repo description here.</p></div>"
+        "</body></html>"
+    )
+    httpx_mock.add_response(url="https://github.com/trending", method="GET", text=html, status_code=200)
+    result = await WebFetchTool().execute({"url": "https://github.com/trending"})
+    assert result.success
+    assert "Trending" in result.output
+    assert "Some repo description here." in result.output
+    assert "<script" not in result.output
+    assert "<div" not in result.output
+    assert "<html" not in result.output
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_caps_extracted_text(httpx_mock):
+    """Even a huge page is capped at _MAX_FETCH_CHARS (~16k), so one fetch
+    can't dominate the token budget."""
+    httpx_mock.add_response(
+        url="https://example.com/big", method="GET",
+        text="<p>" + ("word " * 100000) + "</p>", status_code=200,
+    )
+    result = await WebFetchTool().execute({"url": "https://example.com/big"})
+    assert result.success
+    assert len(result.output) <= 16_000 + 60  # cap + truncation notice
+    assert "truncated" in result.output

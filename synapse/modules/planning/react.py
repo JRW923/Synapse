@@ -15,6 +15,20 @@ from synapse.protocols.events import (
 from synapse.core.exceptions import PlannerError
 
 
+def _truncate_tool_result(text: str, limit: int) -> str:
+    """Cap tool output before it enters the conversation context.
+
+    ReAct re-sends the whole context every iteration, so an unbounded tool
+    result (e.g. a 100 KB HTML page) is re-counted as input tokens on each
+    turn and inflates the token budget. Truncating what the LLM sees is the
+    universal safety net for ALL tools; the full result is still available on
+    the ToolResult object for metrics/events. 0 limit = no cap.
+    """
+    if not limit or len(text) <= limit:
+        return text
+    return text[:limit] + f"\n\n[tool output truncated to {limit} chars]"
+
+
 def _summarize_params(params: dict) -> str:
     """Summarize tool params for logging (truncate long values)."""
     parts = []
@@ -51,6 +65,7 @@ class ReActPlanner:
                  max_thrashing_events: int = 2,
                  max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
+                 max_tool_result_chars: int = 16_000,
         verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
         background_manager=None, skill_loader=None):
@@ -61,6 +76,7 @@ class ReActPlanner:
         self.auth = auth  # ActionAuthorizer or None
         self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
         self.total_timeout_seconds = total_timeout_seconds
+        self.max_tool_result_chars = max_tool_result_chars
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
         # (e.g. "reviewer") without a separate class.
@@ -480,6 +496,9 @@ class ReActPlanner:
             # Feed tool results back as tool messages (after all tools executed)
             for tool_id, result in tool_results:
                 content = result.output if result.success else f"Error: {result.error}"
+                # Universal cap: keep oversized tool output out of context so it
+                # isn't re-sent (and re-counted) every iteration.
+                content = _truncate_tool_result(content, self.max_tool_result_chars)
                 messages.append(Message(
                     role="tool",
                     content=content,
