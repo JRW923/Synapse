@@ -34,3 +34,30 @@ def test_print_result_non_rich(capsys):
     captured = capsys.readouterr().out
     assert "[Status: partial]" in captured
     assert "done" in captured
+
+
+def test_live_display_is_transient():
+    """A stopped panel must erase itself so panels never stack up."""
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80),
+                        lambda: "1.2k", lambda: "12s")
+    assert live._live.transient is True
+
+
+def test_live_display_restartable():
+    """Confirm pause/resume (stop then start) never raises — the refresh
+    thread is recreated each start, so a Thread isn't started twice."""
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80),
+                        lambda: "1.2k", lambda: "12s")
+    live.start()
+    live.stop()
+    live.start()  # must not raise "threads can only be started once"
+    live.stop()
+

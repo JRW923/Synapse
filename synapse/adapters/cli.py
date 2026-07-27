@@ -297,7 +297,8 @@ class _LiveDisplay:
         self._swarm_lines: list[str] = []
         # auto_refresh=False: we drive screen writes from our own thread so the
         # cadence never depends on the event loop or on event-handler storms.
-        self._live = Live(self._render(), console=console, auto_refresh=False)
+        self._live = Live(self._render(), console=console, auto_refresh=False,
+                          transient=True)
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
 
@@ -306,7 +307,12 @@ class _LiveDisplay:
         return self._live
 
     def start(self):
+        # Recreate the refresh thread so the display can be stopped and
+        # restarted (e.g. paused for a confirmation prompt) — a Thread object
+        # can't be started twice, so we build a fresh one each time.
         self._live.start()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._thread.start()
 
     def stop(self):
@@ -489,7 +495,10 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     live = _LiveDisplay(console, _fmt_tokens, _fmt_elapsed)
     live.start()
     if status_holder is not None:
-        status_holder[:] = [live.live]
+        # Store the whole display, not just the inner Rich Live, so the
+        # confirm callback can pause/resume it (and its refresh thread) as a
+        # unit — otherwise the refresh thread keeps resurrecting the panel.
+        status_holder[:] = [live]
 
     event_bus = synapse._container.resolve(EventBus)
 
@@ -1931,7 +1940,7 @@ async def _main_interface(config_path: str | None = None):
 
             live = _LiveDisplay(console, _fmt_tokens, _fmt_elapsed)
             live.start()
-            status_holder[:] = [live.live]
+            status_holder[:] = [live]
 
             def _set_label(text: str) -> None:
                 live.set_label(text)
