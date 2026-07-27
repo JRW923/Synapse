@@ -101,17 +101,28 @@ class ReActPlanner:
         self.background_manager = background_manager
         # s07 — inject matched skills into the system prompt when set.
         self.skill_loader = skill_loader
+        # Set per-run so _log can tell whether the CLI is rendering progress
+        # (rich live panel) and stay silent on stderr to avoid messy dupes.
+        self._event_bus = None
 
     def _log(self, msg: str):
-        """Print a progress message if verbose is enabled.
+        """Emit a progress message.
 
-        Uses stderr so output is visible even when Rich is rendering a status spinner.
+        When the CLI is rendering progress via the event bus (rich live panel),
+        we stay silent on stderr — printing here would interleave raw lines with
+        the panel and look messy.  In plain (non-rich) mode there is no panel, so
+        we print a clean line to stderr instead.
         """
-        if self.verbose:
-            safe = msg.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(
-                sys.stdout.encoding or 'utf-8', errors='replace'
-            )
-            print(f"[Synapse] {safe}", file=sys.stderr, flush=True)
+        # Rich mode already surfaces progress through agent_progress events;
+        # don't duplicate it as raw stderr spam.
+        if self._event_bus is not None and self._event_bus.has_subscribers("agent_progress"):
+            return
+        if not self.verbose:
+            return
+        safe = msg.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(
+            sys.stdout.encoding or 'utf-8', errors='replace'
+        )
+        print(safe, file=sys.stderr, flush=True)
 
     @staticmethod
     async def _maybe_await(obj):
@@ -245,6 +256,7 @@ class ReActPlanner:
         return repaired
 
     async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
+        self._event_bus = event_bus
         start_time = time.time()
         metrics = ExecutionMetrics()
         # s13 — let the shared background manager emit results on this run's bus.
@@ -300,7 +312,7 @@ class ReActPlanner:
                 break
 
             # Call LLM with exponential backoff retry (I2)
-            self._log(f"Iteration {iteration}: calling LLM (messages={len(messages)})...")
+            self._log(f"Iteration {iteration}: calling LLM...")
             await event_bus.emit(AgentProgress(
                 session_id=session.id, phase="calling_llm",
                 message=f"Iteration {iteration}: calling LLM..."
@@ -350,9 +362,7 @@ class ReActPlanner:
                     break
 
             self._log(
-                f"LLM responded: content={len(response.content)} chars, "
-                f"tool_calls={len(response.tool_calls)}, "
-                f"tokens={metrics.tokens_input}+{metrics.tokens_output}"
+                f"LLM responded with {len(response.tool_calls)} tool call(s)"
             )
             await event_bus.emit(AgentProgress(
                 session_id=session.id, phase="token_update",

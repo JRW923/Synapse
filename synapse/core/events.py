@@ -33,6 +33,15 @@ class EventBus:
         except (KeyError, ValueError):
             pass
 
+    def has_subscribers(self, event_type: str) -> bool:
+        """True if any handler is registered for *event_type*.
+
+        Used by the planner to detect whether the CLI is already rendering
+        progress (rich live panel), so it can stay silent on stderr instead of
+        interleaving raw lines with the panel.
+        """
+        return bool(self._handlers.get(event_type))
+
     async def emit(self, event: BaseEvent) -> None:
         """Fire an event to all registered handlers.
 
