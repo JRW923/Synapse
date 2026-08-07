@@ -94,6 +94,11 @@ async def test_list_tools():
 
         with patch("synapse.modules.mcp.official_sdk.ClientSession") as MockSession:
             mock_session = MockSession.return_value
+            # The real ClientSession.__aenter__ returns self; mirror that so
+            # connect()'s `self._session = await self._session_ctx.__aenter__()`
+            # lands on the same object whose list_tools/call_tool we configure.
+            mock_session.__aenter__.return_value = mock_session
+            mock_session.__aexit__.return_value = None
             mock_session.initialize = AsyncMock()
 
             fake_tools = [
@@ -135,6 +140,8 @@ async def test_call_tool():
 
         with patch("synapse.modules.mcp.official_sdk.ClientSession") as MockSession:
             mock_session = MockSession.return_value
+            mock_session.__aenter__.return_value = mock_session
+            mock_session.__aexit__.return_value = None
             mock_session.initialize = AsyncMock()
 
             fake_result = _fake_call_tool_result(

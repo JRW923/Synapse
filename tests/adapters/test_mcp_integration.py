@@ -64,25 +64,27 @@ async def test_synapse_with_mcp_server():
         "synapse.modules.providers.anthropic.AnthropicProvider",
         return_value=mock_llm,
     ):
-        with patch(
-            "synapse.modules.mcp.manager.OfficialSdkMcpClient",
-            return_value=mock_client,
-        ):
-            from synapse.adapters.library import Synapse
+            with patch(
+                "synapse.modules.mcp.manager.OfficialSdkMcpClient",
+                return_value=mock_client,
+            ):
+                from synapse.adapters.library import Synapse
 
-            mcp_config = McpServerConfig(
-                name="test-server",
-                transport="stdio",
-                command="python",
-                args=["-m", "test.mcp.server"],
-            )
-            synapse = Synapse(
-                provider="anthropic",
-                mcp_servers=[mcp_config],
-            )
+                mcp_config = McpServerConfig(
+                    name="test-server",
+                    transport="stdio",
+                    command="python",
+                    args=["-m", "test.mcp.server"],
+                )
+                synapse = Synapse(
+                    provider="anthropic",
+                    mcp_servers=[mcp_config],
+                )
+                # Connect while the client mock is patched — mirrors run().
+                await synapse._mcp_manager.connect_all(synapse._mcp_servers)
 
-    # After container is built, the McpManager should have registered the
-    # MCP tool.  Retrieve the tool registry from the container.
+    # The McpManager should have registered the MCP tool. Retrieve the tool
+    # registry from the container.
     from synapse.protocols.tool import ToolRegistry
     registry = synapse._container.resolve(ToolRegistry)
 

@@ -69,6 +69,11 @@ class PlanExecutePlanner:
         self.interactive = interactive
         self.approval_callback = approval_callback
 
+    def request_cancel(self) -> None:
+        """Forward cancellation to the per-step ReAct planner."""
+        if hasattr(self.react_planner, "request_cancel"):
+            self.react_planner.request_cancel()
+
     async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
         start_time = time.time()
         metrics = ExecutionMetrics()
@@ -152,11 +157,11 @@ class PlanExecutePlanner:
         # Phase E: inject all context zones (system → core → reference)
         context_parts = []
         for block in context.system:
-            context_parts.append(self._wrap(block))
+            context_parts.append(_wrap(block))
         for block in context.core:
-            context_parts.append(f"[from {block.source.value}]\n{self._wrap(block)}")
+            context_parts.append(f"[from {block.source.value}]\n{_wrap(block)}")
         for block in context.reference:
-            context_parts.append(f"[from {block.source.value}]\n{self._wrap(block)}")
+            context_parts.append(f"[from {block.source.value}]\n{_wrap(block)}")
         if context_parts:
             system_prompt += "\n\nRelevant context:\n" + "\n\n".join(context_parts)
 

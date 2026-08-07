@@ -56,6 +56,12 @@ class McpManager:
 
     # -- Public API ----------------------------------------------------------
 
+    @property
+    def connected(self) -> bool:
+        """True once at least one server has been connected (and not yet
+        shut down). Used by the host to avoid reconnecting on every run."""
+        return bool(self._clients)
+
     async def add_server(self, config: McpServerConfig) -> list[str]:
         """Connect to the MCP server described by *config* and register its
         tools in the tool registry.

@@ -133,6 +133,53 @@ async def test_react_hits_max_iterations():
 
 
 @pytest.mark.asyncio
+async def test_react_cancels_and_persists_progress():
+    """request_cancel() stops the loop at the next boundary (PARTIAL) and
+    writes the in-progress messages back to the session so it can be saved."""
+    # LLM would loop forever issuing tool calls; cancellation must win.
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = LLMResponse(
+        content="",
+        tool_calls=[{"id": "t1", "name": "read", "input": {"path": "/test.txt"}}],
+        stop_reason="tool_use",
+        usage={"input": 5, "output": 2},
+    )
+
+    mock_tool = AsyncMock()
+    mock_tool.execute.return_value = ToolResult(
+        success=True, output="ok",
+        metadata=ToolCallMetadata(tool_name="read"),
+    )
+    mock_tools = AsyncMock()
+    mock_tools.get.return_value = mock_tool
+    mock_tools.get_schemas.return_value = [{"name": "read", "description": "Read", "input_schema": {}}]
+
+    mock_sandbox = AsyncMock()
+    event_bus = EventBus()
+
+    planner = ReActPlanner(max_iterations=50)
+    session = Session()
+    planner.request_cancel()  # simulate Ctrl+C before/at start
+
+    result = await planner.execute(
+        task="long running task",
+        context=Context(),
+        tools=mock_tools,
+        llm=mock_llm,
+        sandbox=mock_sandbox,
+        session=session,
+        event_bus=event_bus,
+    )
+
+    assert result.status.value == "partial"
+    assert "中断" in result.output
+    # LLM must never be called — cancellation checked before the first LLM call.
+    assert mock_llm.chat.call_count == 0
+    # Progress (the user task message) is written back for the caller to save.
+    assert any(m.role == "user" for m in session.messages)
+
+
+@pytest.mark.asyncio
 async def test_react_detects_thrashing():
     """Same file modified > threshold → emit event."""
     mock_llm = AsyncMock()

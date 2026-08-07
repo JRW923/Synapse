@@ -133,6 +133,14 @@ class ReActPlanner:
         # Set per-run so _log can tell whether the CLI is rendering progress
         # (rich live panel) and stay silent on stderr to avoid messy dupes.
         self._event_bus = None
+        # ponytail: single-flag cancellation. The CLI's SIGINT handler flips
+        # this; the loop checks it at the top of each iteration so a long task
+        # stops at the next boundary instead of ignoring Ctrl+C entirely.
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        """Ask the running loop to stop at the next iteration boundary."""
+        self._cancel_requested = True
 
     def _log(self, msg: str):
         """Emit a progress message.
@@ -338,6 +346,15 @@ class ReActPlanner:
                     f"Completed {iteration - 1} iterations."
                 )
                 result_status = ResultStatus.PARTIAL
+                break
+
+            # User interrupt (Ctrl+C) — stop cleanly and persist progress so far.
+            if self._cancel_requested:
+                self._log("Interrupt requested — stopping after current iteration.")
+                if not final_output:
+                    final_output = "任务已被用户中断。"
+                result_status = ResultStatus.PARTIAL
+                session.messages = self._repair_session(messages)
                 break
 
             # In-loop history compaction: elide the content of old tool results

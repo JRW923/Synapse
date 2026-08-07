@@ -120,6 +120,9 @@ async def test_mcp_tool_callable_via_agent():
                 provider="anthropic",
                 mcp_servers=[mcp_config],
             )
+            # Connect while the client mock is patched — mirrors what run()
+            # does on its event loop, but keeps the fake client in play.
+            await synapse._mcp_manager.connect_all(synapse._mcp_servers)
 
     # -- Verify the MCP tool is registered in the tool registry ----------------
     from synapse.protocols.tool import ToolRegistry, ToolCategory
@@ -235,6 +238,7 @@ async def test_mcp_tool_error_propagates():
                 provider="anthropic",
                 mcp_servers=[mcp_config],
             )
+            await synapse._mcp_manager.connect_all(synapse._mcp_servers)
 
     from synapse.protocols.tool import ToolRegistry
     registry = synapse._container.resolve(ToolRegistry)
@@ -327,6 +331,7 @@ async def test_multiple_mcp_servers_integration():
                     McpServerConfig(name="srv-b", transport="stdio", command="cmd-b"),
                 ],
             )
+            await synapse._mcp_manager.connect_all(synapse._mcp_servers)
 
     from synapse.protocols.tool import ToolRegistry
     registry = synapse._container.resolve(ToolRegistry)

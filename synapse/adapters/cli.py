@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import os as _os
+import signal as _signal
 import sys
 import threading
 import time as _time
@@ -92,7 +93,48 @@ from synapse.config import load_config
 from synapse.config.schema import _effective_api_key
 from synapse.protocols.mcp import McpServerConfig
 from synapse.core.agent import Agent
+from synapse.modules.planning.react import _summarize_params
 from synapse.core.session import Session
+from synapse.protocols.planner import Planner
+
+import signal as _signal
+
+
+def _install_cancel_handler(synapse) -> object:
+    """Install a SIGINT handler that requests cancellation on the active planner
+    (instead of hard-killing the process) so a long task stops at the next
+    iteration boundary. Returns the previous handler to restore afterwards.
+
+    ponytail: only the ReAct/PlanExecute planners implement request_cancel();
+    for others we fall back to the default handler (which raises
+    KeyboardInterrupt, caught and saved by the caller).
+    """
+    planner = None
+    try:
+        planner = synapse._container.resolve(Planner)
+    except Exception:
+        planner = None
+    prev = _signal.getsignal(_signal.SIGINT)
+
+    def _handler(signum, frame):
+        if planner is not None and hasattr(planner, "request_cancel"):
+            planner.request_cancel()
+        elif callable(prev):
+            prev(signum, frame)
+
+    try:
+        _signal.signal(_signal.SIGINT, _handler)
+    except ValueError:
+        # Not in the main thread — can't install; rely on default behaviour.
+        pass
+    return prev
+
+
+def _restore_cancel_handler(prev) -> None:
+    try:
+        _signal.signal(_signal.SIGINT, prev)
+    except ValueError:
+        pass
 from synapse.core.events import EventBus
 from synapse.core.exceptions import (
     SynapseError,
@@ -540,7 +582,7 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
             tokens["output"] = baseline["out"] + u_out
 
     async def _on_tool_started(event):
-        live.set_label(f"{event.tool_name} ...")
+        live.set_label(f"{event.tool_name}({_summarize_params(event.tool_params)}) ...")
 
     async def _on_tool_completed(event):
         icon = "ok" if event.success else "FAIL"
@@ -971,7 +1013,9 @@ def main():
                             status.update(f"[dim]{event.message}[/dim]")
 
                         async def _on_tool_started(event):
-                            status.update(f"[dim]Executing {event.tool_name}...[/dim]")
+                            status.update(
+                                f"[dim]Executing {event.tool_name}({_summarize_params(event.tool_params)})...[/dim]"
+                            )
 
                         async def _on_tool_completed(event):
                             icon = "[OK]" if event.success else "[FAIL]"
@@ -983,8 +1027,18 @@ def main():
                 else:
                     print("Working...")
 
+                prev_handler = _install_cancel_handler(synapse)
                 try:
-                    result = await synapse.run(user_input, session=session)
+                    try:
+                        result = await synapse.run(user_input, session=session)
+                    except KeyboardInterrupt:
+                        # Safety net when the active planner has no request_cancel.
+                        try:
+                            session.save()
+                        except Exception:
+                            pass
+                        console.print("[yellow]⚠ 已中断，当前进度已保存。[/yellow]")
+                        continue
                 except Exception as exc:
                     if use_rich:
                         status.stop()
@@ -993,6 +1047,7 @@ def main():
                         print(_friendly_error(exc))
                     continue
                 finally:
+                    _restore_cancel_handler(prev_handler)
                     if use_rich:
                         status.stop()
                         status_holder[:] = []  # clear holder
@@ -1070,11 +1125,13 @@ _COMPLETION_LIMIT = 6  # max entries shown in the dropdown
 
 
 def _make_prompt_session():
-    """Build a prompt_toolkit session with slash-command completion, or None."""
+    """Build a prompt_toolkit session with slash-command completion, persistent
+    history, and multi-line/paste support, or None if prompt_toolkit is absent."""
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
-        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.key_binding import KeyBindings
     except ImportError:
         return None
 
@@ -1095,7 +1152,32 @@ def _make_prompt_session():
                     display_meta=desc,
                 )
 
-    return PromptSession(completer=_SlashCompleter())
+    # Persistent REPL history across sessions (~/.synapse/repl_history).
+    history_dir = Path(_os.path.expanduser("~")) / ".synapse"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    history = FileHistory(str(history_dir / "repl_history"))
+
+    # Enter submits; Esc+Enter inserts a newline for multi-line input. Pasted
+    # multi-line text is inserted verbatim (bracketed paste bypasses these
+    # bindings), so it is kept as one block and submitted on Enter.
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _(event):
+        event.current_buffer.validate_and_handle()
+
+    @kb.add("escape", "enter")
+    def _(event):
+        event.current_buffer.insert_text("\n")
+
+    return PromptSession(
+        completer=_SlashCompleter(),
+        history=history,
+        multiline=True,
+        key_bindings=kb,
+        enable_history_search=True,
+        bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · ↑↓/Ctrl+R 历史 ",
+    )
 
 
 # ---- Main interface -------------------------------------------------------
@@ -2088,7 +2170,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                         tokens["input"] = baseline["in"] + u_in
                         tokens["output"] = baseline["out"] + u_out
                 async def _on_tool_started(event):
-                    live.set_label(f"{event.tool_name} ...")
+                    live.set_label(f"{event.tool_name}({_summarize_params(event.tool_params)}) ...")
                 async def _on_tool_completed(event):
                     icon = "ok" if event.success else "FAIL"
                     live.set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
@@ -2099,9 +2181,20 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 swarm_tracker = _SwarmTracker(live.set_swarm_lines)
                 swarm_tracker.wire(event_bus)
 
+        prev_handler = _install_cancel_handler(synapse)
         try:
-            result = await synapse.run(user_input, session=session)
-            last_status = result.status.value
+            try:
+                result = await synapse.run(user_input, session=session)
+                last_status = result.status.value
+            except KeyboardInterrupt:
+                # Safety net when the active planner has no request_cancel.
+                try:
+                    session.save()
+                except Exception:
+                    pass
+                console.print("[yellow]⚠ 已中断，当前进度已保存。[/yellow]")
+                exiting[0] = True
+                break
         except asyncio.CancelledError:
             # Ctrl+C during task — let the outer KeyboardInterrupt handler deal
             # with it, just clean up spinner and exit the loop.
@@ -2115,6 +2208,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 print(_friendly_error(exc))
             continue
         finally:
+            _restore_cancel_handler(prev_handler)
             if use_rich:
                 try:
                     live.stop()

@@ -230,3 +230,24 @@ async def test_convert_messages_orphan_tool_without_id_becomes_user():
     assert "tool" not in roles
     # The orphan is surfaced as user text so its content is not lost.
     assert any(m["role"] == "user" and "orphan result" in str(m["content"]) for m in converted)
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_uses_cache_control_when_enabled():
+    """With prompt_caching on (default), the system is a content block that
+    carries cache_control so Anthropic caches the stable prefix."""
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="test-key")
+    msgs = [Message(role="system", content="You are a helpful agent.")]
+    system = provider._extract_system(msgs)
+    assert isinstance(system, list)
+    assert system[0]["type"] == "text"
+    assert system[0].get("cache_control") == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_plain_string_when_caching_disabled():
+    """Disabling prompt caching falls back to a plain system string."""
+    provider = AnthropicProvider(model="claude-sonnet-4-6", api_key="test-key", prompt_caching=False)
+    msgs = [Message(role="system", content="You are a helpful agent.")]
+    system = provider._extract_system(msgs)
+    assert system == "You are a helpful agent."

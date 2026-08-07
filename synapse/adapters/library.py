@@ -344,10 +344,12 @@ class Synapse:
         # MCP: connect external servers on THIS event loop so their tools are
         # actually callable. The old container-build path connected on a
         # throwaway thread loop, so the receiver tasks died before any call.
-        mcp_connected = False
-        if self._mcp_manager is not None:
+        # Connect once per Synapse instance and keep it connected for the
+        # instance lifetime — reconnecting per task would spawn a fresh
+        # subprocess each run, and tearing down per run would unregister the
+        # tools between runs (breaking tool discovery outside a run).
+        if self._mcp_manager is not None and not self._mcp_manager.connected:
             await self._mcp_manager.connect_all(self._mcp_servers)
-            mcp_connected = True
 
         try:
             agent = Agent(self._container)
@@ -378,8 +380,9 @@ class Synapse:
             # ceiling; for an explicit opt-in flag it is an acceptable trade-off.
             if override and prev_planner is not None:
                 self._container.register(type(prev_planner), prev_planner)
-            if mcp_connected and self._mcp_manager is not None:
-                await self._mcp_manager.shutdown()
+            # ponytail: MCP stays connected for the instance lifetime (see
+            # connect guard above) — no per-run shutdown, so registered tools
+            # remain discoverable and we don't respawn server subprocesses.
 
     def get_citation_report(self) -> dict | None:
         """Phase 4 — return the citation/usage report for the last run, or None."""

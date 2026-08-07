@@ -17,9 +17,14 @@ class AnthropicProvider:
         max_tokens: int = 4096,
         timeout_seconds: int = 120,
         base_url: str = "",
+        prompt_caching: bool = True,
     ):
         self._model = model
         self._max_tokens = max_tokens
+        # ponytail: Anthropic caches the system prefix across turns when the
+        # block carries cache_control. OpenAI/compatible auto-caches prefixes
+        # server-side, so no client knob is needed there.
+        self._prompt_caching = prompt_caching
         kwargs = dict(api_key=api_key if api_key else None, timeout=timeout_seconds)
         if base_url:
             kwargs["base_url"] = base_url
@@ -136,11 +141,22 @@ class AnthropicProvider:
         except Exception as e:
             raise ProviderError(f"Anthropic streaming error: {e}") from e
 
-    def _extract_system(self, messages: list[Message]) -> str | None:
-        """Extract system message if present (Anthropic uses separate system param)."""
+    def _extract_system(self, messages: list[Message]):
+        """Extract the system prompt (Anthropic uses a separate ``system`` param).
+
+        When prompt caching is enabled the system is returned as a content
+        block carrying ``cache_control`` so the (stable) prefix is cached across
+        turns, cutting input-token cost on every follow-up call.
+        """
         for msg in messages:
-            if msg.role == "system":
-                return msg.content
+            if msg.role == "system" and msg.content:
+                if not self._prompt_caching:
+                    return msg.content
+                return [{
+                    "type": "text",
+                    "text": msg.content,
+                    "cache_control": {"type": "ephemeral"},
+                }]
         return None
 
     def _convert_messages(self, messages: list[Message]) -> list[dict]:
