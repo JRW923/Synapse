@@ -188,3 +188,51 @@ def test_main_no_subcommand_does_not_crash_on_optional_args(monkeypatch):
     cli.main()
 
     assert captured == {"provider": None, "model": None, "mode": None}
+
+
+def test_repl_enter_submits_content():
+    """The REPL prompt must submit on Enter. key_processor picks the LAST
+    matching binding (matches[-1]), so the custom Enter binding is merged AFTER
+    load_key_bindings — with the order reversed, the multiline `_newline`
+    binding won and Enter just inserted a newline (the reported bug)."""
+    import threading
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+    from prompt_toolkit.key_binding.defaults import load_key_bindings
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.shortcuts import PromptSession
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _(event):
+        event.current_buffer.validate_and_handle()
+        event.stop()
+
+    @kb.add("escape", "enter")
+    def _(event):
+        event.current_buffer.insert_text("\n")
+        event.stop()
+
+    with create_pipe_input() as inp:
+        inp.send_text("hello world\r")
+        s = PromptSession(
+            multiline=True, history=InMemoryHistory(),
+            input=inp, output=DummyOutput(),
+            key_bindings=merge_key_bindings([load_key_bindings(), kb]),
+            complete_while_typing=True,
+        )
+        result = {}
+
+        def _run():
+            try:
+                result["v"] = s.prompt("> ")
+            except Exception as e:
+                result["e"] = repr(e)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=5)
+        assert "v" in result, f"prompt did not submit: {result.get('e')}"
+        assert result["v"] == "hello world"

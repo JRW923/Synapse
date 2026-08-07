@@ -1042,9 +1042,12 @@ def _make_prompt_session():
     # Enter submits; Esc+Enter inserts a newline for multi-line input. Pasted
     # multi-line text is inserted verbatim (bracketed paste bypasses these
     # bindings), so it is kept as one block and submitted on Enter.
-    # ponytail: merge with load_key_bindings() so Tab-completion, history
-    # navigation and emacs editing keys survive — passing a bare KeyBindings
-    # REPLACES the defaults, which is what dropped the slash-command prompt.
+    # ponytail: key_processor picks the LAST matching binding (matches[-1]), so
+    # the custom kb must come AFTER load_key_bindings() — with the order
+    # reversed, the multiline `_newline` Enter binding won and Enter inserted a
+    # newline instead of submitting. load_key_bindings() also supplies Tab
+    # completion, history navigation and editing keys. `enable_history_search`
+    # is deliberately off: it disables complete_while_typing (auto-completion).
     kb = KeyBindings()
 
     @kb.add("enter")
@@ -1062,8 +1065,8 @@ def _make_prompt_session():
             completer=_SlashCompleter(),
             history=history,
             multiline=True,
-            key_bindings=merge_key_bindings([kb, load_key_bindings()]),
-            enable_history_search=True,
+            key_bindings=merge_key_bindings([load_key_bindings(), kb]),
+            complete_while_typing=True,
             bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 ",
         )
     except Exception:
