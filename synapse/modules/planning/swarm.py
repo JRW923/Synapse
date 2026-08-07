@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,6 +46,17 @@ from synapse.modules.planning.hierarchical import merge_subtask_results
 from synapse.modules.planning.react import ReActPlanner
 from synapse.modules.planning.worktree import WorktreeManager
 from synapse.modules.security.auth import ActionAuthorizer
+
+logger = logging.getLogger(__name__)
+
+
+def _failed_result(description: str, reason: str) -> AgentResult:
+    """Build a FAILED AgentResult for a task that errored or never completed."""
+    return AgentResult(
+        status=ResultStatus.FAILED,
+        output=f"Task failed: {reason}\n(description: {description[:200]})",
+        metrics=ExecutionMetrics(),
+    )
 
 
 @dataclass
@@ -312,10 +324,18 @@ class SwarmPlanner:
                 t = await board.claim(w["agent_id"])
                 if t is None:
                     return
-                res = await w["planner"].execute(
-                    task=t.description, context=context, tools=w["tools"], llm=llm,
-                    sandbox=sandbox, session=w["session"], event_bus=event_bus,
-                )
+                try:
+                    res = await w["planner"].execute(
+                        task=t.description, context=context, tools=w["tools"], llm=llm,
+                        sandbox=sandbox, session=w["session"], event_bus=event_bus,
+                    )
+                except Exception as exc:
+                    # Contain a per-task failure: release so another worker can
+                    # retry, record a FAILED result, and keep the loop alive
+                    # instead of crashing the whole swarm run.
+                    await board.release(t.id)
+                    res = _failed_result(t.description, str(exc))
+                    logger.warning("swarm worker %s task %s failed: %s", w["agent_id"], t.id, exc)
                 await board.complete(t.id, res)
                 w["results"][t.id] = res
                 task_owner[t.id] = w
@@ -324,12 +344,24 @@ class SwarmPlanner:
                     status=res.status.value, output_snippet=res.output[:200],
                 ))
 
-        await asyncio.gather(*[_loop(w) for w in workers])
+        # return_exceptions keeps one worker's crash from killing the whole
+        # gather (which previously surfaced as a task_owner KeyError).
+        gathered = await asyncio.gather(*[_loop(w) for w in workers], return_exceptions=True)
+        for w, exc in zip(workers, gathered):
+            if isinstance(exc, Exception):
+                logger.error("swarm worker %s crashed: %s", w["agent_id"], exc)
 
-        items = [
-            (s["id"], s["description"], task_owner[s["id"]]["results"][s["id"]])
-            for s in subs
-        ]
+        items = []
+        for s in subs:
+            owner = task_owner.get(s["id"])
+            if owner is None:
+                items.append((s["id"], s["description"], _failed_result(s["description"], "not completed")))
+                continue
+            res = owner["results"].get(s["id"])
+            if res is None:
+                items.append((s["id"], s["description"], _failed_result(s["description"], "no result")))
+                continue
+            items.append((s["id"], s["description"], res))
         merged = await merge_subtask_results(task, items, llm, event_bus, session)
 
         for w in workers:
@@ -467,15 +499,40 @@ class SwarmPlanner:
 
     @staticmethod
     def _judge(review_result: AgentResult) -> tuple[str, str]:
-        """Map a reviewer's output text to an (verdict, comments) pair."""
+        """Map a reviewer's output text to an (verdict, comments) pair.
+
+        Verdict is 'approve' / 'reject' / 'needs_changes'. The verify loop
+        treats anything other than 'approve' as a re-run signal, so an
+        ambiguous review defaults to 'needs_changes' (no optimistic auto-pass).
+
+        Rejection matches explicit phrases only — never a bare 'fail', which
+        used to fire falsely on text like 'no tests fail'.
+        """
         out = review_result.output or ""
         low = out.lower()
-        if "不通过" in out or "reject" in low or "fail" in low:
+
+        reject_signals = (
+            "reject", "不通过", "未通过", "needs change", "needs revision",
+            "change requested", "not approved", "must fix", "refuse", "驳回",
+            "blocked",
+        )
+        approve_signals = (
+            "approve", "通过", "lgtm", "looks good", "approved", "ship it",
+            "good to merge", "认可", "accepted",
+        )
+
+        rejected = any(s in low for s in reject_signals)
+        approved = any(s in low for s in approve_signals)
+
+        if rejected and not approved:
             return "reject", out
-        if "通过" in out or "approve" in low or "lgtm" in low:
+        if approved and not rejected:
             return "approve", out
-        # No explicit verdict → treat as approve (optimistic default).
-        return "approve", out
+        # Both signals present, or neither: don't auto-pass. An explicit reject
+        # wins the tie; otherwise fall through to needs_changes.
+        if rejected and approved:
+            return "reject", out
+        return "needs_changes", out
 
     async def _emit_review(self, event_bus, session, reviewer, verdict: str, comments: str) -> None:
         await event_bus.emit(ReviewSubmitted(
