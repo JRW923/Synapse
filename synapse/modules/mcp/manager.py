@@ -102,6 +102,16 @@ class McpManager:
 
         return tool_names
 
+    async def connect_all(self, servers: list[McpServerConfig]) -> None:
+        """Connect to every server in *servers* and register their tools.
+
+        Intended to be called from the same event loop that will later invoke
+        the tools (e.g. at the start of a run), so the MCP receiver tasks stay
+        alive for the duration of the session.
+        """
+        for config in servers:
+            await self.add_server(config)
+
     async def remove_server(self, name: str) -> None:
         """Unregister all tools belonging to *name* and disconnect its client.
 

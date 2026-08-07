@@ -49,6 +49,9 @@ class OfficialSdkMcpClient:
 
         # MCP ClientSession
         self._session: Any = None
+        # Async context manager for the session (its __aenter__ starts the
+        # message-pump task — without it initialize() would hang forever).
+        self._session_ctx: Any = None
 
     # ------------------------------------------------------------------
     # McpClient Protocol
@@ -81,7 +84,16 @@ class OfficialSdkMcpClient:
             )
 
         # After transport is established, initialise the MCP session.
-        self._session = ClientSession(self._read_stream, self._write_stream)
+        if ClientSession is None:
+            raise ImportError(
+                "The 'mcp' package is required for MCP support. "
+                "Install with: pip install mcp"
+            )
+        # ponytail: ClientSession is an async context manager — entering it
+        # starts the background receiver loop that pumps responses. The old
+        # code constructed it bare, so initialize() blocked indefinitely.
+        self._session_ctx = ClientSession(self._read_stream, self._write_stream)
+        self._session = await self._session_ctx.__aenter__()
         await self._session.initialize()
         self._connected = True
         self._config = config
@@ -106,6 +118,16 @@ class OfficialSdkMcpClient:
 
         Idempotent -- safe to call multiple times.
         """
+        # Exit the session context first (it owns the receiver task reading
+        # from the transport streams), then tear down the transport.
+        if self._session_ctx is not None:
+            try:
+                await self._session_ctx.__aexit__(None, None, None)
+            except Exception:
+                logger.exception("Error while closing MCP session")
+            self._session_ctx = None
+        self._session = None
+
         if self._transport_ctx is not None:
             try:
                 await self._transport_ctx.__aexit__(None, None, None)
@@ -113,7 +135,6 @@ class OfficialSdkMcpClient:
                 logger.exception("Error while closing MCP transport")
             self._transport_ctx = None
 
-        self._session = None
         self._read_stream = None
         self._write_stream = None
         self._get_session_id = None

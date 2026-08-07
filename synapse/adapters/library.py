@@ -283,6 +283,7 @@ class Synapse:
         self._memory_backend = memory_backend
         self._enable_external_tools = enable_external_tools
         self._mcp_servers = mcp_servers
+        self._mcp_manager = None  # populated in _build_container; connected lazily in run()
         self._confirm_callback = confirm_callback
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
@@ -327,6 +328,14 @@ class Synapse:
             prev_planner = self._container.resolve(Planner)
             self._container.register(type(planner), planner)
 
+        # MCP: connect external servers on THIS event loop so their tools are
+        # actually callable. The old container-build path connected on a
+        # throwaway thread loop, so the receiver tasks died before any call.
+        mcp_connected = False
+        if self._mcp_manager is not None:
+            await self._mcp_manager.connect_all(self._mcp_servers)
+            mcp_connected = True
+
         try:
             agent = Agent(self._container)
             self._last_agent = agent   # Phase 4 — retained for /context-report
@@ -356,6 +365,8 @@ class Synapse:
             # ceiling; for an explicit opt-in flag it is an acceptable trade-off.
             if override and prev_planner is not None:
                 self._container.register(type(prev_planner), prev_planner)
+            if mcp_connected and self._mcp_manager is not None:
+                await self._mcp_manager.shutdown()
 
     def get_citation_report(self) -> dict | None:
         """Phase 4 — return the citation/usage report for the last run, or None."""
@@ -486,12 +497,14 @@ class Synapse:
         for tool in self._create_all_tools():
             registry.register(tool)
 
-        # MCP — Connect external MCP servers and register their tools
+        # MCP — create the manager but do NOT connect here. MCP clients must
+        # live on the same event loop that later calls their tools, so the
+        # connection is deferred to run() (see _mcp_manager usage there).
         mcp_manager = None
         if self._mcp_servers:
             from synapse.modules.mcp.manager import McpManager as _McpManager
             mcp_manager = _McpManager(tool_registry=registry, event_bus=event_bus)
-            self._connect_mcp_servers_sync(mcp_manager, self._mcp_servers)
+        self._mcp_manager = mcp_manager
 
         c.register(ToolRegistry, registry)
 
@@ -673,39 +686,6 @@ class Synapse:
                 tools.append(BrowserTool())
 
         return tools
-
-    # -- Internal: MCP server connection --------------------------------------
-
-    @staticmethod
-    def _connect_mcp_servers_sync(
-        manager: "McpManager",
-        servers: list[McpServerConfig],
-    ) -> None:
-        """Connect *manager* to every server in *servers* synchronously.
-
-        Uses :func:`asyncio.run` in a thread-pool executor when called from
-        inside a running event loop (e.g. during pytest-asyncio tests).
-        When no event loop is running it calls :func:`asyncio.run` directly.
-        """
-        import asyncio
-        import concurrent.futures
-
-        async def _connect_all() -> None:
-            for server_config in servers:
-                await manager.add_server(server_config)
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            # No running loop — safe to call asyncio.run directly
-            asyncio.run(_connect_all())
-            return
-
-        # A loop is already running — run the coroutine in a dedicated thread
-        # so that it can create its own fresh event loop.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(asyncio.run, _connect_all())
-            future.result(timeout=60)
 
 
 def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
