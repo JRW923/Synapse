@@ -32,6 +32,8 @@ synapse -p anthropic -m claude-sonnet-4-6 "修复 auth.py 的 bug"
 | `/memory` | 会话信息 + token 用量 |
 | `/session` | 显示会话路径 |
 | `/reset` | 清空会话 |
+| `/resume [id]` | 恢复已保存的会话（省略 id 恢复最近一次） |
+| `/sessions` | 列出已保存的会话 |
 | `/mode <名称>` | 切换规划模式 (react / plan_execute / hierarchical) |
 | `/tools` | 列出工具 |
 | `/context-report` | 显示 context 区块引用 / 使用热力图 |
@@ -93,8 +95,12 @@ synapse version                      # 显示版本
 -p, --provider NAME    指定 LLM 供应商
 -m, --model    NAME    指定模型 ID
 --mode         NAME    规划模式
+--resume [ID]          恢复已保存的会话（省略 ID 恢复最近一次；run/chat/REPL 均支持）
 -y, --yes             （run）自动批准需要确认的操作（无交互场景下的显式放行）
 ```
+
+会话会在每次任务结束后自动持久化到 `~/.synapse/sessions/<id>.json`，
+退出后用 `synapse --resume` 或 REPL 内 `/resume` 可继续之前的对话。
 
 `run` 与 `chat` 会以实时面板流式展示进度（工具调用、Swarm 生命周期、token），
 不再静默阻塞。当某工具需要确认而终端无人应答时，默认**自动拒绝**，除非你加

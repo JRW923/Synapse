@@ -574,6 +574,35 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
             swarm_tracker.unwire(event_bus)
 
 
+def _resolve_session(resume):
+    """Build the Session to use, honoring a ``--resume`` value.
+
+    * ``None``       -> brand new session
+    * ``"__latest__"`` -> most recently modified saved session
+    * id / path      -> matched by id prefix, or loaded as a .json path
+    """
+    from pathlib import Path
+
+    from synapse.core.session import Session
+
+    if not resume:
+        return Session()
+    if resume == "__latest__":
+        sessions = Session.list_sessions()
+        if not sessions:
+            print("No saved sessions found; starting a new one.")
+            return Session()
+        return sessions[0]
+    p = Path(resume)
+    if p.exists() and p.suffix == ".json":
+        return Session.load(p)
+    for s in Session.list_sessions():
+        if s.id == resume or s.id.startswith(resume):
+            return s
+    print(f"No session matching '{resume}' found; starting a new one.")
+    return Session()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="synapse",
@@ -584,6 +613,12 @@ def main():
         default=None,
         metavar="PATH",
         help="Path to synapse.yaml (default: auto-detect from CWD upward, then ~/.synapse/)",
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?", const="__latest__", default=None, metavar="SESSION_ID",
+        help="Resume a saved session by id (omit the value to resume the most "
+             "recent session).",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -637,6 +672,12 @@ def main():
         default=False,
         help="Auto-approve confirmation-required tool calls (write/execute) "
              "instead of denying them in non-interactive mode.",
+    )
+    run_parser.add_argument(
+        "--resume",
+        nargs="?", const="__latest__", default=None, metavar="SESSION_ID",
+        help="Resume a saved session by id (omit the value to resume the most "
+             "recent session). The task is appended to the existing history.",
     )
 
     sub.add_parser("version", help="Show version")
@@ -695,6 +736,12 @@ def main():
         action="store_true",
         default=False,
         help="Enable external tools (HTTP, DB, Browser)",
+    )
+    chat_parser.add_argument(
+        "--resume",
+        nargs="?", const="__latest__", default=None, metavar="SESSION_ID",
+        help="Resume a saved session by id (omit the value to resume the most "
+             "recent session).",
     )
 
     eval_parser = sub.add_parser("eval", help="Run a benchmark evaluation")
@@ -799,7 +846,8 @@ def main():
             use_rich = False
 
         try:
-            result = asyncio.run(_run_task_streamed(synapse, task, None, console, use_rich))
+            session = _resolve_session(args.resume)
+            result = asyncio.run(_run_task_streamed(synapse, task, session, console, use_rich))
         except KeyboardInterrupt:
             return
         except Exception as exc:
@@ -810,6 +858,7 @@ def main():
             return
 
         _print_result(console, result, use_rich)
+        session.save()
         return
 
     if args.command == "chat":
@@ -847,7 +896,7 @@ def main():
 
         async def _chat():
             from synapse.core.session import Session
-            session = Session()
+            session = _resolve_session(args.resume)
             welcome = (
                 f"Synapse Chat [{config.provider.provider}/{config.provider.model}]"
             )
@@ -882,6 +931,30 @@ def main():
                         console.print("[dim]Session cleared.[/dim]\n")
                     else:
                         print("Session cleared.\n")
+                    continue
+
+                if user_input.lower() == "/sessions":
+                    from synapse.core.session import Session as _S
+                    sessions = _S.list_sessions()
+                    msg = "No saved sessions." if not sessions else (
+                        "Saved sessions:\n" + "\n".join(
+                            f"  {s.id}  ({len(s.messages)} msgs)" for s in sessions[:10]
+                        )
+                    )
+                    if use_rich:
+                        console.print(f"[dim]{msg}[/dim]")
+                    else:
+                        print(msg)
+                    continue
+
+                if user_input.lower().startswith("/resume"):
+                    arg = user_input[len("/resume"):].strip() or "__latest__"
+                    session = _resolve_session(arg)
+                    note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
+                    if use_rich:
+                        console.print(f"[dim]{note}[/dim]")
+                    else:
+                        print(note)
                     continue
 
                 if use_rich:
@@ -929,6 +1002,7 @@ def main():
                         event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
 
                 _print_result(console, result, use_rich)
+                session.save()
 
         try:
             asyncio.run(_chat())
@@ -1711,7 +1785,7 @@ async def _main_interface(config_path: str | None = None):
 
     # Deferred — created on first user input.
     _synapse: object = None
-    session = Session()
+    session = _resolve_session(args.resume)
     last_status = ""
 
     def _get_synapse():
@@ -1809,11 +1883,35 @@ async def _main_interface(config_path: str | None = None):
                     if citation_line:
                         print(f"Context: {citation_line}")
             elif cmd == "/session":
-                session_dir = Path.cwd() / ".synapse" / "sessions"
+                from synapse.core.session import DEFAULT_SESSION_DIR
+                path = DEFAULT_SESSION_DIR / f"{session.id}.json"
                 if use_rich:
-                    console.print(f"[dim]Session path: {session_dir}[/dim]")
+                    console.print(f"[dim]Session id: {session.id}[/dim]")
+                    console.print(f"[dim]Saved at:   {path}[/dim]")
+                    console.print(f"[dim]Messages:   {len(session.messages)}[/dim]")
                 else:
-                    print(f"Session path: {session_dir}")
+                    print(f"Session id: {session.id}")
+                    print(f"Saved at:   {path}")
+                    print(f"Messages:   {len(session.messages)}")
+            elif cmd == "/sessions":
+                from synapse.core.session import Session as _S
+                sessions = _S.list_sessions()
+                msg = "No saved sessions." if not sessions else (
+                    "Saved sessions:\n" + "\n".join(
+                        f"  {s.id}  ({len(s.messages)} msgs)" for s in sessions[:10]
+                    )
+                )
+                if use_rich:
+                    console.print(f"[dim]{msg}[/dim]")
+                else:
+                    print(msg)
+            elif cmd == "/resume":
+                session = _resolve_session(arg or "__latest__")
+                note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
+                if use_rich:
+                    console.print(f"[dim]{note}[/dim]")
+                else:
+                    print(note)
             elif cmd == "/context-report":
                 _show_context_report(console, _synapse, use_rich)
             elif cmd == "/score":
@@ -2034,6 +2132,7 @@ async def _main_interface(config_path: str | None = None):
                         pass
 
         _print_result(console, result, use_rich)
+        session.save()
 
 
 # ---- Eval command handler -------------------------------------------------
