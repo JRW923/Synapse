@@ -13,6 +13,16 @@ from synapse.protocols.planner import (
 from synapse.protocols.llm import Message
 from synapse.protocols.events import PlanCreated, AgentCompleted
 from synapse.core.exceptions import PlannerError
+from synapse.modules.security.injection import InjectionGuard
+
+
+def _wrap(block) -> str:
+    """Wrap a context block for the LLM via the InjectionGuard.
+
+    External-sourced blocks get <external-content> tags so the LLM can tell
+    untrusted data from trusted instructions.
+    """
+    return InjectionGuard().wrap_for_llm(block)
 
 
 PLANNING_SYSTEM_PROMPT = """You are a task planner. Given a user's objective, break it down into a sequence of concrete, executable steps.
@@ -142,11 +152,11 @@ class PlanExecutePlanner:
         # Phase E: inject all context zones (system → core → reference)
         context_parts = []
         for block in context.system:
-            context_parts.append(block.content)
+            context_parts.append(self._wrap(block))
         for block in context.core:
-            context_parts.append(f"[from {block.source.value}]\n{block.content}")
+            context_parts.append(f"[from {block.source.value}]\n{self._wrap(block)}")
         for block in context.reference:
-            context_parts.append(f"[from {block.source.value}]\n{block.content}")
+            context_parts.append(f"[from {block.source.value}]\n{self._wrap(block)}")
         if context_parts:
             system_prompt += "\n\nRelevant context:\n" + "\n\n".join(context_parts)
 
