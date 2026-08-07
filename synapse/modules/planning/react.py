@@ -14,6 +14,7 @@ from synapse.protocols.events import (
     AuthDecisionMade, FileWritten,
 )
 from synapse.core.exceptions import PlannerError
+from synapse.protocols.tool import RiskLevel
 from synapse.modules.security.injection import InjectionGuard
 
 # Content wrapped in <external-content ...> tags originates from untrusted
@@ -431,6 +432,14 @@ class ReActPlanner:
             self._log(f"Executing {len(response.tool_calls)} tool(s): "
                       f"{[tc['name'] + '(' + str(list(tc['input'].keys())) + ')' for tc in response.tool_calls]}")
             tool_results.clear()
+
+            # Kick off the read-only calls concurrently. The loop below is
+            # unchanged and still serial — it just awaits an already-running
+            # task instead of starting one, so authorization, event order,
+            # thrashing detection and metrics all keep their exact semantics.
+            prefetched = await self._prefetch_readonly(
+                response.tool_calls, tools, sandbox,
+            )
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_input = tc["input"]
@@ -494,8 +503,11 @@ class ReActPlanner:
                                 tool_name, f"Unknown tool: {tool_name}")
                         else:
                             try:
+                                # Already in flight from the read-only prefetch?
+                                pending = prefetched.pop(id(tc), None)
                                 result = await asyncio.wait_for(
-                                    tool.execute(tool_input, sandbox=sandbox),
+                                    pending if pending is not None
+                                    else tool.execute(tool_input, sandbox=sandbox),
                                     timeout=self.tool_timeout_seconds,
                                 )
                             except asyncio.TimeoutError:
@@ -566,6 +578,12 @@ class ReActPlanner:
                         duration_ms=duration_ms,
                         files_touched=result.metadata.files_touched,
                     ))
+
+            # Drop any prefetched task nobody consumed (denied call, early
+            # break) so it doesn't linger as a pending task.
+            for pending in prefetched.values():
+                pending.cancel()
+            prefetched.clear()
 
             # Thrashing forced a stop — break the outer iteration loop so the
             # task actually ends instead of rolling into the next LLM turn.
@@ -671,6 +689,42 @@ class ReActPlanner:
                 blocks.append(self._format_block(block))
 
         return "\n\n".join(blocks)
+
+    async def _prefetch_readonly(self, tool_calls, tools, sandbox) -> dict:
+        """Start READ_ONLY tool calls concurrently; return {id(tc): Task}.
+
+        Only READ_ONLY tools qualify: they touch no files (none of them report
+        ``files_touched``) and never require interactive confirmation for a
+        non-sensitive path, so running them together can't reorder writes or
+        interleave confirmation prompts. Everything else stays serial.
+
+        Sensitive-path reads still need confirmation, so they are left out —
+        the serial loop handles them and prompts in order.
+        """
+        if len(tool_calls) < 2:
+            return {}
+
+        prefetched: dict = {}
+        for tc in tool_calls:
+            try:
+                tool = await self._maybe_await(tools.get(tc["name"]))
+            except Exception:
+                continue  # serial loop will surface the real error
+            if tool is None:
+                continue
+            if getattr(tool, "risk_level", None) != RiskLevel.READ_ONLY:
+                continue
+            if self.auth is not None:
+                decision = self.auth.authorize(self.auth.create_request(
+                    tc["name"], tc["input"], RiskLevel.READ_ONLY, "prefetch",
+                ))
+                # Denied or needs a prompt → let the serial loop deal with it.
+                if not decision.allowed or decision.requires_confirmation:
+                    continue
+            prefetched[id(tc)] = asyncio.create_task(
+                tool.execute(tc["input"], sandbox=sandbox)
+            )
+        return prefetched
 
     def _compact_history(self, messages, soft_chars: int = 120_000, keep_recent: int = 6):
         """Elide old tool-message content to bound conversation growth.

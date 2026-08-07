@@ -72,6 +72,10 @@ _TOKEN_RE = re.compile(r"[^a-zA-Z0-9_]+")
 class BasicContextRetriever:
     """Ranks repository files against the task and builds a four-zone Context."""
 
+    def __init__(self) -> None:
+        # (rel, len, hash) -> symbol names; see _symbols.
+        self._symbol_cache: dict[tuple, list[str]] = {}
+
     async def retrieve(
         self,
         task: str,
@@ -309,21 +313,33 @@ class BasicContextRetriever:
         ranked.sort(key=lambda x: (-x[0], x[1]))
         return ranked
 
-    @staticmethod
-    def _symbols(rel: str, text: str) -> list[str]:
+    def _symbols(self, rel: str, text: str) -> list[str]:
         """Top-level-ish function/class names. ponytail: Python only —
-        other languages fall back to plain text scoring."""
+        other languages fall back to plain text scoring.
+
+        ast.parse dominates retrieval cost (~200ms of a ~450ms pass on this
+        repo), and a file's symbols only change when the file does, so results
+        are memoized on content length + a hash of the source.
+        """
         if not rel.endswith(".py"):
             return []
+        key = (rel, len(text), hash(text))
+        hit = self._symbol_cache.get(key)
+        if hit is not None:
+            return hit
         try:
             tree = ast.parse(text)
         except (SyntaxError, ValueError, RecursionError):
-            return []
-        names = [
-            node.name for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        ]
-        return names[:60]
+            names: list[str] = []
+        else:
+            names = [
+                node.name for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            ][:60]
+        if len(self._symbol_cache) > 4000:  # crude bound; repos churn slowly
+            self._symbol_cache.clear()
+        self._symbol_cache[key] = names
+        return names
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
