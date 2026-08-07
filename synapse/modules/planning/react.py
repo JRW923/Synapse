@@ -77,6 +77,22 @@ def _denied_tool_result(tool_name: str, reason: str):
     })()
 
 
+def _error_tool_result(tool_name: str, reason: str):
+    """Build a failed ToolResult for a tool that raised or timed out.
+
+    The loop must never crash on a misbehaving tool — surface the failure as
+    an observation so the LLM can recover instead of killing the process.
+    """
+    return type("TR", (), {
+        "success": False,
+        "output": "",
+        "error": reason,
+        "metadata": type("M", (), {
+            "tool_name": tool_name, "files_touched": [], "sandbox_used": False,
+        })(),
+    })()
+
+
 class ReActPlanner:
     """Classic ReAct loop: the LLM thinks, calls tools, observes results, repeats.
 
@@ -90,6 +106,7 @@ class ReActPlanner:
                  max_thrashing_events: int = 2,
                  max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
+                 tool_timeout_seconds: int = 120,
                  max_tool_result_chars: int = 16_000,
         verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
@@ -101,6 +118,7 @@ class ReActPlanner:
         self.auth = auth  # ActionAuthorizer or None
         self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
         self.total_timeout_seconds = total_timeout_seconds
+        self.tool_timeout_seconds = tool_timeout_seconds
         self.max_tool_result_chars = max_tool_result_chars
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
@@ -321,6 +339,12 @@ class ReActPlanner:
                 result_status = ResultStatus.PARTIAL
                 break
 
+            # In-loop history compaction: elide the content of old tool results
+            # once the conversation grows past a soft budget, so long tasks don't
+            # blow the provider context window (which would 400 -> retry -> FAILED).
+            # ponytail: elides oldest tool messages only; recent context preserved.
+            self._compact_history(messages)
+
             # Call LLM with exponential backoff retry (I2)
             self._log(f"Iteration {iteration}: calling LLM...")
             await event_bus.emit(AgentProgress(
@@ -465,13 +489,28 @@ class ReActPlanner:
                         ))
                         tool_results.append((tc["id"], denied_result))
                     else:
-                        result = await tool.execute(tool_input, sandbox=sandbox)
-                except KeyError:
+                        if tool is None:
+                            result = _error_tool_result(
+                                tool_name, f"Unknown tool: {tool_name}")
+                        else:
+                            try:
+                                result = await asyncio.wait_for(
+                                    tool.execute(tool_input, sandbox=sandbox),
+                                    timeout=self.tool_timeout_seconds,
+                                )
+                            except asyncio.TimeoutError:
+                                result = _error_tool_result(
+                                    tool_name,
+                                    f"Tool exceeded {self.tool_timeout_seconds}s timeout",
+                                )
+                            except Exception as exc:  # isolate misbehaving tools
+                                result = _error_tool_result(
+                                    tool_name, f"Tool execution error: {exc}")
+
+                except Exception as exc:
+                    # Outer guard: auth/tool-setup failures must not kill the loop.
                     if denied_result is None:
-                        result = type("TR", (), {
-                            "success": False, "output": "", "error": f"Unknown tool: {tool_name}",
-                            "metadata": type("M", (), {"tool_name": tool_name, "files_touched": [], "sandbox_used": False})(),
-                        })()
+                        result = _error_tool_result(tool_name, f"Tool path error: {exc}")
 
                 if denied_result is None:
                     metrics.tool_call_count += 1
@@ -527,6 +566,11 @@ class ReActPlanner:
                         duration_ms=duration_ms,
                         files_touched=result.metadata.files_touched,
                     ))
+
+            # Thrashing forced a stop — break the outer iteration loop so the
+            # task actually ends instead of rolling into the next LLM turn.
+            if thrash_stop:
+                break
 
             # Feed tool results back as tool messages (after all tools executed)
             for tool_id, result in tool_results:
@@ -627,6 +671,26 @@ class ReActPlanner:
                 blocks.append(self._format_block(block))
 
         return "\n\n".join(blocks)
+
+    def _compact_history(self, messages, soft_chars: int = 120_000, keep_recent: int = 6):
+        """Elide old tool-message content to bound conversation growth.
+
+        Tool messages only need role + tool_call_id + content to stay valid;
+        replacing stale content with a short placeholder preserves the message
+        chain while reclaiming tokens. Recent tool results are kept intact so
+        the model retains what it just did. System/user/assistant turns are
+        never touched.
+        """
+        total = sum(len(getattr(m, "content", "") or "") for m in messages)
+        if total <= soft_chars:
+            return
+        tool_idx = [i for i, m in enumerate(messages) if getattr(m, "role", None) == "tool"]
+        # Never elide the most recent `keep_recent` tool messages.
+        for i in (tool_idx[:-keep_recent] if len(tool_idx) > keep_recent else []):
+            m = messages[i]
+            old = getattr(m, "content", "") or ""
+            if len(old) > 200 and "[elided" not in old:
+                m.content = "[elided older tool result to save context]"
 
     @staticmethod
     def _format_block(block) -> str:
