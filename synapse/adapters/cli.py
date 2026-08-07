@@ -341,6 +341,9 @@ class _LiveDisplay:
         self._label = "Thinking..."
         self._spin = 0
         self._swarm_lines: list[str] = []
+        # Writers run on the event-loop thread; the refresh thread reads the
+        # same state. The lock keeps redraws from seeing torn state.
+        self._lock = threading.Lock()
         # auto_refresh=False: we drive screen writes from our own thread so the
         # cadence never depends on the event loop or on event-handler storms.
         self._live = Live(self._render(), console=console, auto_refresh=False,
@@ -379,7 +382,8 @@ class _LiveDisplay:
         while not self._stop.is_set():
             self._stop.wait(0.2)
             try:
-                self._spin = (self._spin + 1) % len(_SPINNER)
+                with self._lock:
+                    self._spin = (self._spin + 1) % len(_SPINNER)
                 # Regenerate the renderable so the spinner frame advances, then
                 # write it to the screen.
                 self._live.update(self._render(), refresh=True)
@@ -387,26 +391,36 @@ class _LiveDisplay:
                 pass
 
     def set_label(self, text: str) -> None:
-        self._label = text
+        with self._lock:
+            self._label = text
         self._refresh()
 
     def add_text(self, text: str) -> None:
-        self._buf.append(text)
-        self._buf_len += len(text)
-        # Drop oldest chunks once we exceed the cap so joins stay bounded.
-        while self._buf_len > self._MAX_BUF_CHARS and len(self._buf) > 1:
-            dropped = self._buf.pop(0)
-            self._buf_len -= len(dropped)
+        with self._lock:
+            self._buf.append(text)
+            self._buf_len += len(text)
+            # Drop oldest chunks once we exceed the cap so joins stay bounded.
+            while self._buf_len > self._MAX_BUF_CHARS and len(self._buf) > 1:
+                dropped = self._buf.pop(0)
+                self._buf_len -= len(dropped)
+            # A single chunk larger than the cap must still be bounded — keep
+            # its tail instead of growing without limit.
+            if self._buf_len > self._MAX_BUF_CHARS:
+                tail = "".join(self._buf)[-self._MAX_BUF_CHARS:]
+                self._buf = [tail]
+                self._buf_len = len(tail)
         self._refresh()
 
     def reset_text(self) -> None:
-        self._buf = []
-        self._buf_len = 0
+        with self._lock:
+            self._buf = []
+            self._buf_len = 0
         self._refresh()
 
     def set_swarm_lines(self, lines: list[str]) -> None:
         """Replace the swarm-status footer lines shown under the streamed text."""
-        self._swarm_lines = list(lines)
+        with self._lock:
+            self._swarm_lines = list(lines)
         self._refresh()
 
     def _refresh(self) -> None:
@@ -419,12 +433,16 @@ class _LiveDisplay:
         from rich.panel import Panel
         from rich.text import Text
 
-        body = "".join(self._buf)
-        style = _status_style_for(self._label)
+        with self._lock:
+            body = "".join(self._buf)
+            label = self._label
+            spin = self._spin
+            swarm_lines = list(self._swarm_lines)
+        style = _status_style_for(label)
         # Spin only while in-progress (cyan); final states (ok/fail) show a
         # static dot so the panel reads as "settled" the moment it completes.
-        dot = _SPINNER[self._spin % len(_SPINNER)] if style == _BRAND else "●"
-        pieces = [f"[{style}]{dot} {self._label}[/{style}]"]
+        dot = _SPINNER[spin % len(_SPINNER)] if style == _BRAND else "●"
+        pieces = [f"[{style}]{dot} {label}[/{style}]"]
         tk = self._fmt_tokens()
         if tk:
             pieces.append(f"[dim]{tk} tok[/dim]")
@@ -433,9 +451,9 @@ class _LiveDisplay:
             pieces.append(f"[dim]{el}[/dim]")
         header = "  ·  ".join(pieces)
         text = Text(body, style="none") if body else Text("…", style="dim")
-        if self._swarm_lines:
+        if swarm_lines:
             text.append("\n\n")
-            for line in self._swarm_lines:
+            for line in swarm_lines:
                 text.append(line + "\n", style="cyan")
         return Panel(text, title=header, border_style=_BORDER, expand=True)
 
@@ -985,22 +1003,22 @@ def main():
 #: (command, description) shown in the completion menu, in display order.
 #: Keep in sync with _show_help and the handlers in _main_interface.
 _SLASH_COMMANDS: tuple = (
-    ("/help",            "Show this help"),
-    ("/memory",          "View working memory"),
-    ("/session",         "Show session path"),
-    ("/sessions",        "List saved sessions"),
-    ("/resume",          "Resume a saved session (default: latest)"),
-    ("/reset",           "Clear session state"),
-    ("/clear",           "Alias for /reset"),
-    ("/model",           "Show or switch model"),
-    ("/provider",        "Show or switch provider"),
-    ("/mode",            "Switch planning mode"),
-    ("/tools",           "List available tools"),
-    ("/context-report",  "Context block citation heatmap"),
-    ("/score",           "Show runtime score + process hint"),
-    ("/todos",           "Show the current todo list"),
-    ("/exit",            "Exit"),
-    ("/quit",            "Exit"),
+    ("/help",            "显示本帮助"),
+    ("/memory",          "查看会话信息与 token 用量"),
+    ("/session",         "显示会话路径"),
+    ("/sessions",        "列出已保存的会话"),
+    ("/resume",          "恢复会话（默认最近一次）"),
+    ("/reset",           "清空会话"),
+    ("/clear",           "/reset 的别名"),
+    ("/model",           "显示/切换模型"),
+    ("/provider",        "显示/切换供应商"),
+    ("/mode",            "切换规划模式"),
+    ("/tools",           "列出可用工具"),
+    ("/context-report",  "上下文区块引用热力图"),
+    ("/score",           "运行时评分 + 过程提示"),
+    ("/todos",           "查看当前任务清单"),
+    ("/exit",            "退出"),
+    ("/quit",            "退出"),
 )
 _COMPLETION_LIMIT = 6  # max entries shown in the dropdown
 
@@ -1137,16 +1155,52 @@ def _print_result(console, result, use_rich: bool) -> None:
     console.print()
 
 
+def _cell_len(text) -> int:
+    """Display width of *text* (CJK counts 2 cells)."""
+    from rich.cells import cell_len
+    return cell_len(str(text))
+
+
+def _clamp_by_cell(text: str, limit: int) -> str:
+    """Truncate *text* to at most *limit* display cells without splitting a wide char."""
+    if _cell_len(text) <= limit:
+        return text
+    out: list[str] = []
+    w = 0
+    for ch in text:
+        c = _cell_len(ch)
+        if w + c > limit:
+            break
+        out.append(ch)
+        w += c
+    return "".join(out)
+
+
+def _clamp_text_by_cell(t: "Text", limit: int) -> "Text":
+    """Clamp a rich Text to *limit* display cells, keeping its styles."""
+    if t.cell_len <= limit:
+        return t
+    from rich.text import Text
+    idx, w = 0, 0
+    for i, ch in enumerate(t.plain):
+        c = _cell_len(ch)
+        if w + c > limit:
+            break
+        idx = i + 1
+        w += c
+    return t[:idx]
+
+
 def _middle(text: str, limit: int) -> str:
-    """Truncate with ellipsis in the middle if too long."""
+    """Truncate with ellipsis in the middle if too long (measured in display cells)."""
     text = str(text).replace("\n", " ")
-    if len(text) <= limit:
+    if _cell_len(text) <= limit:
         return text
     if limit <= 3:
-        return text[:limit]
+        return _clamp_by_cell(text, limit)
     left = (limit - 3) // 2
     right = limit - 3 - left
-    return text[:left] + "..." + text[-right:]
+    return _clamp_by_cell(text, left) + "..." + _clamp_by_cell(text[::-1], right)[::-1]
 
 
 def _show_welcome(console, config, config_path: str = ""):
@@ -1174,22 +1228,25 @@ def _show_welcome(console, config, config_path: str = ""):
         return Text(f"+{char * (width - 2)}+", style=_BORDER)
 
     def _centered(body: str, style: str = "") -> Text:
-        """Center *body* in the box.  Leading/trailing whitespace is stripped
-        so that the visible content is centred, not the raw string."""
+        """Center *body* in the box by display cell width (CJK-safe)."""
         stripped = body.strip()
-        content = _middle(stripped, inner).center(inner) if stripped else " " * inner
+        content = _middle(stripped, inner) if stripped else ""
+        pad = max(0, inner - _cell_len(content))
+        left_pad = pad // 2
         t = Text("| ")
+        t.append(" " * left_pad)
         t.append(content, style=style)
+        t.append(" " * (pad - left_pad))
         t.append(" |")
         return t
 
     def _row(*segments) -> None:
-        """Print one boxed row from styled Text segments."""
+        """Print one boxed row from styled Text segments (CJK-safe padding)."""
         line = Text("| ")
         vis = 0
         for seg in segments:
             line.append(seg)
-            vis += len(seg)
+            vis += _cell_len(seg)
         if vis < inner:
             line.append(" " * (inner - vis))
         line.append(" |")
@@ -1205,17 +1262,16 @@ def _show_welcome(console, config, config_path: str = ""):
 
     def _pair(l_label: str, l_icon: str, l_val: str,
               r_label: str, r_icon: str, r_val: str) -> None:
-        """Two-column row with aligned label columns."""
-        l_field = _field(l_label, l_icon, l_val)
-        r_field = _field(r_label, r_icon, r_val)
-        # Truncate/justify by visible cell length.
-        l_vis = f"{l_icon} {l_label:<{label_w - 2}} {_middle(str(l_val), 60)}"
-        r_vis = f"{r_icon} {r_label:<{label_w - 2}} {_middle(str(r_val), 60)}"
-        l_field = l_field[:max(0, left_w)]
-        r_field = r_field[:max(0, right_w)]
-        l_cell = Text.assemble(l_field, " " * max(0, left_w - min(len(l_vis), left_w)))
-        r_cell = Text.assemble(r_field, " " * max(0, right_w - min(len(r_vis), right_w)))
-        _row(l_cell, Text(" " * gap), r_cell)
+        """Two-column row with aligned label columns (CJK-safe)."""
+        l_field = _clamp_text_by_cell(_field(l_label, l_icon, l_val), left_w)
+        r_field = _clamp_text_by_cell(_field(r_label, r_icon, r_val), right_w)
+        l_pad = max(0, left_w - l_field.cell_len)
+        r_pad = max(0, right_w - r_field.cell_len)
+        _row(
+            Text.assemble(l_field, " " * l_pad),
+            Text(" " * gap),
+            Text.assemble(r_field, " " * r_pad),
+        )
 
     # ── render ────────────────────────────────────────────────────────
     console.print(_b("="))
@@ -1236,7 +1292,7 @@ def _show_welcome(console, config, config_path: str = ""):
 
     # Workspace row
     ws = _field("WORKSPACE", ">", cwd)
-    _row(ws[:inner])
+    _row(_clamp_text_by_cell(ws, inner))
 
     _pair("MODEL", "*", model, "VERSION", "#", f"v{__version__}")
     _pair("PROVIDER", "@", provider, "PLANNING", "~", config.planning.mode)
@@ -1247,7 +1303,7 @@ def _show_welcome(console, config, config_path: str = ""):
         _row(cfg)
 
     _row(Text(""))
-    console.print(_centered("type /help for commands", style=_HINT))
+    console.print(_centered("输入 /help 查看命令", style=_HINT))
     console.print(_b("="))
 
 
@@ -1255,24 +1311,24 @@ def _show_help(console):
     """Display available commands — pico style."""
     from rich.table import Table
     console.print()
-    console.print(f"  [bold {_BRAND}]Commands[/bold {_BRAND}]  [{_HINT}]type a command, or just describe your task[/{_HINT}]")
+    console.print(f"  [bold {_BRAND}]命令[/bold {_BRAND}]  [{_HINT}]输入命令，或直接描述任务[/{_HINT}]")
     t = Table(show_header=False, box=None, padding=(0, 2), pad_edge=False)
     t.add_column(style=f"bold {_BRAND}", no_wrap=True)
     t.add_column(style=_HINT)
-    t.add_row("  /help", "Show this help")
-    t.add_row("  /memory", "View working memory")
-    t.add_row("  /session", "Show session path")
-    t.add_row("  /sessions", "List saved sessions")
-    t.add_row("  /resume [id]", "Resume a saved session (default: latest)")
-    t.add_row("  /reset, /clear", "Clear session state")
-    t.add_row("  /model [name|num]", "Show or switch model (number for quick select)")
-    t.add_row("  /provider [name]", "Show or switch provider")
-    t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical / swarm)")
-    t.add_row("  /tools", "List available tools")
-    t.add_row("  /context-report", "Show context block citation / usage heatmap")
-    t.add_row("  /score", "Show runtime score (safety/process/quality/efficiency) + hint")
-    t.add_row("  /todos", "Show the current todo list (s05)")
-    t.add_row("  /exit, /quit", "Exit")
+    t.add_row("  /help", "显示本帮助")
+    t.add_row("  /memory", "查看会话信息与 token 用量")
+    t.add_row("  /session", "显示会话路径")
+    t.add_row("  /sessions", "列出已保存的会话")
+    t.add_row("  /resume [id]", "恢复会话（默认最近一次）")
+    t.add_row("  /reset, /clear", "清空会话")
+    t.add_row("  /model [name|num]", "显示/切换模型（数字快速选择）")
+    t.add_row("  /provider [name]", "显示/切换供应商")
+    t.add_row("  /mode [name]", "规划模式 (react / plan_execute / hierarchical / swarm)")
+    t.add_row("  /tools", "列出可用工具")
+    t.add_row("  /context-report", "上下文区块引用 / 使用热力图")
+    t.add_row("  /score", "运行时评分 (safety/process/quality/efficiency) + 提示")
+    t.add_row("  /todos", "查看当前任务清单")
+    t.add_row("  /exit, /quit", "退出")
     console.print(t)
     console.print()
 

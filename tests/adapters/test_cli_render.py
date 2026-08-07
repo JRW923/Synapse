@@ -88,3 +88,40 @@ def test_final_state_uses_static_dot():
     title = live._render().title
     assert not any(ch in title for ch in _SPINNER)  # settled, no spinner glyph
 
+
+
+def test_welcome_banner_aligns_with_cjk_workspace():
+    """A CJK workspace path must not break the banner's right border. Row width
+    is measured in display cells (CJK = 2), not code points."""
+    import io
+    from unittest.mock import patch
+
+    from rich.cells import cell_len
+    from rich.console import Console
+
+    from synapse.adapters.cli import _show_welcome
+    from synapse.config.schema import SynapseConfig
+
+    console = Console(width=72, file=io.StringIO(), force_terminal=True,
+                      legacy_windows=True, record=True)
+    config = SynapseConfig()
+    config.provider.model = "deepseek-v4-pro"
+    with patch("synapse.adapters.cli.Path.cwd", return_value="D:/项目/代码/神经网络"):
+        _show_welcome(console, config, "synapse.yaml")
+    lines = console.export_text().splitlines()
+    widths = {cell_len(l) for l in lines}
+    assert widths == {72}, f"banner rows misaligned, cell widths: {sorted(widths)}"
+
+
+def test_live_display_bounds_single_large_chunk():
+    """A single streamed chunk larger than the panel cap must still be bounded
+    (previously a >4000-char token block grew the buffer without limit)."""
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    cap = _LiveDisplay._MAX_BUF_CHARS
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80), lambda: "", lambda: "")
+    live.add_text("x" * (cap + 1000))
+    assert live._buf_len <= cap
+    assert len(live._buf) == 1
