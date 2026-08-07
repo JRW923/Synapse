@@ -149,8 +149,11 @@ class SwarmPlanner:
                 return await self._execute_autonomous(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
             return await self._execute_inner(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
         finally:
-            # s18 — always tear down worker worktrees, success or failure.
+            # s18 — fold worker edits back into the base workspace BEFORE tearing
+            # down, so the swarm's results survive cleanup (otherwise every
+            # worker's changes were silently discarded).
             if self._worktree_manager is not None:
+                self._worktree_manager.merge_all()
                 self._worktree_manager.remove_all()
 
     async def _execute_inner(self, task, context, tools, llm, sandbox, session, event_bus, start_time, metrics) -> AgentResult:

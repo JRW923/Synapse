@@ -87,6 +87,36 @@ class WorktreeManager:
         else:
             shutil.rmtree(path, ignore_errors=True)
 
+    def merge_back(self, agent_id: str) -> None:
+        """Copy a worker's worktree contents back into the base workspace.
+
+        ponytail: a real git merge is left for later (see module docstring).
+        Until then, a best-effort file copy is the only thing preventing the
+        swarm's ``finally: remove_all()`` from silently discarding every
+        worker's edits. Top-level entries mirror the checkout, so copying them
+        (skipping ``.git``) folds worker changes into the base workspace.
+        """
+        path = self._paths.get(agent_id)
+        if path is None or not path.exists():
+            return
+        for item in path.iterdir():
+            if item.name == ".git":
+                continue
+            dest = self.base_root / item.name
+            try:
+                if item.is_dir():
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dest)
+            except OSError:
+                # Best-effort: skip files we can't copy rather than abort cleanup.
+                pass
+
+    def merge_all(self) -> None:
+        """Merge every live worktree back into the base workspace."""
+        for agent_id in list(self._paths):
+            self.merge_back(agent_id)
+
     @staticmethod
     def _has_git_worktree(path: Path) -> bool:
         try:

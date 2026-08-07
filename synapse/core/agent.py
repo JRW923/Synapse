@@ -1,5 +1,7 @@
 """Core Agent -- assembles dependencies and delegates to Planner."""
 
+import inspect
+
 from synapse.core.container import Container
 from synapse.core.session import Session
 from synapse.protocols.llm import LLMProvider
@@ -202,7 +204,13 @@ class Agent:
         overflow_chars = sum(len(b.content) for b in context.overflow)
         compactor = self._resolve_compactor(overflow_chars)
         if compactor is not None and context.overflow:
-            context = compactor.compact(context, budget)
+            # ponytail: LLMCompactor.compact is a coroutine — awaiting a
+            # coroutine result is mandatory, otherwise context becomes a
+            # coroutine (no .reference) and _build_context throws AttributeError.
+            compacted = compactor.compact(context, budget)
+            if inspect.iscoroutine(compacted):
+                compacted = await compacted
+            context = compacted
             # Fold the compacted overflow summaries back into `reference` so the
             # LLM actually consumes them — react.py does not inject the overflow
             # zone directly (ponytail: overflow is non-injected by design).
