@@ -43,10 +43,14 @@ class ActionAuthorizer:
 
     ALWAYS_ALLOWED_COMMANDS = [
         "ls", "echo", "cat", "head", "tail", "wc", "pwd", "env",
-        "git", "python", "python3", "pip", "npm", "node", "cargo",
+        "git", "pip", "npm", "node", "cargo",
         "go", "pytest", "mypy", "ruff", "black",
-        "curl", "wget", "mkdir", "find", "type", "dir", "del", "rm",
+        "mkdir", "find", "type", "dir", "del", "rm",
     ]
+
+    # Commands that can chain arbitrary code execution or network access.
+    # Allowed, but only after explicit user confirmation (never silent).
+    CONFIRM_REQUIRED_COMMANDS = {"python", "python3", "curl", "wget"}
 
     def __init__(
         self,
@@ -126,6 +130,14 @@ class ActionAuthorizer:
                 return AuthDecision(
                     allowed=False,
                     reason=f"Command not in allowlist: {command.split()[0] if command else ''}",
+                )
+            # ponytail: commands that can chain arbitrary code/network access are
+            # allowed only after explicit user confirmation, never silent.
+            if self._requires_confirmation(command):
+                return AuthDecision(
+                    allowed=True,
+                    reason=f"Command '{command.split()[0]}' can spawn code/network — confirmation required",
+                    requires_confirmation=True,
                 )
             return AuthDecision(
                 allowed=True,
@@ -208,5 +220,13 @@ class ActionAuthorizer:
     def _is_allowlisted(self, command: str) -> bool:
         if not command.strip():
             return False
-        words = command.strip().split()
-        return any(w in self.ALWAYS_ALLOWED_COMMANDS for w in words)
+        # ponytail: only the FIRST token is gated. The old `any(word in ...)`
+        # let `evil && ls` through because `ls` matched somewhere in the string.
+        first = command.strip().split()[0]
+        return first in self.ALWAYS_ALLOWED_COMMANDS
+
+    def _requires_confirmation(self, command: str) -> bool:
+        if not command.strip():
+            return False
+        first = command.strip().split()[0]
+        return first in self.CONFIRM_REQUIRED_COMMANDS
