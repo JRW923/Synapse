@@ -1045,7 +1045,7 @@ def main():
 
     # No subcommand — launch main interface
     try:
-        asyncio.run(_main_interface(args.config))
+        asyncio.run(_main_interface(args.config, getattr(args, "resume", None)))
     except KeyboardInterrupt:
         pass
 
@@ -1739,7 +1739,7 @@ def _write_launcher(path: Path, content: str, executable: bool = False) -> None:
         path.chmod(0o755)
 
 
-async def _main_interface(config_path: str | None = None):
+async def _main_interface(config_path: str | None = None, resume: str | None = None):
     """Launch the main Synapse interface (synapse with no subcommand)."""
     global _ctrl_c_pressed
     config, config_source = load_config(config_path)
@@ -1785,7 +1785,7 @@ async def _main_interface(config_path: str | None = None):
 
     # Deferred — created on first user input.
     _synapse: object = None
-    session = _resolve_session(args.resume)
+    session = _resolve_session(resume)
     last_status = ""
 
     def _get_synapse():
