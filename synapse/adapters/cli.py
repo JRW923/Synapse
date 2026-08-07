@@ -1052,13 +1052,14 @@ def _make_prompt_session():
 
     @kb.add("enter")
     def _(event):
+        # Each keypress runs only the last matching binding, so no stop() is
+        # needed — and KeyPressEvent has no stop() method (an old version of
+        # this handler called event.stop() and every Enter crashed the app).
         event.current_buffer.validate_and_handle()
-        event.stop()
 
     @kb.add("escape", "enter")
     def _(event):
         event.current_buffer.insert_text("\n")
-        event.stop()
 
     try:
         return PromptSession(

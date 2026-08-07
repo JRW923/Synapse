@@ -194,7 +194,9 @@ def test_repl_enter_submits_content():
     """The REPL prompt must submit on Enter. key_processor picks the LAST
     matching binding (matches[-1]), so the custom Enter binding is merged AFTER
     load_key_bindings — with the order reversed, the multiline `_newline`
-    binding won and Enter just inserted a newline (the reported bug)."""
+    binding won and Enter just inserted a newline (the reported bug). The
+    handler must not call event.stop() — KeyPressEvent has no such method and
+    it crashed the app with an unhandled exception."""
     import threading
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.input import create_pipe_input
@@ -208,12 +210,10 @@ def test_repl_enter_submits_content():
     @kb.add("enter")
     def _(event):
         event.current_buffer.validate_and_handle()
-        event.stop()
 
     @kb.add("escape", "enter")
     def _(event):
         event.current_buffer.insert_text("\n")
-        event.stop()
 
     with create_pipe_input() as inp:
         inp.send_text("hello world\r")
