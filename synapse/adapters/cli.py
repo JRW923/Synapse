@@ -1131,7 +1131,8 @@ def _make_prompt_session():
         from prompt_toolkit import PromptSession
         from prompt_toolkit.completion import Completer, Completion
         from prompt_toolkit.history import FileHistory
-        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+        from prompt_toolkit.key_binding.defaults import load_key_bindings
     except ImportError:
         return None
 
@@ -1160,23 +1161,28 @@ def _make_prompt_session():
     # Enter submits; Esc+Enter inserts a newline for multi-line input. Pasted
     # multi-line text is inserted verbatim (bracketed paste bypasses these
     # bindings), so it is kept as one block and submitted on Enter.
+    # ponytail: merge with load_key_bindings() so Tab-completion, history
+    # navigation and emacs editing keys survive — passing a bare KeyBindings
+    # REPLACES the defaults, which is what dropped the slash-command prompt.
     kb = KeyBindings()
 
     @kb.add("enter")
     def _(event):
         event.current_buffer.validate_and_handle()
+        event.stop()
 
     @kb.add("escape", "enter")
     def _(event):
         event.current_buffer.insert_text("\n")
+        event.stop()
 
     return PromptSession(
         completer=_SlashCompleter(),
         history=history,
         multiline=True,
-        key_bindings=kb,
+        key_bindings=merge_key_bindings([kb, load_key_bindings()]),
         enable_history_search=True,
-        bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · ↑↓/Ctrl+R 历史 ",
+        bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 ",
     )
 
 
