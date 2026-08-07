@@ -915,7 +915,9 @@ def main():
         try:
             asyncio.run(_main_interface(
                 args.config, getattr(args, "resume", None),
-                args.provider, args.model, args.mode,
+                getattr(args, "provider", None),
+                getattr(args, "model", None),
+                getattr(args, "mode", None),
             ))
         except KeyboardInterrupt:
             pass
@@ -965,11 +967,14 @@ def main():
         _run_setup(args)
         return
 
-    # No subcommand — launch main interface
+    # No subcommand — launch main interface. provider/model/mode only exist on
+    # the run/chat subparsers; absent here, so read them defensively.
     try:
         asyncio.run(_main_interface(
             args.config, getattr(args, "resume", None),
-            args.provider, args.model, args.mode,
+            getattr(args, "provider", None),
+            getattr(args, "model", None),
+            getattr(args, "mode", None),
         ))
     except KeyboardInterrupt:
         pass
@@ -1052,14 +1057,19 @@ def _make_prompt_session():
         event.current_buffer.insert_text("\n")
         event.stop()
 
-    return PromptSession(
-        completer=_SlashCompleter(),
-        history=history,
-        multiline=True,
-        key_bindings=merge_key_bindings([kb, load_key_bindings()]),
-        enable_history_search=True,
-        bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 ",
-    )
+    try:
+        return PromptSession(
+            completer=_SlashCompleter(),
+            history=history,
+            multiline=True,
+            key_bindings=merge_key_bindings([kb, load_key_bindings()]),
+            enable_history_search=True,
+            bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 ",
+        )
+    except Exception:
+        # No console (e.g. stdin piped, or a non-console host) — degrade to
+        # plain input() instead of crashing startup.
+        return None
 
 
 # ---- Main interface -------------------------------------------------------

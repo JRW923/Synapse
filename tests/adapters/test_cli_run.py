@@ -167,3 +167,24 @@ def test_friendly_error_maps_synapse_errors():
     # A plain (non-Synapse) error still hides the traceback and gives a hint.
     assert "原因：" in _friendly_error(RuntimeError("kaboom"))
     assert "建议：" in _friendly_error(RuntimeError("kaboom"))
+
+
+def test_main_no_subcommand_does_not_crash_on_optional_args(monkeypatch):
+    """`synapse` with no subcommand must not AttributeError on provider/model/mode,
+    which only exist on the run/chat subparsers (regression for the top-level
+    Namespace missing those attributes)."""
+    from synapse.adapters import cli
+
+    captured = {}
+
+    async def fake_main(config_path=None, resume=None, provider=None, model=None, mode=None):
+        captured["provider"] = provider
+        captured["model"] = model
+        captured["mode"] = mode
+
+    monkeypatch.setattr(cli, "_main_interface", fake_main)
+    monkeypatch.setattr("sys.argv", ["synapse"])
+
+    cli.main()
+
+    assert captured == {"provider": None, "model": None, "mode": None}
