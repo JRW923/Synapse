@@ -39,7 +39,10 @@ class EditTool:
             if count > 1:
                 return ToolResult(success=False, output="", error=f"old_string is not unique in file — found {count} occurrences", metadata=meta)
             new_content = content.replace(old, new)
-            path.write_text(new_content, encoding="utf-8")
+            # ponytail: newline="" preserves the file's original line endings
+            # instead of letting write_text translate LF -> CRLF on Windows,
+            # which rewrote the entire file as one giant diff on every edit.
+            path.write_text(new_content, encoding="utf-8", newline="")
             return ToolResult(success=True, output=f"Replaced 1 occurrence in {path}", metadata=meta)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e), metadata=meta)

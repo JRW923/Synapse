@@ -14,6 +14,9 @@ from synapse.protocols.tool import (
 
 _SELECT_STATEMENTS = frozenset({"SELECT", "WITH", "EXPLAIN", "PRAGMA"})
 
+# Cap on returned rows so a big SELECT can't blow the context window.
+MAX_DB_ROWS = 2000
+
 
 class DBTool:
     """Execute SQL queries against a SQLite database file.
@@ -76,7 +79,11 @@ class DBTool:
                 metadata=meta,
             )
 
-        if not str(resolved).startswith(str(self._workspace_root)):
+        # ponytail: is_relative_to closes the '/ws-evil' bypasses '/ws' jail
+        # that the old startswith() check allowed.
+        try:
+            resolved.relative_to(self._workspace_root)
+        except ValueError:
             return ToolResult(
                 success=False,
                 output="",
@@ -111,7 +118,12 @@ class DBTool:
                 cursor = conn.execute(query)
                 if statement_type in _SELECT_STATEMENTS:
                     rows = cursor.fetchall()
+                    truncated = len(rows) > MAX_DB_ROWS
+                    if truncated:
+                        rows = rows[:MAX_DB_ROWS]
                     output = _format_rows(cursor, rows)
+                    if truncated:
+                        output += f"\n[db output truncated to {MAX_DB_ROWS} rows]"
                 else:
                     conn.commit()
                     output = f"Query OK, {cursor.rowcount} row(s) affected"

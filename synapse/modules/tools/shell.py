@@ -4,6 +4,16 @@ import asyncio
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
 from synapse.modules.tools.background import BackgroundTaskManager
 
+# Cap on emitted output so a verbose command can't blow the context window.
+# Keeps shell consistent with grep/git tools (50 KB).
+MAX_SHELL_OUTPUT = 50_000
+
+
+def _cap(text: str) -> str:
+    if text and len(text) > MAX_SHELL_OUTPUT:
+        return text[:MAX_SHELL_OUTPUT] + f"\n\n[shell output truncated to {MAX_SHELL_OUTPUT} chars]"
+    return text
+
 
 class ShellTool:
     name = "shell"
@@ -68,9 +78,9 @@ class ShellTool:
                 meta.sandbox_used = True
                 meta.duration_ms = 0
                 if result.exit_code == 0:
-                    return ToolResult(success=True, output=result.stdout, metadata=meta)
+                    return ToolResult(success=True, output=_cap(result.stdout), metadata=meta)
                 else:
-                    return ToolResult(success=False, output=result.stdout, error=result.stderr, metadata=meta)
+                    return ToolResult(success=False, output=_cap(result.stdout), error=_cap(result.stderr), metadata=meta)
 
             # Fallback: no sandbox (warning mode)
             proc = await asyncio.create_subprocess_shell(
@@ -81,10 +91,11 @@ class ShellTool:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
+                await proc.wait()
                 return ToolResult(success=False, output="", error=f"Command timed out after {timeout}s", metadata=meta)
 
             if proc.returncode == 0:
-                return ToolResult(success=True, output=stdout.decode(errors="ignore"), metadata=meta)
-            return ToolResult(success=False, output=stdout.decode(errors="ignore"), error=stderr.decode(errors="ignore"), metadata=meta)
+                return ToolResult(success=True, output=_cap(stdout.decode(errors="ignore")), metadata=meta)
+            return ToolResult(success=False, output=_cap(stdout.decode(errors="ignore")), error=_cap(stderr.decode(errors="ignore")), metadata=meta)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e), metadata=meta)

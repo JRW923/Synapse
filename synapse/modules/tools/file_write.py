@@ -46,9 +46,24 @@ class WriteTool:
         content = params["content"]
         meta = ToolCallMetadata(tool_name="write")
         meta.files_touched = [str(path)]
+
+        # ponytail: jail absolute paths to the workspace. Without this an agent
+        # could write anywhere on disk via an absolute path.
+        if self._workspace_root is not None:
+            try:
+                path.resolve().relative_to(self._workspace_root)
+            except ValueError:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"Write target {raw!r} is outside the workspace {self._workspace_root}",
+                    metadata=meta,
+                )
+
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            # newline="" preserves exact content (no LF->CRLF translation).
+            path.write_text(content, encoding="utf-8", newline="")
             return ToolResult(success=True, output=f"Wrote {len(content)} bytes to {path}", metadata=meta)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e), metadata=meta)
