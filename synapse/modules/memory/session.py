@@ -33,3 +33,7 @@ class SessionMemory:
 
     async def forget(self, entry_id: str) -> None:
         self._entries.pop(entry_id, None)
+
+    def clear(self) -> None:
+        """Drop all SESSION entries (used by /reset)."""
+        self._entries.clear()

@@ -1,5 +1,6 @@
 """Database tool — read-only SQLite access by default, optional write mode."""
 
+import re
 import sqlite3
 from pathlib import Path
 
@@ -13,6 +14,27 @@ from synapse.protocols.tool import (
 )
 
 _SELECT_STATEMENTS = frozenset({"SELECT", "WITH", "EXPLAIN", "PRAGMA"})
+
+#: Write verbs matched anywhere in a query, not just at the first word — a
+#: single statement can start WITH yet still mutate (WITH cte AS (...) INSERT ...).
+_WRITE_RE = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM|ATTACH|DETACH|REINDEX|TRUNCATE)\b",
+    re.IGNORECASE,
+)
+#: PRAGMA names that mutate the database file or connection state.
+_MUTATING_PRAGMAS = (
+    "journal_mode", "wal_checkpoint", "synchronous", "page_size",
+    "auto_vacuum", "cache_size", "temp_store", "locking_mode",
+    "secure_delete", "encoding", "mmap_size",
+)
+
+
+def _is_write_query(query: str) -> bool:
+    """True if *query* writes, regardless of its leading keyword."""
+    if _WRITE_RE.search(query):
+        return True
+    upper = query.upper()
+    return any(pragma.upper() in upper for pragma in _MUTATING_PRAGMAS)
 
 # Cap on returned rows so a big SELECT can't blow the context window.
 MAX_DB_ROWS = 2000
@@ -102,7 +124,9 @@ class DBTool:
 
         # --- Read-only guard ---
         statement_type = _classify_statement(query)
-        if not write and statement_type not in _SELECT_STATEMENTS:
+        if not write and (
+            statement_type not in _SELECT_STATEMENTS or _is_write_query(query)
+        ):
             return ToolResult(
                 success=False,
                 output="",

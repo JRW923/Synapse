@@ -78,9 +78,14 @@ class ProjectMemory:
     # ------------------------------------------------------------------
 
     async def store(self, entry: MemoryEntry) -> None:
-        """Persist *entry* to disk and update the index."""
+        """Persist *entry* to disk and update the index.
+
+        Idempotent per ``entry.id``: a fixed id (e.g. "run-score-log") replaces
+        the previous entry instead of appending unbounded duplicates.
+        """
         if entry.level != MemoryLevel.PROJECT:
             return
+        await self.forget(entry.id)
         self._ensure_dir()
         file_rel, file_abs = self._resolve_file(entry)
         self._append_entry(file_abs, entry)

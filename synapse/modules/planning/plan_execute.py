@@ -115,6 +115,10 @@ class PlanExecutePlanner:
                 sandbox=sandbox,
                 session=session,
                 event_bus=event_bus,
+                # Suppress the inner per-step AgentCompleted — this planner
+                # emits one aggregate event with the cumulative totals below,
+                # otherwise Efficiency metrics would double-count tokens.
+                emit_completion=False,
             )
             step_results.append(step_result)
 

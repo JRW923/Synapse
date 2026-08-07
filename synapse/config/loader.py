@@ -70,10 +70,13 @@ def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
         config.provider.provider = os.environ["SYNAPSE_PROVIDER"]
     if os.environ.get("SYNAPSE_MODEL"):
         config.provider.model = os.environ["SYNAPSE_MODEL"]
-    # provider API keys: reuse the single source of truth in schema.py
-    for env_var in _PROVIDER_ENV_VARS.values():
-        if env_var and os.environ.get(env_var):
-            config.provider.api_key = os.environ[env_var]
+    # provider API keys: only the CURRENT provider's env var applies. Looping
+    # over all providers let e.g. ANTHROPIC + GOOGLE keys both set clobber the
+    # active key arbitrarily (dict order decided the winner).
+    current = config.provider.provider
+    env_var = _PROVIDER_ENV_VARS.get(current, "")
+    if env_var and os.environ.get(env_var):
+        config.provider.api_key = os.environ[env_var]
     if os.environ.get("SYNAPSE_SANDBOX"):
         val = os.environ["SYNAPSE_SANDBOX"].lower()
         config.security.sandbox_enabled = val not in ("0", "false", "off")

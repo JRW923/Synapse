@@ -18,6 +18,7 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -117,6 +118,23 @@ class McpManager:
         """
         for config in servers:
             await self.add_server(config)
+
+    async def ensure_current_loop(self, servers: list[McpServerConfig]) -> None:
+        """Connect — or reconnect on the current event loop — every server.
+
+        MCP receiver tasks are bound to the loop that ran ``connect()``. A host
+        that ``asyncio.run()``s each task (the CLI does) gets a fresh loop per
+        run, so a client from an earlier run is stale: its streams reference a
+        closed loop and tool calls hang. Clients whose loop differs are torn
+        down and re-established on the running loop.
+        """
+        current = asyncio.get_running_loop()
+        for name in list(self._clients):
+            if self._clients[name].loop is not current:
+                await self.remove_server(name)
+        for config in servers:
+            if config.name not in self._clients:
+                await self.add_server(config)
 
     async def remove_server(self, name: str) -> None:
         """Unregister all tools belonging to *name* and disconnect its client.

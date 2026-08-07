@@ -99,3 +99,48 @@ async def test_missing_db_file(tmp_path: Path):
     })
     assert not result.success
     assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_with_insert_blocked_in_readonly(sample_db: Path, tmp_path: Path):
+    """A WITH-CTE write must not slip past the read-only guard via the WITH keyword."""
+    tool = DBTool(workspace_root=str(tmp_path))
+    result = await tool.execute({
+        "db_path": str(sample_db),
+        "query": "WITH cte AS (SELECT 1) INSERT INTO users (id, name) VALUES (9, 'X')",
+    })
+    assert not result.success
+    assert "write" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_with_select_allowed_in_readonly(sample_db: Path, tmp_path: Path):
+    """A pure WITH-CTE SELECT stays allowed."""
+    tool = DBTool(workspace_root=str(tmp_path))
+    result = await tool.execute({
+        "db_path": str(sample_db),
+        "query": "WITH cte AS (SELECT 1 AS x) SELECT * FROM cte",
+    })
+    assert result.success
+
+
+@pytest.mark.asyncio
+async def test_mutating_pragma_blocked_in_readonly(sample_db: Path, tmp_path: Path):
+    """PRAGMA journal_mode=WAL rewrites the db file — must be blocked read-only."""
+    tool = DBTool(workspace_root=str(tmp_path))
+    result = await tool.execute({
+        "db_path": str(sample_db),
+        "query": "PRAGMA journal_mode=WAL",
+    })
+    assert not result.success
+
+
+@pytest.mark.asyncio
+async def test_readonly_pragma_allowed_in_readonly(sample_db: Path, tmp_path: Path):
+    """PRAGMA table_info is genuinely read-only and stays allowed."""
+    tool = DBTool(workspace_root=str(tmp_path))
+    result = await tool.execute({
+        "db_path": str(sample_db),
+        "query": "PRAGMA table_info(users)",
+    })
+    assert result.success

@@ -107,7 +107,7 @@ class ReActPlanner:
                  max_thrashing_events: int = 2,
                  max_tokens_per_task: int = 200_000,
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
-                 tool_timeout_seconds: int = 120,
+                 tool_timeout_seconds: int = 120, llm_timeout_seconds: int = 120,
                  max_tool_result_chars: int = 16_000,
         verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
@@ -120,6 +120,7 @@ class ReActPlanner:
         self._confirm = confirm_callback  # async callable: (AuthRequest) -> bool
         self.total_timeout_seconds = total_timeout_seconds
         self.tool_timeout_seconds = tool_timeout_seconds
+        self.llm_timeout_seconds = llm_timeout_seconds
         self.max_tool_result_chars = max_tool_result_chars
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
@@ -292,8 +293,12 @@ class ReActPlanner:
                     ))
         return repaired
 
-    async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
+    async def execute(self, task, context, tools, llm, sandbox, session, event_bus,
+                      emit_completion: bool = True) -> AgentResult:
         self._event_bus = event_bus
+        # The planner is a container singleton; a cancellation from a previous
+        # run must not poison this one (sticky-cancel bug).
+        self._cancel_requested = False
         start_time = time.time()
         metrics = ExecutionMetrics()
         # s13 — let the shared background manager emit results on this run's bus.
@@ -372,9 +377,12 @@ class ReActPlanner:
             max_llm_retries = 3
             for attempt in range(max_llm_retries + 1):  # 1 initial + 3 retries = 4 total
                 try:
-                    response = await self._call_llm(
-                        llm, messages, tool_schemas if tool_schemas else None,
-                        event_bus, session.id,
+                    response = await asyncio.wait_for(
+                        self._call_llm(
+                            llm, messages, tool_schemas if tool_schemas else None,
+                            event_bus, session.id,
+                        ),
+                        timeout=self.llm_timeout_seconds,
                     )
                     break
                 except Exception as e:
@@ -445,9 +453,32 @@ class ReActPlanner:
                 final_output = response.content
                 break
 
-            # Execute each tool call
-            self._log(f"Executing {len(response.tool_calls)} tool(s): "
-                      f"{[tc['name'] + '(' + str(list(tc['input'].keys())) + ')' for tc in response.tool_calls]}")
+            # Execute each tool call. Normalize + drop malformed calls so a
+            # missing 'name'/'input' (providers vary) can't KeyError the whole
+            # task. Kept in try/except inside the loop too, belt-and-braces.
+            valid_calls: list[dict] = []
+            for tc in response.tool_calls:
+                if not isinstance(tc, dict) or not tc.get("name"):
+                    self._log(f"Skipping malformed tool call: {tc!r}")
+                    continue
+                tool_input = tc.get("input") or {}
+                if not isinstance(tool_input, dict):
+                    self._log(f"Non-dict input for {tc['name']}: {tool_input!r} — using empty dict")
+                    tool_input = {}
+                tc["input"] = tool_input
+                valid_calls.append(tc)
+            response.tool_calls = valid_calls
+
+            if not valid_calls:
+                # No usable call — feed an error back so the LLM can correct.
+                result = _error_tool_result("<malformed>", "LLM returned no valid tool calls — try again")
+                messages.append(Message(
+                    role="tool", content=f"Error: {result.error}", tool_call_id="__malformed__",
+                ))
+                continue
+
+            self._log(f"Executing {len(valid_calls)} tool(s): "
+                      f"{[tc['name'] + '(' + str(list(tc['input'].keys())) + ')' for tc in valid_calls]}")
             tool_results.clear()
 
             # Kick off the read-only calls concurrently. The loop below is
@@ -455,11 +486,15 @@ class ReActPlanner:
             # task instead of starting one, so authorization, event order,
             # thrashing detection and metrics all keep their exact semantics.
             prefetched = await self._prefetch_readonly(
-                response.tool_calls, tools, sandbox,
+                valid_calls, tools, sandbox,
             )
-            for tc in response.tool_calls:
-                tool_name = tc["name"]
-                tool_input = tc["input"]
+            for tc in valid_calls:
+                try:
+                    tool_name = tc["name"]
+                    tool_input = tc["input"]
+                except KeyError:
+                    self._log(f"Skipping tool call missing name/input: {tc!r}")
+                    continue
                 # Emit event
                 await event_bus.emit(ToolCallStarted(
                     session_id=session.id, tool_name=tool_name, tool_params=tool_input,
@@ -545,9 +580,10 @@ class ReActPlanner:
                     metrics.tool_call_count += 1
                     if result.success:
                         metrics.tool_success_count += 1
-                        # Surface successful writes so out-of-workspace access can
-                        # be detected by SecurityMetrics (SafetyMetrics.file_written).
-                        if tool_name == "write":
+                        # Surface successful file modifications so out-of-workspace
+                        # access is caught by SecurityMetrics. `edit` writes too —
+                        # only emitting for `write` left edit-blind safety metrics.
+                        if tool_name in ("write", "edit"):
                             await event_bus.emit(FileWritten(
                                 session_id=session.id,
                                 path=tool_input.get("path", ""),
@@ -629,13 +665,17 @@ class ReActPlanner:
         # Repair before persisting — prevents broken tool chains from being saved.
         session.messages = self._repair_session(messages)
 
-        await event_bus.emit(AgentCompleted(
-            session_id=session.id,
-            status=result_status.value,
-            total_tokens=metrics.tokens_input + metrics.tokens_output,
-            tool_calls=metrics.tool_call_count,
-            duration_ms=metrics.duration_ms,
-        ))
+        # Nested planners (plan_execute) suppress the inner completion so the
+        # aggregate event is emitted once with the cumulative totals — otherwise
+        # Efficiency metrics double-count tokens.
+        if emit_completion:
+            await event_bus.emit(AgentCompleted(
+                session_id=session.id,
+                status=result_status.value,
+                total_tokens=metrics.tokens_input + metrics.tokens_output,
+                tool_calls=metrics.tool_call_count,
+                duration_ms=metrics.duration_ms,
+            ))
         return AgentResult(
             status=result_status,
             output=final_output,

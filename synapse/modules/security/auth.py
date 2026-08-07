@@ -1,9 +1,19 @@
 """Action-Time Authorization — evaluates tool calls before execution."""
 
+import re
 from collections.abc import Callable, Awaitable
 from pathlib import Path
 from synapse.protocols.tool import RiskLevel
 from synapse.protocols.sandbox import AuthRequest, AuthDecision
+
+#: Split points for shell chains so `a && b` / `a | b` validate every segment.
+_SHELL_CONTROL = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
+#: Redirect operators with their target. The `[^0-9&]` guard skips fd forms
+#: like `2>&1` and `2>>log` so only path redirects are checked.
+_REDIRECT_RE = re.compile(r"(?:^|[^0-9&])(>>|>|<)\s*([^\s;&|]+)")
+_SAFE_REDIRECT_TARGETS = {
+    "/dev/null", "/dev/tty", "/dev/stdin", "/dev/stdout", "/dev/stderr",
+}
 
 #: Callback signature for interactive confirmation.
 #: Receives the AuthRequest, returns True if user approves.
@@ -126,17 +136,32 @@ class ActionAuthorizer:
                     allowed=False,
                     reason=f"Command matches dangerous pattern: '{matched}'",
                 )
+            # cat /etc/shadow / rm ~/.ssh/id_rsa — sensitive paths via shell.
+            sensitive = self._sensitive_touched(command)
+            if sensitive:
+                return AuthDecision(
+                    allowed=True,
+                    reason=f"Command touches sensitive path: '{sensitive}' — confirmation required",
+                    requires_confirmation=True,
+                )
+            # echo hi > /etc/cron.d/y — redirection outside the workspace.
+            bad_redirect = self._unsafe_redirection(command)
+            if bad_redirect:
+                return AuthDecision(
+                    allowed=False,
+                    reason=f"Command redirects to unsafe target: '{bad_redirect}'",
+                )
             if not self._is_allowlisted(command):
                 return AuthDecision(
                     allowed=False,
-                    reason=f"Command not in allowlist: {command.split()[0] if command else ''}",
+                    reason=f"Command not in allowlist: {self._first_token(command)}",
                 )
             # ponytail: commands that can chain arbitrary code/network access are
             # allowed only after explicit user confirmation, never silent.
             if self._requires_confirmation(command):
                 return AuthDecision(
                     allowed=True,
-                    reason=f"Command '{command.split()[0]}' can spawn code/network — confirmation required",
+                    reason=f"Command '{self._first_token(command)}' can spawn code/network — confirmation required",
                     requires_confirmation=True,
                 )
             return AuthDecision(
@@ -200,15 +225,70 @@ class ActionAuthorizer:
                 return True
         return False
 
+    @staticmethod
+    def _split_shell(command: str) -> list[str]:
+        """Split on shell control operators so a chain can't hide behind an
+        allowlisted first token. ponytail: quoting (echo "a&&b") is not
+        parsed — this is a best-effort gate, not a shell grammar."""
+        return [seg for seg in _SHELL_CONTROL.split(command) if seg.strip()]
+
+    @staticmethod
+    def _first_token(command: str) -> str:
+        tokens = command.strip().split()
+        return tokens[0] if tokens else ""
+
     def _is_dangerous(self, command: str) -> str | None:
         """Return the first dangerous pattern matched by *command*, else None.
 
-        L.5 — naming the matched pattern (not just "dangerous") makes the
-        denial reason self-explanatory to both the agent and the user.
+        Case-insensitive so `RM -RF /` can't dodge `rm -rf /`. L.5 — naming
+        the matched pattern makes the denial reason self-explanatory.
         """
+        lower = command.lower()
         for pattern in self.DANGEROUS_PATTERNS:
-            if pattern in command:
+            if pattern.lower() in lower:
                 return pattern
+        return None
+
+    def _sensitive_touched(self, command: str) -> str | None:
+        """Return the first sensitive path name referenced by *command*, else None."""
+        lower = command.lower()
+        for sensitive in self.SENSITIVE_PATHS:
+            if sensitive.lower() in lower:
+                return sensitive
+        return None
+
+    @staticmethod
+    def _is_rooted(path_str: str) -> bool:
+        """True for `/etc/x`, `~/x`, `\\server\\x`, `C:/x` — anything that
+        references the filesystem root rather than a child of the cwd.
+
+        is_absolute() is not used because on Windows `/etc/cron.d/y` resolves
+        to a drive path but is_absolute() still returns False.
+        """
+        if path_str.startswith(("/", "\\", "~")):
+            return True
+        return len(path_str) >= 2 and path_str[1] == ":"
+
+    def _unsafe_redirection(self, command: str) -> str | None:
+        """Return a redirect target that escapes the workspace (or a sensitive
+        path), else None. e.g. `echo hi > /etc/cron.d/y`."""
+        for _op, target in _REDIRECT_RE.findall(command):
+            target = target.strip("'\"")
+            if target.startswith("&"):
+                continue  # fd redirect like 2>&1
+            if target in _SAFE_REDIRECT_TARGETS:
+                continue
+            if ".." in target:
+                return target
+            if self._is_sensitive(target):
+                return target
+            if self._is_rooted(target):
+                expanded = Path(target).expanduser()
+                try:
+                    if not expanded.resolve().is_relative_to(self.workspace_root):
+                        return target
+                except (ValueError, OSError):
+                    return target
         return None
 
     def _is_sensitive(self, path_str: str) -> bool:
@@ -218,15 +298,20 @@ class ActionAuthorizer:
         )
 
     def _is_allowlisted(self, command: str) -> bool:
-        if not command.strip():
+        segments = self._split_shell(command)
+        if not segments:
             return False
-        # ponytail: only the FIRST token is gated. The old `any(word in ...)`
-        # let `evil && ls` through because `ls` matched somewhere in the string.
-        first = command.strip().split()[0]
-        return first in self.ALWAYS_ALLOWED_COMMANDS
+        # CONFIRM_REQUIRED commands (python/curl/wget) are allowed but gated by
+        # the confirmation branch; without them here `python x.py` would be
+        # denied as "not in allowlist" before confirmation was ever offered.
+        allowed = set(self.ALWAYS_ALLOWED_COMMANDS) | set(self.CONFIRM_REQUIRED_COMMANDS)
+        return all(
+            self._first_token(seg) in allowed
+            for seg in segments
+        )
 
     def _requires_confirmation(self, command: str) -> bool:
-        if not command.strip():
-            return False
-        first = command.strip().split()[0]
-        return first in self.CONFIRM_REQUIRED_COMMANDS
+        return any(
+            self._first_token(seg) in self.CONFIRM_REQUIRED_COMMANDS
+            for seg in self._split_shell(command)
+        )

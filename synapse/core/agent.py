@@ -257,18 +257,34 @@ class Agent:
         )
 
     async def _persist_memory(self, session: Session, task: str, result: AgentResult) -> None:
-        """Store task summary as session memory."""
+        """Store task summary as session memory (and semantic memory when available)."""
         import uuid
         from datetime import datetime
 
+        content = f"Task: {task}\nResult ({result.status.value}): {result.output[:500]}"
+        meta = MemoryMetadata(
+            timestamp=datetime.now(),
+            tags=["task-result", result.status.value],
+            source_task=task,
+        )
         entry = MemoryEntry(
             id=str(uuid.uuid4()),
-            content=f"Task: {task}\nResult ({result.status.value}): {result.output[:500]}",
+            content=content,
             level=MemoryLevel.SESSION,
-            metadata=MemoryMetadata(
-                timestamp=datetime.now(),
-                tags=["task-result", result.status.value],
-                source_task=task,
-            ),
+            metadata=meta,
         )
         await self.memory.store(entry)
+
+        # SEMANTIC layer is optional (chromadb/qdrant). Write the same summary
+        # so later tasks can retrieve it by similarity; a missing/erroring
+        # backend must never break task completion.
+        try:
+            semantic_entry = MemoryEntry(
+                id=str(uuid.uuid4()),
+                content=content,
+                level=MemoryLevel.SEMANTIC,
+                metadata=meta,
+            )
+            await self.memory.store(semantic_entry)
+        except Exception:
+            pass

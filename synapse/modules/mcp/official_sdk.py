@@ -7,6 +7,7 @@ Supports two transport modes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -52,6 +53,10 @@ class OfficialSdkMcpClient:
         # Async context manager for the session (its __aenter__ starts the
         # message-pump task — without it initialize() would hang forever).
         self._session_ctx: Any = None
+        # Event loop the connection is bound to. MCP receiver tasks live on it;
+        # a host that asyncio.run()s each task gets a fresh loop per run, so the
+        # manager uses this to detect a stale connection and reconnect.
+        self._loop: Any = None
 
     # ------------------------------------------------------------------
     # McpClient Protocol
@@ -61,6 +66,11 @@ class OfficialSdkMcpClient:
     def connected(self) -> bool:
         """Whether the client is currently connected to an MCP server."""
         return self._connected
+
+    @property
+    def loop(self) -> Any:
+        """The event loop this connection was established on, or None."""
+        return self._loop
 
     async def connect(self, config: McpServerConfig) -> None:
         """Establish a connection to an MCP server.
@@ -97,6 +107,7 @@ class OfficialSdkMcpClient:
         await self._session.initialize()
         self._connected = True
         self._config = config
+        self._loop = asyncio.get_running_loop()
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """Return the list of tools exposed by the MCP server.

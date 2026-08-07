@@ -164,3 +164,53 @@ def test_enable_external_tools_flag_also_allows_auth():
         enable_external_tools=True,
     )
     assert on._container.resolve(ActionAuthorizer).allow_external is True
+
+
+def _shell_req(command):
+    auth = ActionAuthorizer(workspace_root="/project")
+    return auth, auth.create_request("shell", {"command": command}, RiskLevel.EXECUTE, "s1")
+
+
+def test_shell_chain_validates_every_segment():
+    """`a && b` must not hide a disallowed/confirm-required command behind an
+    allowlisted first token."""
+    auth, req = _shell_req("git status && mysqldump --all-databases")
+    assert not auth.authorize(req).allowed
+
+
+def test_shell_chain_confirm_required_in_tail():
+    """A python segment anywhere in the chain forces confirmation."""
+    auth, req = _shell_req("git status && python run_tests.py")
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert decision.requires_confirmation
+
+
+def test_shell_pipe_into_python_confirmation():
+    auth, req = _shell_req("echo hi | python -c 'print(1)'")
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert decision.requires_confirmation
+
+
+def test_shell_sensitive_read_requires_confirmation():
+    """cat /etc/shadow via an allowlisted command must not be silent."""
+    auth, req = _shell_req("cat /etc/shadow")
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert decision.requires_confirmation
+
+
+def test_shell_case_insensitive_dangerous():
+    auth, req = _shell_req("RM -RF /")
+    assert not auth.authorize(req).allowed
+
+
+def test_shell_redirection_outside_workspace_denied():
+    auth, req = _shell_req("echo hi > /etc/cron.d/y")
+    assert not auth.authorize(req).allowed
+
+
+def test_shell_redirection_relative_ok():
+    auth, req = _shell_req("echo hi > out.txt")
+    assert auth.authorize(req).allowed

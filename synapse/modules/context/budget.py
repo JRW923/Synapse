@@ -103,9 +103,11 @@ class BudgetHistory:
             try:
                 from synapse.protocols.memory import MemoryEntry, MemoryMetadata, MemoryLevel
                 from datetime import datetime
-                import uuid
+                # Fixed id per task type so ProjectMemory.store replaces the
+                # previous snapshot instead of appending one file per run
+                # (the store is idempotent by id).
                 entry = MemoryEntry(
-                    id=str(uuid.uuid4()),
+                    id=f"budget_history_{task_type.value}",
                     content=f"budget_history {task_type.value}: {stats}",
                     level=MemoryLevel.PROJECT,
                     metadata=MemoryMetadata(

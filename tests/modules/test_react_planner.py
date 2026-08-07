@@ -133,18 +133,9 @@ async def test_react_hits_max_iterations():
 
 
 @pytest.mark.asyncio
-async def test_react_cancels_and_persists_progress():
-    """request_cancel() stops the loop at the next boundary (PARTIAL) and
-    writes the in-progress messages back to the session so it can be saved."""
-    # LLM would loop forever issuing tool calls; cancellation must win.
-    mock_llm = AsyncMock()
-    mock_llm.chat.return_value = LLMResponse(
-        content="",
-        tool_calls=[{"id": "t1", "name": "read", "input": {"path": "/test.txt"}}],
-        stop_reason="tool_use",
-        usage={"input": 5, "output": 2},
-    )
-
+def _cancel_llm_fixtures():
+    """Shared AsyncMock llm/tools for loop tests (stream() raises TypeError so
+    the loop falls back to chat(), which is what we drive)."""
     mock_tool = AsyncMock()
     mock_tool.execute.return_value = ToolResult(
         success=True, output="ok",
@@ -153,30 +144,129 @@ async def test_react_cancels_and_persists_progress():
     mock_tools = AsyncMock()
     mock_tools.get.return_value = mock_tool
     mock_tools.get_schemas.return_value = [{"name": "read", "description": "Read", "input_schema": {}}]
+    return mock_tool, mock_tools
 
-    mock_sandbox = AsyncMock()
-    event_bus = EventBus()
 
+@pytest.mark.asyncio
+async def test_react_cancels_and_persists_progress():
+    """A cancel requested mid-run stops the loop at the next boundary (PARTIAL)
+    and writes the in-progress messages back so the session can be saved."""
+    mock_tool, mock_tools = _cancel_llm_fixtures()
+    mock_llm = AsyncMock()
+    calls = {"n": 0}
     planner = ReActPlanner(max_iterations=50)
+
+    def llm_side_effect(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            planner.request_cancel()  # cancel during iteration 2
+        return LLMResponse(
+            content="",
+            tool_calls=[{"id": "t1", "name": "read", "input": {"path": "/test.txt"}}],
+            stop_reason="tool_use",
+            usage={"input": 5, "output": 2},
+        )
+
+    mock_llm.chat.side_effect = llm_side_effect
     session = Session()
-    planner.request_cancel()  # simulate Ctrl+C before/at start
 
     result = await planner.execute(
         task="long running task",
         context=Context(),
         tools=mock_tools,
         llm=mock_llm,
-        sandbox=mock_sandbox,
+        sandbox=AsyncMock(),
         session=session,
-        event_bus=event_bus,
+        event_bus=EventBus(),
     )
 
     assert result.status.value == "partial"
     assert "中断" in result.output
-    # LLM must never be called — cancellation checked before the first LLM call.
-    assert mock_llm.chat.call_count == 0
+    # The loop did run, then stopped at the next boundary after the cancel.
+    assert mock_llm.chat.call_count >= 1
     # Progress (the user task message) is written back for the caller to save.
     assert any(m.role == "user" for m in session.messages)
+
+
+@pytest.mark.asyncio
+async def test_react_stale_cancel_cleared():
+    """A cancel flag left over from a previous run must not poison the next
+    run on the same singleton planner (sticky-cancel fix)."""
+    mock_tool, mock_tools = _cancel_llm_fixtures()
+    mock_llm = AsyncMock()
+    mock_llm.chat.side_effect = [
+        LLMResponse(content="", tool_calls=[{"id": "t1", "name": "read", "input": {"path": "/a"}}],
+                    stop_reason="tool_use", usage={"input": 5, "output": 2}),
+        LLMResponse(content="", tool_calls=[{"id": "t2", "name": "read", "input": {"path": "/b"}}],
+                    stop_reason="tool_use", usage={"input": 5, "output": 2}),
+        LLMResponse(content="Done", tool_calls=[], stop_reason="end_turn", usage={"input": 5, "output": 2}),
+    ]
+    planner = ReActPlanner(max_iterations=50)
+    session = Session()
+    planner.request_cancel()  # stale flag from a hypothetical previous run
+
+    result = await planner.execute(
+        task="t", context=Context(), tools=mock_tools, llm=mock_llm,
+        sandbox=AsyncMock(), session=session, event_bus=EventBus(),
+    )
+
+    assert result.status.value == "success"  # stale cancel ignored, run completes
+    assert mock_llm.chat.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_react_malformed_tool_call_skipped():
+    """A tool call missing 'name' (or with non-dict input) must not KeyError
+    the whole task — it's filtered out and the valid one still runs."""
+    mock_tool, mock_tools = _cancel_llm_fixtures()
+    mock_llm = AsyncMock()
+    mock_llm.chat.side_effect = [
+        LLMResponse(content="", tool_calls=[
+            {"id": "t1", "name": "read", "input": {"path": "/a"}},
+            {"id": "t2", "input": "not a dict"},  # malformed: no name, str input
+        ], stop_reason="tool_use", usage={"input": 5, "output": 2}),
+        LLMResponse(content="Done", tool_calls=[], stop_reason="end_turn", usage={"input": 5, "output": 2}),
+    ]
+    planner = ReActPlanner(max_iterations=50)
+    session = Session()
+    result = await planner.execute(
+        task="t", context=Context(), tools=mock_tools, llm=mock_llm,
+        sandbox=AsyncMock(), session=session, event_bus=EventBus(),
+    )
+    assert result.status.value == "success"
+    # t1 ran; the malformed t2 was skipped without crashing.
+    assert mock_tool.execute.await_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_react_llm_call_times_out(monkeypatch):
+    """A hanging LLM call must be bounded by wait_for and fail the task after
+    retries — previously it blocked the loop forever."""
+    import asyncio as _asyncio
+
+    async def _fast_sleep(delay):
+        return None
+
+    monkeypatch.setattr(_asyncio, "sleep", _fast_sleep)
+
+    mock_tool, mock_tools = _cancel_llm_fixtures()
+    mock_llm = AsyncMock()
+
+    async def _hang(*args, **kwargs):
+        # Never completes; wait_for must cancel it. Not sleep(), since the
+        # monkeypatched fast backoff above would make it return immediately.
+        await _asyncio.Event().wait()
+
+    mock_llm.chat.side_effect = _hang
+
+    planner = ReActPlanner(max_iterations=3, llm_timeout_seconds=0.05)
+    session = Session()
+    result = await planner.execute(
+        task="t", context=Context(), tools=mock_tools, llm=mock_llm,
+        sandbox=AsyncMock(), session=session, event_bus=EventBus(),
+    )
+    assert result.status.value == "failed"
+    assert "LLM API call failed" in result.output
 
 
 @pytest.mark.asyncio

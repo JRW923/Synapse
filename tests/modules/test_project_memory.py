@@ -86,3 +86,24 @@ async def test_memory_directory_auto_created(tmp_path):
     # Directory should now exist
     assert mem._base_path.exists()
     assert mem._base_path.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_store_is_idempotent_by_id(tmp_path):
+    """Storing the same id twice replaces the entry instead of duplicating it
+    (this is what keeps budget_history / run-score-log from leaking a file
+    per task)."""
+    mem = ProjectMemory(base_path=tmp_path / ".synapse" / "memory")
+
+    for content in ("version 1", "version 2"):
+        entry = MemoryEntry(
+            id="run-score-log",
+            content=content,
+            level=MemoryLevel.PROJECT,
+            metadata=MemoryMetadata(tags=["run_score"], priority=3),
+        )
+        await mem.store(entry)
+
+    results = await mem.retrieve("version", MemoryLevel.PROJECT, top_k=50)
+    assert len(results) == 1
+    assert "version 2" in results[0].content

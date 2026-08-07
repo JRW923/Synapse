@@ -65,6 +65,12 @@ class McpToolWrapper:
         try:
             result = await self._client.call_tool(self._tool_name, params)
             output = self._extract_content(result)
+            # The MCP protocol marks tool errors with isError; without this an
+            # errored server response would be reported as a success.
+            if result.get("isError"):
+                return ToolResult(
+                    success=False, output="", error=output or "MCP tool returned an error", metadata=meta,
+                )
             return ToolResult(success=True, output=output, metadata=meta)
         except Exception as e:
             return ToolResult(success=False, output="", error=str(e), metadata=meta)

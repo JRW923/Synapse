@@ -70,8 +70,11 @@ if sys.platform == "win32":
             _ctypes.windll.kernel32.ExitProcess(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        _os.write(2, b"\n  Press Ctrl+C again to exit.\n")
-        return 1  # TRUE — suppress OS prompt.
+        _os.write(2, b"\n  Press Ctrl+C again to force exit.\n")
+        # FALSE — let Python's SIGINT machinery run so the per-task handler
+        # (request_cancel) fires. Returning TRUE swallowed the event, so a
+        # single Ctrl+C never cancelled a task on Windows.
+        return 0
 
     _ctypes.windll.kernel32.SetConsoleCtrlHandler(_win_ctrl_handler, 1)
 else:
@@ -849,18 +852,21 @@ def main():
 
     if args.command == "run":
         task = " ".join(args.task)
-        config, _ = load_config()
+        try:
+            config, _ = load_config()
+        except Exception as exc:
+            print(_friendly_error(exc))
+            return
         _check_api_key(config)
 
         from synapse.adapters.library import Synapse
 
         kwargs: dict[str, object] = {
-            "provider": args.provider or "anthropic",
+            "provider": args.provider or config.provider.provider,
+            "model": args.model or config.provider.model,
             "memory_backend": args.memory_backend,
             "enable_external_tools": args.enable_external_tools,
         }
-        if args.model:
-            kwargs["model"] = args.model
         if args.mode:
             kwargs["mode"] = args.mode
 
@@ -904,163 +910,13 @@ def main():
         return
 
     if args.command == "chat":
-        config, _ = load_config()
-        if args.provider:
-            config.provider.provider = args.provider
-        if args.model:
-            config.provider.model = args.model
-        if args.mode:
-            config.planning.mode = args.mode
-
-        from synapse.adapters.library import Synapse
-
-        # Mutable holder so the confirm callback can pause/resume the current spinner
-        status_holder: list = []
-
-        synapse = Synapse(
-            provider=config.provider.provider,
-            model=config.provider.model,
-            config_path=None,
-            memory_backend=args.memory_backend,
-            enable_external_tools=args.enable_external_tools,
-            confirm_callback=_make_confirm_callback(status_holder=status_holder),
-        )
-
+        # chat is the same REPL as the default interface — delegate rather than
+        # maintain a second, degraded copy (no completion/history/commands).
         try:
-            from rich.console import Console
-            from rich.markdown import Markdown
-            from rich.status import Status
-            console = Console()
-            use_rich = True
-        except ImportError:
-            console = None
-            use_rich = False
-
-        async def _chat():
-            from synapse.core.session import Session
-            session = _resolve_session(args.resume)
-            welcome = (
-                f"Synapse Chat [{config.provider.provider}/{config.provider.model}]"
-            )
-            if use_rich:
-                console.print(f"[bold cyan]{welcome}[/bold cyan]")
-                console.print("[dim]Type your task or question. /exit to quit, /clear to reset.[/dim]\n")
-            else:
-                print(welcome)
-                print("Type your task or question. /exit to quit, /clear to reset.\n")
-
-            while True:
-                try:
-                    if use_rich:
-                        user_input = console.input("[bold green]> [/bold green]")
-                    else:
-                        user_input = input("> ")
-                except (EOFError, KeyboardInterrupt):
-                    print("\nGoodbye.")
-                    break
-
-                user_input = user_input.strip()
-                if not user_input:
-                    continue
-
-                if user_input.lower() in ("/exit", "/quit"):
-                    print("Goodbye.")
-                    break
-
-                if user_input.lower() == "/clear":
-                    session = Session()
-                    if use_rich:
-                        console.print("[dim]Session cleared.[/dim]\n")
-                    else:
-                        print("Session cleared.\n")
-                    continue
-
-                if user_input.lower() == "/sessions":
-                    from synapse.core.session import Session as _S
-                    sessions = _S.list_sessions()
-                    msg = "No saved sessions." if not sessions else (
-                        "Saved sessions:\n" + "\n".join(
-                            f"  {s.id}  ({len(s.messages)} msgs)" for s in sessions[:10]
-                        )
-                    )
-                    if use_rich:
-                        console.print(f"[dim]{msg}[/dim]")
-                    else:
-                        print(msg)
-                    continue
-
-                if user_input.lower().startswith("/resume"):
-                    arg = user_input[len("/resume"):].strip() or "__latest__"
-                    session = _resolve_session(arg)
-                    note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
-                    if use_rich:
-                        console.print(f"[dim]{note}[/dim]")
-                    else:
-                        print(note)
-                    continue
-
-                if use_rich:
-                    status = console.status("[dim]Working...[/dim]", spinner="dots")
-                    status.start()
-
-                    # Let confirm callback pause/resume this spinner
-                    status_holder[:] = [status]
-
-                    # Subscribe to tool call events to update spinner text
-                    event_bus = synapse._container.resolve(EventBus)
-                    if event_bus is not None:
-                        async def _on_progress(event):
-                            status.update(f"[dim]{event.message}[/dim]")
-
-                        async def _on_tool_started(event):
-                            status.update(
-                                f"[dim]Executing {event.tool_name}({_summarize_params(event.tool_params)})...[/dim]"
-                            )
-
-                        async def _on_tool_completed(event):
-                            icon = "[OK]" if event.success else "[FAIL]"
-                            status.update(f"[dim]Tool {event.tool_name} {icon} ({event.duration_ms}ms)[/dim]")
-
-                        event_bus.subscribe("agent_progress", _on_progress)
-                        event_bus.subscribe("tool_call_started", _on_tool_started)
-                        event_bus.subscribe("tool_call_completed", _on_tool_completed)
-                else:
-                    print("Working...")
-
-                prev_handler = _install_cancel_handler(synapse)
-                try:
-                    try:
-                        result = await synapse.run(user_input, session=session)
-                    except KeyboardInterrupt:
-                        # Safety net when the active planner has no request_cancel.
-                        try:
-                            session.save()
-                        except Exception:
-                            pass
-                        console.print("[yellow]⚠ 已中断，当前进度已保存。[/yellow]")
-                        continue
-                except Exception as exc:
-                    if use_rich:
-                        status.stop()
-                        console.print(f"[bold red]{_friendly_error(exc)}[/bold red]")
-                    else:
-                        print(_friendly_error(exc))
-                    continue
-                finally:
-                    _restore_cancel_handler(prev_handler)
-                    if use_rich:
-                        status.stop()
-                        status_holder[:] = []  # clear holder
-                        # Unsubscribe event handlers
-                        event_bus.unsubscribe("agent_progress", _on_progress)
-                        event_bus.unsubscribe("tool_call_started", _on_tool_started)
-                        event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
-
-                _print_result(console, result, use_rich)
-                session.save()
-
-        try:
-            asyncio.run(_chat())
+            asyncio.run(_main_interface(
+                args.config, getattr(args, "resume", None),
+                args.provider, args.model, args.mode,
+            ))
         except KeyboardInterrupt:
             pass
         return
@@ -1071,8 +927,19 @@ def main():
         from synapse.adapters.library import Synapse
         from synapse.adapters.server import create_app
 
+        try:
+            config, _ = load_config()
+        except Exception as exc:
+            print(_friendly_error(exc))
+            return
+        if args.provider:
+            config.provider.provider = args.provider
+        if args.model:
+            config.provider.model = args.model
+
         synapse = Synapse(
-            provider="anthropic",
+            provider=config.provider.provider,
+            model=config.provider.model,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
         )
@@ -1100,7 +967,10 @@ def main():
 
     # No subcommand — launch main interface
     try:
-        asyncio.run(_main_interface(args.config, getattr(args, "resume", None)))
+        asyncio.run(_main_interface(
+            args.config, getattr(args, "resume", None),
+            args.provider, args.model, args.mode,
+        ))
     except KeyboardInterrupt:
         pass
 
@@ -1108,16 +978,22 @@ def main():
 # ---- Slash-command autocomplete ------------------------------------------
 
 #: (command, description) shown in the completion menu, in display order.
+#: Keep in sync with _show_help and the handlers in _main_interface.
 _SLASH_COMMANDS: tuple = (
     ("/help",            "Show this help"),
     ("/memory",          "View working memory"),
     ("/session",         "Show session path"),
+    ("/sessions",        "List saved sessions"),
+    ("/resume",          "Resume a saved session (default: latest)"),
     ("/reset",           "Clear session state"),
+    ("/clear",           "Alias for /reset"),
     ("/model",           "Show or switch model"),
     ("/provider",        "Show or switch provider"),
     ("/mode",            "Switch planning mode"),
     ("/tools",           "List available tools"),
     ("/context-report",  "Context block citation heatmap"),
+    ("/score",           "Show runtime score + process hint"),
+    ("/todos",           "Show the current todo list"),
     ("/exit",            "Exit"),
     ("/quit",            "Exit"),
 )
@@ -1372,7 +1248,9 @@ def _show_help(console):
     t.add_row("  /help", "Show this help")
     t.add_row("  /memory", "View working memory")
     t.add_row("  /session", "Show session path")
-    t.add_row("  /reset", "Clear session state")
+    t.add_row("  /sessions", "List saved sessions")
+    t.add_row("  /resume [id]", "Resume a saved session (default: latest)")
+    t.add_row("  /reset, /clear", "Clear session state")
     t.add_row("  /model [name|num]", "Show or switch model (number for quick select)")
     t.add_row("  /provider [name]", "Show or switch provider")
     t.add_row("  /mode [name]", "Planning mode (react / plan_execute / hierarchical / swarm)")
@@ -1613,12 +1491,12 @@ def _available_models(config):
     return avail, unavail
 
 
-def _pick_model(console, entries) -> int | None:
+def _pick_model(console, entries, initial: int = 0) -> int | None:
     """Interactive arrow-key selector using Rich Live display. Returns index or None."""
     n = len(entries)
     if n == 0:
         return None
-    idx = 0
+    idx = max(0, min(initial, n - 1))
     from rich.text import Text
     from rich.live import Live
 
@@ -1705,12 +1583,14 @@ def _first_run_wizard(console, config) -> None:
     out_dir = Path.home() / ".synapse"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "config.yaml"
+    import yaml
     out_path.write_text(
-        f"# Synapse config — auto-generated by first-run wizard\n"
-        f"provider:\n"
-        f"  provider: {provider}\n"
-        f"  model: {model}\n"
-        f"  api_key: \"{api_key}\"\n",
+        "# Synapse config — auto-generated by first-run wizard\n"
+        + yaml.safe_dump(
+            {"provider": {"provider": provider, "model": model, "api_key": api_key}},
+            allow_unicode=True,
+            sort_keys=False,
+        ),
         encoding="utf-8",
     )
     console.print(f"\n  [green]Config written to {out_path}[/green]")
@@ -1827,10 +1707,25 @@ def _write_launcher(path: Path, content: str, executable: bool = False) -> None:
         path.chmod(0o755)
 
 
-async def _main_interface(config_path: str | None = None, resume: str | None = None):
-    """Launch the main Synapse interface (synapse with no subcommand)."""
+async def _main_interface(config_path: str | None = None, resume: str | None = None,
+                          provider: str | None = None, model: str | None = None,
+                          mode: str | None = None):
+    """Launch the main Synapse interface (synapse with no subcommand).
+
+    ``chat`` delegates here (it is the same REPL, not a degraded copy).
+    """
     global _ctrl_c_pressed
-    config, config_source = load_config(config_path)
+    try:
+        config, config_source = load_config(config_path)
+    except Exception as exc:
+        print(_friendly_error(exc))
+        return
+    if provider:
+        config.provider.provider = provider
+    if model:
+        config.provider.model = model
+    if mode:
+        config.planning.mode = mode
     provider = config.provider.provider
     model = config.provider.model
 
@@ -1855,7 +1750,11 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         else:
             _first_run_wizard_plain(config)
         # Reload config after wizard writes it.
-        config, config_source = load_config(config_path)
+        try:
+            config, config_source = load_config(config_path)
+        except Exception as exc:
+            print(_friendly_error(exc))
+            return
         provider = config.provider.provider
         model = config.provider.model
 
@@ -1946,6 +1845,13 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 _show_help(console)
             elif cmd in ("/reset", "/clear"):
                 session = Session()
+                # SESSION memory outlives the Session object — clear it too so
+                # prior tasks' summaries don't leak into the next task.
+                if _synapse is not None:
+                    try:
+                        getattr(_synapse, "clear_session_memory", lambda: None)()
+                    except Exception:
+                        pass
                 if use_rich:
                     console.print("[dim]Session cleared.[/dim]")
                 else:
@@ -2048,7 +1954,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                             label += " [dim](current)[/dim]"
                             cur_idx = i
                         pick_entries.append((label, (e.provider, e.model)))
-                    idx = _pick_model(console, pick_entries)
+                    idx = _pick_model(console, pick_entries, initial=cur_idx)
                     if idx is not None:
                         entry = avail[idx]
                         provider, model = entry.provider, entry.model

@@ -134,7 +134,7 @@ synapse/
 │   ├── providers/ # 5 家 LLM 供应商
 │   ├── tools/     # 10 个工具（文件/搜索/Shell/Git/HTTP/DB/Browser）
 │   ├── planning/  # 3 种规划模式（ReAct / PlanExecute / Hierarchical）
-│   ├── memory/    # 记忆：Session/Project/User 为磁盘持久化；Semantic 向量层为可选后端（默认未写入）
+│   ├── memory/    # 记忆：Session/Project/User 为磁盘持久化；Semantic 向量层为可选后端
 │   ├── context/   # 上下文治理（Retriever + Partitioner + Compactor）
 │   ├── security/  # 4 层安全（Sandbox/ActionAuth/Audit/Injection Defense）
 │   └── mcp/       # MCP 客户端
@@ -147,7 +147,7 @@ synapse/
 
 为避免误导，以下是当前**尚未真正接线**或仅停留在脚手架阶段的能力，使用前请知悉：
 
-- **Semantic 记忆层**：向量后端（ChromaDB/Qdrant）已实现且为可选依赖，但当前**没有任何代码向该层写入**，检索时向量库恒为空，实际不参与上下文。可用的是 Session/Project/User 三层磁盘记忆。
+- **Semantic 记忆层**：向量后端（ChromaDB/Qdrant）为可选依赖。任务结束后会把摘要写入向量层，后续任务按相似度召回；未安装后端时自动降级为仅 Session/Project/User 记忆。
 - **Eval / Benchmark**：`eval/` 下的指标管道与 redteam 框架可运行，但 `swebench` **未连接真实数据集**（无 clone/docker/打补丁/跑测试），`process_bench` 为针对虚构仓库的示例任务；二者属于评估脚手架，请勿当作真实基准结果。
 - **Security Sandbox**：`ProcessSandbox` 现为进程树隔离——Windows 用 Job Object（`KILL_ON_JOB_CLOSE`）、Unix 用进程组 + `killpg`，超时/退出时整棵子进程树被杀，孙进程不再逃逸成孤儿。它保证的是「资源/生命周期不失控」，**不是文件系统/网络的强隔离**（无 bubblewrap/Seatbelt/namespace）；文件写入的真正安全边界在 `ActionAuthorizer` 命令审批闸门。
 - **Swarm + Worktree**：worker 结果已在清理前 merge 回主工作区，但并行 worker 对同文件的写冲突为「后写覆盖」，无真正三方合并。

@@ -405,10 +405,23 @@ class BasicContextRetriever:
                     token_count=len(entry.content) // 4,
                 ))
 
-            # TODO B — pull the rolling process-quality feedback (fixed id/tag)
-            # and inject it into the next task's reference context so the agent
-            # sees its own prior process-quality hint.  Stored at PROJECT level,
-            # retrieved by a stable query that matches its content sentinel.
+            # Semantic memory (vector layer, optional backend): retrieve prior
+            # task summaries by similarity. Empty when the backend is absent or
+            # nothing has been stored yet, so this never adds noise.
+            sem = await memory.retrieve(task, MemoryLevel.SEMANTIC, top_k=3)
+            for entry in sem:
+                if entry.content not in {b.content for b in blocks}:
+                    blocks.append(ContextBlock(
+                        content=entry.content,
+                        source=ContextSource.MEMORY,
+                        priority=4,
+                        token_count=len(entry.content) // 4,
+                    ))
+
+            # Pull the rolling process-quality feedback (fixed id/tag) and inject
+            # it into the next task's reference context so the agent sees its own
+            # prior process-quality hint. Stored at PROJECT level, retrieved by a
+            # stable query that matches its content sentinel.
             fb = await memory.retrieve(
                 "process quality feedback", MemoryLevel.PROJECT, top_k=1,
             )

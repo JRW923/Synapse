@@ -246,10 +246,9 @@ async def test_mcp_tool_error_propagates():
     mcp_tool = registry.get("mcp.test-server.echo")
     result = await mcp_tool.execute({"message": "test"})
 
-    assert result.success is True  # isError is respected but wrapper may still succeed
-    # Actually, MCP isError doesn't throw — it's included in result content.
-    # The call_tool mock returns valid content. Let's test actual exception:
-    # We'll test that when call_tool raises, success is False.
+    # MCP isError marks an errored server response — it must not report success.
+    assert result.success is False
+    assert "MCP tool returned an error" in result.error
 
     # Reset mock to raise
     mock_client.call_tool = AsyncMock(side_effect=RuntimeError("MCP server crashed"))

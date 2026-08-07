@@ -120,7 +120,12 @@ class LayeredMemory:
 
     def _get_semantic(self):
         if callable(self._semantic):
-            self._semantic = self._semantic()
+            try:
+                self._semantic = self._semantic()
+            except Exception:
+                # Optional backend (chromadb/qdrant) missing or broken — degrade
+                # to no semantic memory rather than fail the whole run.
+                self._semantic = None
         return self._semantic
 
     async def store(self, entry: MemoryEntry) -> None:
@@ -158,6 +163,10 @@ class LayeredMemory:
         # it was already materialized by a prior SEMANTIC store/retrieve.
         if self._semantic is not None and not callable(self._semantic):
             await self._semantic.forget(entry_id)
+
+    def clear_session(self) -> None:
+        """Drop all in-memory SESSION entries (used by /reset)."""
+        self._session.clear()
 
 
 # ---- Provider registry -----------------------------------------------------
@@ -341,15 +350,14 @@ class Synapse:
             prev_planner = self._container.resolve(Planner)
             self._container.register(type(planner), planner)
 
-        # MCP: connect external servers on THIS event loop so their tools are
-        # actually callable. The old container-build path connected on a
-        # throwaway thread loop, so the receiver tasks died before any call.
-        # Connect once per Synapse instance and keep it connected for the
-        # instance lifetime — reconnecting per task would spawn a fresh
-        # subprocess each run, and tearing down per run would unregister the
-        # tools between runs (breaking tool discovery outside a run).
-        if self._mcp_manager is not None and not self._mcp_manager.connected:
-            await self._mcp_manager.connect_all(self._mcp_servers)
+        # MCP: ensure external servers are connected ON THIS event loop so their
+        # tools are callable. The old container-build path connected on a
+        # throwaway thread loop, so receiver tasks died before any call. Clients
+        # are kept for the instance lifetime, but a client whose connection was
+        # established on a previous run's loop is torn down and reconnected here
+        # (the CLI asyncio.run()s each task, so loops differ run-to-run).
+        if self._mcp_manager is not None:
+            await self._mcp_manager.ensure_current_loop(self._mcp_servers)
 
         try:
             agent = Agent(self._container)
@@ -395,6 +403,18 @@ class Synapse:
             return None
         return tracker.report(context)
 
+    def clear_session_memory(self) -> None:
+        """Drop all in-memory SESSION memory entries.
+
+        Session memory outlives an individual Session object, so /reset must
+        clear it explicitly or prior tasks' summaries leak into the next task.
+        """
+        try:
+            layered = self._container.resolve(MemoryStore)
+            layered.clear_session()
+        except Exception:
+            pass
+
     def get_run_score(self) -> dict | None:
         """Return the runtime score for the last run (or a live snapshot).
 
@@ -422,10 +442,11 @@ class Synapse:
         self._last_process_hint = getattr(event, "hint", None) or None
 
     async def _persist_run_score(self, score: RunScore) -> None:
-        """Persist a run score to ProjectMemory as a rolling per-project log.
+        """Persist a run score to ProjectMemory as a single rolling entry.
 
-        Failures are swallowed so scoring never blocks a task.  All runs append
-        to a single ``run-score-log`` entry, forming a queryable history.
+        Failures are swallowed so scoring never blocks a task. ProjectMemory
+        store is idempotent by id, so the fixed ``run-score-log`` id keeps the
+        latest score (older ones are replaced, not accumulated).
         """
         try:
             pm = self._container.resolve(ProjectMemory)
@@ -620,6 +641,10 @@ class Synapse:
         )
         if base_url:
             kwargs["base_url"] = base_url
+        # DeepSeek's Anthropic-compatible endpoint may not accept cache_control
+        # blocks; disable prompt caching there to avoid a 400.
+        if base_url == "https://api.deepseek.com/anthropic":
+            kwargs["prompt_caching"] = False
         return provider_cls(**kwargs)
 
     # -- Internal: semantic memory factory -----------------------------------
