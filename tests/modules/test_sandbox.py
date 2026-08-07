@@ -14,7 +14,11 @@ async def test_sandbox_echo():
 @pytest.mark.asyncio
 async def test_sandbox_platform_detected():
     sandbox = ProcessSandbox()
-    assert sandbox.platform in ("windows_job", "macos_seatbelt", "linux_bwrap", "none")
+    # `platform` reports the isolation actually applied, not an aspirational
+    # OS-sandbox name (it used to claim linux_bwrap/macos_seatbelt without
+    # applying either).
+    assert sandbox.platform in ("windows_job_object", "process_group")
+    assert sandbox.platform == sandbox.method
 
 
 @pytest.mark.asyncio

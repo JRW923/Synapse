@@ -64,15 +64,10 @@ from synapse.modules.memory.session import SessionMemory
 from synapse.modules.memory.project import ProjectMemory
 from synapse.modules.memory.user import UserMemory
 
-try:
-    from synapse.modules.memory.semantic import SemanticMemory
-except ImportError:  # pragma: no cover
-    SemanticMemory = None  # type: ignore[assignment]
-
-try:
-    from synapse.modules.memory.qdrant_backend import QdrantMemory
-except ImportError:  # pragma: no cover
-    QdrantMemory = None  # type: ignore[assignment]
+# NOTE: SemanticMemory (chromadb) and QdrantMemory are imported lazily inside
+# _create_semantic_memory().  At module scope they cost ~1.3s of cold start on
+# every `synapse` invocation — including `--help` — for a layer nothing writes
+# to unless the user explicitly uses SEMANTIC-level memory.
 
 from synapse.modules.context.retriever import BasicContextRetriever
 from synapse.modules.context.partitioner import ContextPartitioner
@@ -114,12 +109,19 @@ class LayeredMemory:
         session_memory: SessionMemory,
         project_memory: ProjectMemory,
         user_memory: UserMemory,
-        semantic_memory: SemanticMemory | None = None,
+        semantic_memory=None,
     ) -> None:
         self._session = session_memory
         self._project = project_memory
         self._user = user_memory
+        # Either a store instance or a zero-arg factory; resolved on first use
+        # so importing chromadb/qdrant never happens unless SEMANTIC is touched.
         self._semantic = semantic_memory
+
+    def _get_semantic(self):
+        if callable(self._semantic):
+            self._semantic = self._semantic()
+        return self._semantic
 
     async def store(self, entry: MemoryEntry) -> None:
         if entry.level == MemoryLevel.SESSION:
@@ -128,8 +130,10 @@ class LayeredMemory:
             await self._project.store(entry)
         elif entry.level == MemoryLevel.USER:
             await self._user.store(entry)
-        elif entry.level == MemoryLevel.SEMANTIC and self._semantic is not None:
-            await self._semantic.store(entry)
+        elif entry.level == MemoryLevel.SEMANTIC:
+            semantic = self._get_semantic()
+            if semantic is not None:
+                await semantic.store(entry)
 
     async def retrieve(
         self, query: str, level: MemoryLevel, top_k: int = 5
@@ -140,15 +144,19 @@ class LayeredMemory:
             return await self._project.retrieve(query, level, top_k)
         if level == MemoryLevel.USER:
             return await self._user.retrieve(query, level, top_k)
-        if level == MemoryLevel.SEMANTIC and self._semantic is not None:
-            return await self._semantic.retrieve(query, level, top_k)
+        if level == MemoryLevel.SEMANTIC:
+            semantic = self._get_semantic()
+            if semantic is not None:
+                return await semantic.retrieve(query, level, top_k)
         return []
 
     async def forget(self, entry_id: str) -> None:
         await self._session.forget(entry_id)
         await self._project.forget(entry_id)
         await self._user.forget(entry_id)
-        if self._semantic is not None:
+        # Don't spin up the vector backend just to forget from it — only if
+        # it was already materialized by a prior SEMANTIC store/retrieve.
+        if self._semantic is not None and not callable(self._semantic):
             await self._semantic.forget(entry_id)
 
 
@@ -280,6 +288,11 @@ class Synapse:
     ) -> None:
         self._provider_name = provider
         self._enable_eval = enable_eval
+        if memory_backend.lower() not in {"chromadb", "qdrant"}:
+            raise ValueError(
+                f"Unknown memory_backend '{memory_backend}'. "
+                f"Available: chromadb, qdrant"
+            )
         self._memory_backend = memory_backend
         self._enable_external_tools = enable_external_tools
         self._mcp_servers = mcp_servers
@@ -512,8 +525,10 @@ class Synapse:
         session_memory = SessionMemory()
         project_memory = ProjectMemory()
         user_memory = UserMemory()
-        semantic_memory = self._create_semantic_memory()
-        layered = LayeredMemory(session_memory, project_memory, user_memory, semantic_memory)
+        # Passed as a factory, not an instance — see LayeredMemory._get_semantic.
+        layered = LayeredMemory(
+            session_memory, project_memory, user_memory, self._create_semantic_memory,
+        )
         c.register(MemoryStore, layered)
 
         # Process-quality verification closed loop — live, not eval-gated.
@@ -609,34 +624,36 @@ class Synapse:
     def _create_semantic_memory(self):
         """Instantiate the configured semantic memory backend.
 
+        Called lazily on first SEMANTIC-level access, so the ~1.3s cost of
+        importing chromadb/qdrant (plus ~0.7s to build the embedding model)
+        is not paid by every CLI invocation.  The backend *name* is still
+        validated eagerly in ``__init__`` so a typo fails fast.
+
         Returns
         -------
-        SemanticMemory | QdrantMemory | None
-            The semantic memory store instance, or *None* if the backend
-            is not available.
+        SemanticMemory | QdrantMemory
+            The semantic memory store instance.
         """
         backend = self._memory_backend.lower()
 
         if backend == "chromadb":
-            if SemanticMemory is None:
+            try:
+                from synapse.modules.memory.semantic import SemanticMemory
+            except ImportError as exc:
                 raise ImportError(
                     "SemanticMemory (chromadb) is not available — "
                     "install chromadb to use it."
-                )
+                ) from exc
             return SemanticMemory()
 
-        if backend == "qdrant":
-            if QdrantMemory is None:
-                raise ImportError(
-                    "QdrantMemory is not available — "
-                    "install qdrant-client to use it."
-                )
-            return QdrantMemory()
-
-        raise ValueError(
-            f"Unknown memory_backend '{backend}'. "
-            f"Available: chromadb, qdrant"
-        )
+        try:
+            from synapse.modules.memory.qdrant_backend import QdrantMemory
+        except ImportError as exc:
+            raise ImportError(
+                "QdrantMemory is not available — "
+                "install qdrant-client to use it."
+            ) from exc
+        return QdrantMemory()
 
     # -- Internal: planner factory -------------------------------------------
 

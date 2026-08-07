@@ -47,19 +47,11 @@ class WriteTool:
         meta = ToolCallMetadata(tool_name="write")
         meta.files_touched = [str(path)]
 
-        # ponytail: jail absolute paths to the workspace. Without this an agent
-        # could write anywhere on disk via an absolute path.
-        if self._workspace_root is not None:
-            try:
-                path.resolve().relative_to(self._workspace_root)
-            except ValueError:
-                return ToolResult(
-                    success=False,
-                    output="",
-                    error=f"Write target {raw!r} is outside the workspace {self._workspace_root}",
-                    metadata=meta,
-                )
-
+        # NOTE: writes outside the workspace are intentionally allowed here.
+        # The boundary lives in ActionAuthorizer (WRITE_LOCAL), which requires
+        # explicit user confirmation for out-of-workspace targets and denies
+        # them outright when running non-interactively.  Duplicating a hard
+        # jail here would contradict that and break legitimate absolute writes.
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             # newline="" preserves exact content (no LF->CRLF translation).
