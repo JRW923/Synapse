@@ -63,3 +63,42 @@ async def test_context_preserves_system_blocks(tmp_path: Path, retriever, tools,
     # System blocks should contain project instructions
     assert isinstance(ctx.system, list)
     assert isinstance(ctx.core, list)
+
+
+@pytest.mark.asyncio
+async def test_ranking_prefers_relevant_file(tmp_path: Path, retriever, tools, memory):
+    # The task keyword lives in one file's name + symbols; a decoy does not.
+    (tmp_path / "payment_gateway.py").write_text(
+        "def process_payment(amount):\n    return charge(amount)\n"
+    )
+    (tmp_path / "unrelated_math.py").write_text(
+        "def add(a, b):\n    return a + b\n"
+    )
+
+    ctx = await retriever.retrieve(
+        task="fix the process_payment charge bug",
+        project_root=tmp_path,
+        tools=tools,
+        memory=memory,
+    )
+
+    file_blocks = [b for b in ctx.core if "# File:" in b.content]
+    assert file_blocks, "expected at least one ranked file block"
+    top = file_blocks[0].content
+    assert "payment_gateway.py" in top
+    # Python symbols must be extracted and surfaced in the header.
+    assert "process_payment" in top
+
+
+@pytest.mark.asyncio
+async def test_tree_block_lists_files(tmp_path: Path, retriever, tools, memory):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    (tmp_path / "b.py").write_text("y = 2\n")
+
+    ctx = await retriever.retrieve(
+        task="anything", project_root=tmp_path, tools=tools, memory=memory,
+    )
+
+    tree = [b for b in ctx.core if "# Project files" in b.content]
+    assert tree, "expected a file-tree overview block"
+    assert "a.py" in tree[0].content and "b.py" in tree[0].content
