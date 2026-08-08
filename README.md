@@ -86,6 +86,12 @@ synapse version                      # Show version
 panel instead of blocking silently. When a tool needs confirmation and no human
 is at the terminal, the action is **auto-denied** unless you pass `--yes`.
 
+The CLI adapts to the terminal: wide terminals show the full workspace header,
+narrow terminals use a compact single-column layout, and redirected output falls
+back to plain text without ANSI codes. The live panel shows the current phase,
+the last five tool steps, elapsed time, and tokens; partial/failed results include
+metrics and a concrete resume or retry hint.
+
 ## HTTP API
 
 `/run` and `/run/stream` (SSE) are the programmatic equivalents of `run`. Both

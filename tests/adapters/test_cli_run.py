@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock
 
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
 from synapse.core.events import EventBus
-from synapse.protocols.events import AgentProgress, LLMToken
+from synapse.protocols.events import (
+    AgentProgress,
+    LLMToken,
+    ToolCallStarted,
+    ToolCallCompleted,
+)
 
 
 @pytest.mark.asyncio
@@ -117,6 +122,44 @@ async def test_run_task_streamed_resets_baseline_per_request():
 
 
 @pytest.mark.asyncio
+async def test_run_task_streamed_shows_phase_and_tool_timeline():
+    from synapse.adapters.cli import _run_task_streamed
+    from rich.console import Console
+
+    bus = EventBus()
+
+    class _Container:
+        def resolve(self, _t):
+            return bus
+
+    async def _run(task, session=None):
+        await bus.emit(AgentProgress(
+            session_id="s", phase="calling_llm", message="Iteration 2: calling LLM...",
+        ))
+        await bus.emit(ToolCallStarted(
+            session_id="s", tool_name="read", tool_params={"path": "src/app.py"},
+        ))
+        await bus.emit(ToolCallCompleted(
+            session_id="s", tool_name="read", success=True, duration_ms=23,
+            files_touched=[],
+        ))
+        return AgentResult(
+            status=ResultStatus.SUCCESS, output="done", metrics=ExecutionMetrics(),
+        )
+
+    class _Syn:
+        _container = _Container()
+        run = staticmethod(_run)
+
+    console = Console(file=io.StringIO(), force_terminal=True, width=80)
+    await _run_task_streamed(_Syn(), "t", None, console, True)
+    rendered = console.file.getvalue()
+    assert "read" in rendered
+    assert "23ms" in rendered
+    assert "最近步骤" in rendered
+
+
+@pytest.mark.asyncio
 async def test_swarm_tracker_renders_lifecycle():
     """_SwarmTracker turns swarm events into compact panel lines and cleans up."""
     from synapse.adapters.cli import _SwarmTracker
@@ -188,6 +231,57 @@ def test_main_no_subcommand_does_not_crash_on_optional_args(monkeypatch):
     cli.main()
 
     assert captured == {"provider": None, "model": None, "mode": None}
+
+
+def test_cancel_handler_updates_display_and_planner():
+    import signal
+    from synapse.adapters.cli import _install_cancel_handler, _restore_cancel_handler
+
+    class _Planner:
+        def __init__(self):
+            self.cancelled = False
+
+        def request_cancel(self):
+            self.cancelled = True
+
+    planner = _Planner()
+
+    class _Container:
+        def resolve(self, _type):
+            return planner
+
+    class _Synapse:
+        _container = _Container()
+
+    class _Display:
+        def __init__(self):
+            self.label = ""
+
+        def set_label(self, value):
+            self.label = value
+
+    display = _Display()
+    holder = [display]
+    previous = _install_cancel_handler(_Synapse(), holder)
+    try:
+        handler = signal.getsignal(signal.SIGINT)
+        handler(signal.SIGINT, None)
+    finally:
+        _restore_cancel_handler(previous)
+
+    assert planner.cancelled is True
+    assert "取消" in display.label
+
+
+def test_ollama_model_is_ready_without_api_key():
+    from synapse.adapters.cli import _available_models
+    from synapse.config.schema import SynapseConfig
+
+    config = SynapseConfig()
+    config.provider.provider = "ollama"
+    config.provider.model = "qwen3.5:4b"
+    available, _ = _available_models(config)
+    assert any(e.provider == "ollama" and e.model == "qwen3.5:4b" for e in available)
 
 
 def test_repl_enter_submits_content():

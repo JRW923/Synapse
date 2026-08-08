@@ -106,6 +106,10 @@ synapse version                      # 显示版本
 不再静默阻塞。当某工具需要确认而终端无人应答时，默认**自动拒绝**，除非你加
 `--yes` 显式放行。
 
+交互界面会根据终端能力自动降级：宽终端显示完整工作区首页，窄终端使用 compact 布局，
+重定向/非 TTY 环境输出无 ANSI 的纯文本。任务面板统一显示当前 phase、最近 5 个工具步骤、
+elapsed 与 token；结束后给出耗时、工具成功率，以及 `partial`/`failed` 的继续操作提示。
+
 ## HTTP API
 
 `/run` 与 `/run/stream`（SSE）是 `run` 的程序化等价物，二者均接受 `RunRequest`：

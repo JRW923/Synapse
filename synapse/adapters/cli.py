@@ -70,7 +70,7 @@ if sys.platform == "win32":
             _ctypes.windll.kernel32.ExitProcess(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        _os.write(2, b"\n  Press Ctrl+C again to force exit.\n")
+        _os.write(2, "\n  再按一次 Ctrl+C 强制退出。\n".encode("utf-8"))
         # FALSE — let Python's SIGINT machinery run so the per-task handler
         # (request_cancel) fires. Returning TRUE swallowed the event, so a
         # single Ctrl+C never cancelled a task on Windows.
@@ -88,7 +88,7 @@ else:
             _os._exit(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        _os.write(2, b"\n  Press Ctrl+C again to exit.\n")
+        _os.write(2, "\n  再按一次 Ctrl+C 退出。\n".encode("utf-8"))
 
     _signal.signal(_signal.SIGINT, _unix_sigint_handler)
 
@@ -103,7 +103,7 @@ from synapse.protocols.planner import Planner
 import signal as _signal
 
 
-def _install_cancel_handler(synapse) -> object:
+def _install_cancel_handler(synapse, status_holder=None) -> object:
     """Install a SIGINT handler that requests cancellation on the active planner
     (instead of hard-killing the process) so a long task stops at the next
     iteration boundary. Returns the previous handler to restore afterwards.
@@ -120,6 +120,10 @@ def _install_cancel_handler(synapse) -> object:
     prev = _signal.getsignal(_signal.SIGINT)
 
     def _handler(signum, frame):
+        if status_holder is not None and status_holder:
+            display = status_holder[0]
+            if hasattr(display, "set_label"):
+                display.set_label("正在取消...（等待当前步骤结束）")
         if planner is not None and hasattr(planner, "request_cancel"):
             planner.request_cancel()
         elif callable(prev):
@@ -327,6 +331,10 @@ class _LiveDisplay:
     # Keep the rendered transcript bounded so each redraw is O(1) regardless of
     # how long a single generation runs. Older text scrolls out of the panel.
     _MAX_BUF_CHARS = 4000
+    _MAX_TIMELINE = 5
+    # Coalesce token-driven redraws; the background clock still refreshes at
+    # 200ms so a fast provider cannot monopolize the terminal.
+    _MIN_REFRESH_INTERVAL = 0.05
 
     def __init__(self, console, fmt_tokens, fmt_elapsed):
         from rich.live import Live
@@ -341,6 +349,8 @@ class _LiveDisplay:
         self._label = "Thinking..."
         self._spin = 0
         self._swarm_lines: list[str] = []
+        self._timeline: list[str] = []
+        self._last_refresh = 0.0
         # Writers run on the event-loop thread; the refresh thread reads the
         # same state. The lock keeps redraws from seeing torn state.
         self._lock = threading.Lock()
@@ -393,7 +403,15 @@ class _LiveDisplay:
     def set_label(self, text: str) -> None:
         with self._lock:
             self._label = text
-        self._refresh()
+        self._refresh(force=True)
+
+    def add_timeline(self, text: str) -> None:
+        """Append one compact completed step, keeping the panel bounded."""
+        with self._lock:
+            self._timeline.append(str(text))
+            if len(self._timeline) > self._MAX_TIMELINE:
+                self._timeline = self._timeline[-self._MAX_TIMELINE:]
+        self._refresh(force=True)
 
     def add_text(self, text: str) -> None:
         with self._lock:
@@ -415,16 +433,21 @@ class _LiveDisplay:
         with self._lock:
             self._buf = []
             self._buf_len = 0
-        self._refresh()
+        self._refresh(force=True)
 
     def set_swarm_lines(self, lines: list[str]) -> None:
         """Replace the swarm-status footer lines shown under the streamed text."""
         with self._lock:
             self._swarm_lines = list(lines)
-        self._refresh()
+        self._refresh(force=True)
 
-    def _refresh(self) -> None:
+    def _refresh(self, force: bool = False) -> None:
         try:
+            now = _time.monotonic()
+            with self._lock:
+                if not force and now - self._last_refresh < self._MIN_REFRESH_INTERVAL:
+                    return
+                self._last_refresh = now
             self._live.update(self._render())
         except Exception:
             pass
@@ -438,6 +461,7 @@ class _LiveDisplay:
             label = self._label
             spin = self._spin
             swarm_lines = list(self._swarm_lines)
+            timeline = list(self._timeline)
         style = _status_style_for(label)
         # Spin only while in-progress (cyan); final states (ok/fail) show a
         # static dot so the panel reads as "settled" the moment it completes.
@@ -451,11 +475,144 @@ class _LiveDisplay:
             pieces.append(f"[dim]{el}[/dim]")
         header = "  ·  ".join(pieces)
         text = Text(body, style="none") if body else Text("…", style="dim")
+        if timeline:
+            text.append("\n\n最近步骤\n", style="dim")
+            for line in timeline:
+                text.append(f"  {line}\n", style="cyan")
         if swarm_lines:
             text.append("\n\n")
             for line in swarm_lines:
                 text.append(line + "\n", style="cyan")
         return Panel(text, title=header, border_style=_BORDER, expand=True)
+
+
+class _LiveRun:
+    """Shared event-to-CLI state adapter for one agent run.
+
+    `run`, the REPL, and `chat` must render the same lifecycle. Keeping the
+    subscriptions here prevents one entry point from silently losing a phase
+    or leaking handlers into the next request.
+    """
+
+    def __init__(self, synapse, console, status_holder=None):
+        self.synapse = synapse
+        self.status_holder = status_holder
+        self.tokens = {"input": 0, "output": 0}
+        self.baseline = {"in": 0, "out": 0}
+        self.elapsed = {"start": _time.monotonic()}
+        self.live = _LiveDisplay(console, self._fmt_tokens, self._fmt_elapsed)
+        self.event_bus = None
+        self.swarm_tracker = None
+        self._handlers: list[tuple[str, object]] = []
+        self._tool_args: dict[str, str] = {}
+
+    def _fmt_tokens(self) -> str:
+        total = self.tokens["input"] + self.tokens["output"]
+        return f"{total / 1000:.1f}k" if total >= 1000 else str(total)
+
+    def _fmt_elapsed(self) -> str:
+        seconds = _time.monotonic() - self.elapsed["start"]
+        return f"{seconds:.0f}s" if seconds < 60 else f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+
+    @staticmethod
+    def _iteration(message: str) -> str:
+        prefix = "Iteration "
+        if message.startswith(prefix):
+            value = message[len(prefix):].split(":", 1)[0].strip()
+            if value.isdigit():
+                return value
+        return ""
+
+    def _progress_label(self, event) -> str:
+        phase = getattr(event, "phase", "")
+        message = getattr(event, "message", "") or ""
+        if phase == "thinking":
+            return "分析任务"
+        if phase == "calling_llm":
+            iteration = self._iteration(message)
+            return f"调用模型 · 第 {iteration} 轮" if iteration else "调用模型"
+        if phase == "token_budget":
+            return f"接近 token 预算 · {message}"
+        if phase == "context_timeout":
+            return "上下文检索超时"
+        if phase == "done":
+            return "任务完成"
+        return message or phase or "处理中"
+
+    async def _on_progress(self, event):
+        message = getattr(event, "message", "") or ""
+        if getattr(event, "phase", "") == "calling_llm":
+            self.baseline["in"] = self.tokens["input"]
+            self.baseline["out"] = self.tokens["output"]
+            self.live.reset_text()
+            self.live.set_label(self._progress_label(event))
+            return
+        if message.startswith("tokens="):
+            try:
+                input_tokens, output_tokens = message[7:].split("+", 1)
+                self.tokens["input"] = int(input_tokens)
+                self.tokens["output"] = int(output_tokens)
+                self.live._refresh(force=True)
+                return
+            except (ValueError, IndexError):
+                pass
+        self.live.set_label(self._progress_label(event))
+
+    async def _on_token(self, event):
+        self.live.add_text(event.text)
+        if event.usage:
+            self.tokens["input"] = self.baseline["in"] + (event.usage.get("input", 0) or 0)
+            self.tokens["output"] = self.baseline["out"] + (event.usage.get("output", 0) or 0)
+
+    async def _on_tool_started(self, event):
+        summary = _summarize_params(event.tool_params)
+        self._tool_args[event.tool_name] = summary
+        self.live.set_label(f"执行工具 · {event.tool_name}({summary})")
+
+    async def _on_tool_completed(self, event):
+        status = "ok" if event.success else "失败"
+        summary = self._tool_args.pop(event.tool_name, "")
+        suffix = f"({summary})" if summary else ""
+        files = len(getattr(event, "files_touched", []) or [])
+        file_suffix = f" · 文件 {files}" if files else ""
+        self.live.add_timeline(f"[{status}] {event.tool_name}{suffix} · {event.duration_ms}ms{file_suffix}")
+        self.live.set_label(
+            f"工具完成 · {event.tool_name}" if event.success else f"工具失败 · {event.tool_name}"
+        )
+
+    def start(self) -> None:
+        self.live.start()
+        if self.status_holder is not None:
+            self.status_holder[:] = [self.live]
+        self.event_bus = self.synapse._container.resolve(EventBus)
+        if self.event_bus is None:
+            return
+        for event_type, handler in (
+            ("agent_progress", self._on_progress),
+            ("llm_token", self._on_token),
+            ("tool_call_started", self._on_tool_started),
+            ("tool_call_completed", self._on_tool_completed),
+        ):
+            self.event_bus.subscribe(event_type, handler)
+            self._handlers.append((event_type, handler))
+        self.swarm_tracker = _SwarmTracker(self.live.set_swarm_lines)
+        self.swarm_tracker.wire(self.event_bus)
+
+    def stop(self) -> None:
+        try:
+            self.live.stop()
+        finally:
+            if self.status_holder is not None:
+                self.status_holder[:] = []
+            if self.event_bus is not None:
+                for event_type, handler in self._handlers:
+                    try:
+                        self.event_bus.unsubscribe(event_type, handler)
+                    except Exception:
+                        pass
+                if self.swarm_tracker is not None:
+                    self.swarm_tracker.unwire(self.event_bus)
+            self._handlers.clear()
 
 
 class _SwarmTracker:
@@ -544,97 +701,12 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     """
     if not use_rich or console is None:
         return await synapse.run(task, session=session)
-
-    tokens = {"input": 0, "output": 0}
-    # Session total before the current LLM request. Captured at the start of
-    # each request so streamed per-chunk usage (which is cumulative for that
-    # request) can be shown as baseline + request_usage, ticking up smoothly
-    # instead of jumping once at the end. The authoritative "tokens=" message
-    # still overwrites with the real cumulative total as a safety net.
-    baseline = {"in": 0, "out": 0}
-    elapsed = {"start": _time.monotonic()}
-
-    def _fmt_tokens() -> str:
-        t = tokens["input"] + tokens["output"]
-        return f"{t / 1000:.1f}k" if t >= 1000 else str(t)
-
-    def _fmt_elapsed() -> str:
-        s = _time.monotonic() - elapsed["start"]
-        return f"{s:.0f}s" if s < 60 else f"{int(s // 60)}m{int(s % 60):02d}s"
-
-    live = _LiveDisplay(console, _fmt_tokens, _fmt_elapsed)
-    live.start()
-    if status_holder is not None:
-        # Store the whole display, not just the inner Rich Live, so the
-        # confirm callback can pause/resume it (and its refresh thread) as a
-        # unit — otherwise the refresh thread keeps resurrecting the panel.
-        status_holder[:] = [live]
-
-    event_bus = synapse._container.resolve(EventBus)
-
-    async def _on_progress(event):
-        msg = event.message
-        if event.phase == "calling_llm":
-            # Snapshot the session total before this request so streamed usage
-            # increments from this baseline. The preceding request's "tokens="
-            # message already set the authoritative cumulative here.
-            baseline["in"] = tokens["input"]
-            baseline["out"] = tokens["output"]
-            live.reset_text()
-            live.set_label("Working...")
-            return
-        if msg.startswith("tokens="):
-            try:
-                a, b = msg[7:].split("+", 1)
-                tokens["input"] = int(a)
-                tokens["output"] = int(b)
-                live.set_label("Working...")
-                return
-            except (ValueError, IndexError):
-                pass
-        live.set_label(msg)
-
-    async def _on_token(event):
-        live.add_text(event.text)
-        if event.usage:
-            u_in = event.usage.get("input", 0) or 0
-            u_out = event.usage.get("output", 0) or 0
-            tokens["input"] = baseline["in"] + u_in
-            tokens["output"] = baseline["out"] + u_out
-
-    async def _on_tool_started(event):
-        live.set_label(f"{event.tool_name}({_summarize_params(event.tool_params)}) ...")
-
-    async def _on_tool_completed(event):
-        icon = "ok" if event.success else "FAIL"
-        live.set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
-
-    if event_bus is not None:
-        event_bus.subscribe("agent_progress", _on_progress)
-        event_bus.subscribe("llm_token", _on_token)
-        event_bus.subscribe("tool_call_started", _on_tool_started)
-        event_bus.subscribe("tool_call_completed", _on_tool_completed)
-        swarm_tracker = _SwarmTracker(live.set_swarm_lines)
-        swarm_tracker.wire(event_bus)
-
+    live_run = _LiveRun(synapse, console, status_holder)
     try:
+        live_run.start()
         return await synapse.run(task, session=session)
     finally:
-        live.stop()
-        if status_holder is not None:
-            status_holder[:] = []
-        if event_bus is not None:
-            for et, h in (
-                ("agent_progress", _on_progress),
-                ("llm_token", _on_token),
-                ("tool_call_started", _on_tool_started),
-                ("tool_call_completed", _on_tool_completed),
-            ):
-                try:
-                    event_bus.unsubscribe(et, h)
-                except Exception:
-                    pass
-            swarm_tracker.unwire(event_bus)
+        live_run.stop()
 
 
 def _resolve_session(resume):
@@ -906,15 +978,24 @@ def main():
         try:
             from rich.console import Console
             console = Console()
-            use_rich = True
+            use_rich = bool(console.is_terminal)
         except ImportError:
             console = None
             use_rich = False
 
+        session = _resolve_session(args.resume)
+        status_holder: list = []
+        prev_handler = _install_cancel_handler(synapse, status_holder)
         try:
-            session = _resolve_session(args.resume)
-            result = asyncio.run(_run_task_streamed(synapse, task, session, console, use_rich))
+            result = asyncio.run(
+                _run_task_streamed(synapse, task, session, console, use_rich, status_holder)
+            )
         except KeyboardInterrupt:
+            try:
+                session.save()
+            except Exception:
+                pass
+            print("任务已中断，当前会话已保存；可用 synapse --resume 继续。")
             return
         except Exception as exc:
             if use_rich:
@@ -922,6 +1003,8 @@ def main():
             else:
                 print(_friendly_error(exc))
             return
+        finally:
+            _restore_cancel_handler(prev_handler)
 
         _print_result(console, result, use_rich)
         session.save()
@@ -1130,18 +1213,43 @@ _SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"
 def _status_style_for(label: str) -> str:
     """Pick a Rich style for a live-panel status label."""
     low = (label or "").lower()
-    if "fail" in low or "error" in low or "budget" in low or "denied" in low:
+    if ("fail" in low or "error" in low or "budget" in low or "denied" in low
+            or "失败" in low or "错误" in low or "预算" in low or "拒绝" in low):
         return "red"
-    if "ok" in low or "completed" in low or "done" in low:
+    if ("ok" in low or "completed" in low or "done" in low
+            or "完成" in low):
         return "green"
     return _BRAND  # cyan — in-progress / neutral activity
 
 
+def _result_summary(result) -> str:
+    metrics = result.metrics
+    total_tokens = metrics.tokens_input + metrics.tokens_output
+    return (
+        f"耗时 {metrics.duration_ms / 1000:.1f}s · token {total_tokens} · "
+        f"工具 {metrics.tool_success_count}/{metrics.tool_call_count} 成功"
+    )
+
+
+def _result_hint(status: str) -> str:
+    if status == "partial":
+        return "可继续输入补充任务；一次性命令可用 synapse --resume 继续。"
+    if status == "failed":
+        return "建议检查 provider、API key 和最近工具错误，再缩小任务重试。"
+    return ""
+
+
 def _print_result(console, result, use_rich: bool) -> None:
     """Render a finished task result consistently across run/chat/REPL."""
+    status = result.status.value
+    summary = _result_summary(result)
+    hint = _result_hint(status)
     if not use_rich or console is None:
-        print(f"\n[Status: {result.status.value}]")
+        print(f"\n[Status: {status}]")
         print(result.output)
+        print(summary)
+        if hint:
+            print(f"下一步：{hint}")
         return
     from rich.markdown import Markdown
     from rich.rule import Rule
@@ -1152,6 +1260,9 @@ def _print_result(console, result, use_rich: bool) -> None:
     console.print(Rule(style=_BORDER))
     console.print(f"  [{color}]● {result.status.value.upper()}[/{color}]")
     console.print(Markdown(result.output))
+    console.print(f"  [{_HINT}]{summary}[/{_HINT}]")
+    if hint:
+        console.print(f"  [{_HINT}]下一步：{hint}[/{_HINT}]")
     console.print()
 
 
@@ -1203,7 +1314,7 @@ def _middle(text: str, limit: int) -> str:
     return _clamp_by_cell(text, left) + "..." + _clamp_by_cell(text[::-1], right)[::-1]
 
 
-def _show_welcome(console, config, config_path: str = ""):
+def _show_welcome(console, config, config_path: str = "", session=None):
     """pico-style boxed welcome banner with Rich colour accents."""
     from synapse import __version__
     from rich.text import Text
@@ -1211,6 +1322,12 @@ def _show_welcome(console, config, config_path: str = ""):
     provider = config.provider.provider
     model = config.provider.model
     cwd = str(Path.cwd())
+    available, _ = _available_models(config)
+    ready = any(e.provider == provider and e.model == model for e in available)
+    status = "ready" if ready else "needs config"
+    session_label = "new"
+    if session is not None:
+        session_label = f"{session.id[:8]} · {len(session.messages)} msgs"
 
     # 宽度沿用 Console 创建时检测到的值（已在 _main_interface 用 OS API 设置）。
     width = max(getattr(console, "width", None) or 80, 40)
@@ -1263,6 +1380,10 @@ def _show_welcome(console, config, config_path: str = ""):
     def _pair(l_label: str, l_icon: str, l_val: str,
               r_label: str, r_icon: str, r_val: str) -> None:
         """Two-column row with aligned label columns (CJK-safe)."""
+        if width < 72:
+            _row(_clamp_text_by_cell(_field(l_label, l_icon, l_val), inner))
+            _row(_clamp_text_by_cell(_field(r_label, r_icon, r_val), inner))
+            return
         l_field = _clamp_text_by_cell(_field(l_label, l_icon, l_val), left_w)
         r_field = _clamp_text_by_cell(_field(r_label, r_icon, r_val), right_w)
         l_pad = max(0, left_w - l_field.cell_len)
@@ -1275,16 +1396,17 @@ def _show_welcome(console, config, config_path: str = ""):
 
     # ── render ────────────────────────────────────────────────────────
     console.print(_b("="))
-    for art_line in _WELCOME_ART:
-        console.print(_centered(art_line, style=_BRAND))
+    if width >= 72:
+        for art_line in _WELCOME_ART:
+            console.print(_centered(art_line, style=_BRAND))
     # Name · subtitle · status on one line
-    tagline_plain = f"{_WELCOME_NAME}  |  {_WELCOME_SUBTITLE}  |  {_WELCOME_STATUS}"
+    tagline_plain = f"{_WELCOME_NAME}  |  {_WELCOME_SUBTITLE}  |  {status}"
     tagline_body = _middle(tagline_plain, inner).center(inner)
     tagline_rich = (
         tagline_body
         .replace(_WELCOME_NAME, f"[bold {_BRAND}]{_WELCOME_NAME}[/bold {_BRAND}]")
         .replace(_WELCOME_SUBTITLE, f"[dim italic]{_WELCOME_SUBTITLE}[/dim italic]")
-        .replace(_WELCOME_STATUS, f"[green]{_WELCOME_STATUS}[/green]")
+        .replace(status, f"[{'green' if ready else 'yellow'}]{status}[/{'green' if ready else 'yellow'}]")
     )
     console.print(f"| {tagline_rich} |")
     console.print(_b("-"))
@@ -1296,6 +1418,7 @@ def _show_welcome(console, config, config_path: str = ""):
 
     _pair("MODEL", "*", model, "VERSION", "#", f"v{__version__}")
     _pair("PROVIDER", "@", provider, "PLANNING", "~", config.planning.mode)
+    _pair("SESSION", "&", session_label, "STATUS", "!", status)
     if config_path:
         cfg = Text()
         cfg.append("% ", style=_BRAND)
@@ -1543,7 +1666,8 @@ def _available_models(config):
         key = _effective_api_key(entry)
         if not key and entry.provider == main_provider:
             key = main_key
-        if key:
+        # Ollama is local and intentionally has no API key.
+        if key or entry.provider == "ollama":
             avail.append(entry)
         else:
             unavail.append(entry)
@@ -1801,8 +1925,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
 
     try:
         from rich.console import Console
-        console = Console(force_terminal=True)  # width auto-detected per render
-        use_rich = True
+        console = Console()  # Rich only when stdout is an actual terminal.
+        use_rich = bool(console.is_terminal)
     except ImportError:
         console = None
         use_rich = False
@@ -1812,9 +1936,14 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
 
     from synapse.core.session import Session
 
-    # First-run wizard: if no API key is configured anywhere, help the user set one.
+    # First-run wizard: the selected model must be usable; an unrelated key (or
+    # the always-keyless Ollama preset) must not suppress setup.
     avail, _ = _available_models(config)
-    if not avail:
+    current_ready = any(
+        e.provider == config.provider.provider and e.model == config.provider.model
+        for e in avail
+    )
+    if not current_ready:
         if use_rich:
             _first_run_wizard(console, config)
         else:
@@ -1833,16 +1962,19 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
     exiting: list = [False]
     prompt_session = _make_prompt_session() if use_rich else None
 
+    # Resolve the session before rendering the home screen so it can show a
+    # useful resume hint without importing the heavy runtime.
+    session = _resolve_session(resume)
+
     # Show the welcome banner immediately, before heavy imports.
     if use_rich:
-        _show_welcome(console, config, config_source)
+        _show_welcome(console, config, config_source, session)
         _last_cols = console.width
     else:
         print(f"输入任务开始工作，输入 /help 查看命令\n")
 
     # Deferred — created on first user input.
     _synapse: object = None
-    session = _resolve_session(resume)
     last_status = ""
 
     def _get_synapse():
@@ -1866,7 +1998,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         if use_rich and console.width != _last_cols:
             _last_cols = console.width
             console.print()
-            _show_welcome(console, config, config_source)
+            _show_welcome(console, config, config_source, session)
 
         try:
             if prompt_session is not None:
@@ -2094,76 +2226,11 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         # ---- Task execution ----
         synapse = _get_synapse()
 
-        if use_rich:
-            from rich.status import Status
-            tokens = {"input": 0, "output": 0}
-            baseline = {"in": 0, "out": 0}
-            elapsed = {"start": _time.monotonic(), "label": "Thinking..."}
+        live_run = _LiveRun(synapse, console, status_holder) if use_rich else None
+        if live_run is not None:
+            live_run.start()
 
-            def _fmt_tokens() -> str:
-                t = tokens["input"] + tokens["output"]
-                if t >= 1000:
-                    return f"{t/1000:.1f}k"
-                return str(t)
-
-            def _fmt_elapsed() -> str:
-                s = _time.monotonic() - elapsed["start"]
-                if s < 60:
-                    return f"{s:.0f}s"
-                return f"{int(s//60)}m{int(s%60):02d}s"
-
-            live = _LiveDisplay(console, _fmt_tokens, _fmt_elapsed)
-            live.start()
-            status_holder[:] = [live]
-
-            def _set_label(text: str) -> None:
-                live.set_label(text)
-
-            event_bus = synapse._container.resolve(EventBus)
-            if event_bus is not None:
-                async def _on_progress(event):
-                    msg = event.message
-                    # Reset streamed text at the start of each LLM call so the
-                    # panel always shows the current turn.
-                    if event.phase == "calling_llm":
-                        # Snapshot session total before this request so streamed
-                        # usage increments from this baseline (smooth counter).
-                        baseline["in"] = tokens["input"]
-                        baseline["out"] = tokens["output"]
-                        live.reset_text()
-                        live.set_label("Working...")
-                        return
-                    # Parse "tokens=A+B" emitted by the planning loop.
-                    if msg.startswith("tokens="):
-                        try:
-                            a, b = msg[7:].split("+", 1)
-                            tokens["input"] = int(a)
-                            tokens["output"] = int(b)
-                            live.set_label("Working...")
-                            return
-                        except (ValueError, IndexError):
-                            pass
-                    live.set_label(msg)
-                async def _on_token(event):
-                    live.add_text(event.text)
-                    if event.usage:
-                        u_in = event.usage.get("input", 0) or 0
-                        u_out = event.usage.get("output", 0) or 0
-                        tokens["input"] = baseline["in"] + u_in
-                        tokens["output"] = baseline["out"] + u_out
-                async def _on_tool_started(event):
-                    live.set_label(f"{event.tool_name}({_summarize_params(event.tool_params)}) ...")
-                async def _on_tool_completed(event):
-                    icon = "ok" if event.success else "FAIL"
-                    live.set_label(f"{event.tool_name} [{icon}] ({event.duration_ms}ms)")
-                event_bus.subscribe("agent_progress", _on_progress)
-                event_bus.subscribe("llm_token", _on_token)
-                event_bus.subscribe("tool_call_started", _on_tool_started)
-                event_bus.subscribe("tool_call_completed", _on_tool_completed)
-                swarm_tracker = _SwarmTracker(live.set_swarm_lines)
-                swarm_tracker.wire(event_bus)
-
-        prev_handler = _install_cancel_handler(synapse)
+        prev_handler = _install_cancel_handler(synapse, status_holder)
         try:
             try:
                 result = await synapse.run(user_input, session=session)
@@ -2184,28 +2251,14 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             break
         except Exception as exc:
             if use_rich:
-                live.stop()
                 console.print(f"  [bold red]{_friendly_error(exc)}[/bold red]")
             else:
                 print(_friendly_error(exc))
             continue
         finally:
             _restore_cancel_handler(prev_handler)
-            if use_rich:
-                try:
-                    live.stop()
-                except Exception:
-                    pass
-                status_holder[:] = []
-                if event_bus is not None:
-                    try:
-                        event_bus.unsubscribe("agent_progress", _on_progress)
-                        event_bus.unsubscribe("llm_token", _on_token)
-                        event_bus.unsubscribe("tool_call_started", _on_tool_started)
-                        event_bus.unsubscribe("tool_call_completed", _on_tool_completed)
-                        swarm_tracker.unwire(event_bus)
-                    except Exception:
-                        pass
+            if live_run is not None:
+                live_run.stop()
 
         _print_result(console, result, use_rich)
         session.save()

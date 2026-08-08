@@ -15,6 +15,8 @@ def test_status_style_mapping():
     assert _status_style_for("Task completed") == "green"
     assert _status_style_for("tool FAIL") == "red"
     assert _status_style_for("Token budget exhausted") == "red"
+    assert _status_style_for("工具失败 · shell") == "red"
+    assert _status_style_for("任务完成") == "green"
 
 
 def test_print_result_rich():
@@ -34,6 +36,8 @@ def test_print_result_non_rich(capsys):
     captured = capsys.readouterr().out
     assert "[Status: partial]" in captured
     assert "done" in captured
+    assert "token 0" in captured
+    assert "下一步" in captured
 
 
 def test_live_display_is_transient():
@@ -125,3 +129,58 @@ def test_live_display_bounds_single_large_chunk():
     live.add_text("x" * (cap + 1000))
     assert live._buf_len <= cap
     assert len(live._buf) == 1
+
+
+def test_live_display_bounds_and_renders_timeline():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80), lambda: "", lambda: "")
+    for i in range(10):
+        live.add_timeline(f"step-{i}")
+
+    assert live._timeline == [f"step-{i}" for i in range(5, 10)]
+    rendered = live._render().renderable.plain
+    assert "最近步骤" in rendered
+    assert "step-9" in rendered
+    assert "step-0" not in rendered
+
+
+def test_live_display_coalesces_token_refreshes():
+    import io
+    from unittest.mock import Mock
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    live = _LiveDisplay(Console(file=io.StringIO(), width=80), lambda: "", lambda: "")
+    live._live.update = Mock()
+    for _ in range(100):
+        live.add_text("x")
+
+    assert live._live.update.call_count <= 2
+
+
+def test_welcome_uses_compact_layout_on_narrow_terminal():
+    import io
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from rich.cells import cell_len
+    from rich.console import Console
+    from synapse.adapters.cli import _WELCOME_ART, _show_welcome
+    from synapse.config.schema import SynapseConfig
+
+    console = Console(width=40, file=io.StringIO(), force_terminal=True, record=True)
+    config = SynapseConfig()
+    config.provider.provider = "ollama"
+    config.provider.model = "qwen3.5:4b"
+    session = SimpleNamespace(id="abcdef123456", messages=[object()])
+
+    with patch("synapse.adapters.cli.Path.cwd", return_value="D:/项目/代码"):
+        _show_welcome(console, config, "synapse.yaml", session)
+
+    text = console.export_text()
+    assert _WELCOME_ART[0].strip() not in text
+    assert "ready" in text
+    assert "abcdef12" in text
+    assert {cell_len(line) for line in text.splitlines()} == {40}
