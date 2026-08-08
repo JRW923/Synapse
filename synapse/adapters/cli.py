@@ -493,36 +493,36 @@ class _LiveDisplay:
         pieces = [f"[{style}]{dot} {label}[/{style}]"]
         if iteration:
             maximum = str(max_iterations) if max_iterations else "--"
-            pieces.append(f"[dim]iter {iteration:02d}/{maximum}[/dim]")
+            pieces.append(f"[{_SYSTEM}]iter {iteration:02d}/{maximum}[/{_SYSTEM}]")
         tk = self._fmt_tokens()
         if tk and not self._fmt_stats:
-            pieces.append(f"[dim]{tk} tok[/dim]")
+            pieces.append(f"[{_SYSTEM}]{tk} tok[/{_SYSTEM}]")
         el = self._fmt_elapsed()
         if el:
-            pieces.append(f"[dim]{el}[/dim]")
+            pieces.append(f"[{_SYSTEM}]{el}[/{_SYSTEM}]")
         header = "  ·  ".join(pieces)
         lines = body[-1600:].splitlines() if body else []
         line_limit = max(20, getattr(self._console, "width", 80) - 8)
         lines = [_middle(line, line_limit) for line in lines[-6:]]
         text = Text()
         if self._fmt_stats:
-            text.append(self._fmt_stats() + "\n", style=_HINT)
+            text.append(self._fmt_stats() + "\n", style=_SYSTEM)
         if self._fmt_progress:
             progress = self._fmt_progress()
             if progress:
-                text.append(progress + "\n", style=_INFO)
+                text.append(progress + "\n", style=_SYSTEM)
         if lines:
             text.append("\n".join(lines), style="none")
         else:
-            text.append("…", style=_HINT)
+            text.append("…", style=_SYSTEM)
         if timeline:
-            text.append("\n\nRECENT TOOLS\n", style=f"bold {_INFO}")
+            text.append("\n\nRECENT TOOLS\n", style=f"bold {_SYSTEM}")
             for line in timeline:
-                text.append(f"  {line}\n", style=_INFO)
+                text.append(f"  {line}\n", style=_SYSTEM)
         if swarm_lines:
-            text.append("\nSWARM\n", style=f"bold {_INFO}")
+            text.append("\nSWARM\n", style=f"bold {_SYSTEM}")
             for line in swarm_lines:
-                text.append(line + "\n", style=_INFO)
+                text.append(line + "\n", style=_SYSTEM)
         return Panel(text, title=header, border_style=_BORDER, box=box.ROUNDED, expand=True)
 
 
@@ -1296,10 +1296,11 @@ _WELCOME_NAME = "Synapse"
 
 #: Brand palette — single place to tweak the CLI look.
 _BRAND = "bright_cyan"          # prompt, field icons and current activity
-_INFO = "white"                 # stable values and live-panel metadata
+_INFO = "white"                 # stable homepage values
 _LABEL = "bold bright_blue"     # all field labels
 _BORDER = "bright_cyan"         # colored outer frame and separators
 _HINT = "grey70"                # secondary text / hints
+_SYSTEM = "grey58"               # runtime metadata, distinct from task output
 _ICON = "bright_cyan"           # one consistent icon family
 _MASCOT_YELLOW = "bright_yellow"
 _MASCOT_RED = "bright_red"
@@ -1371,11 +1372,11 @@ def _print_result(console, result, use_rich: bool) -> None:
     parts = [
         Text(f"● {title}", style=f"bold {color}"),
         Markdown(result.output or ""),
-        Rule(style=_BORDER),
-        Text(summary, style=_HINT),
+        Rule(style=_SYSTEM),
+        Text(summary, style=_SYSTEM),
     ]
     if hint:
-        parts.append(Text(f"下一步：{hint}", style=f"{_WARNING}"))
+        parts.append(Text(f"下一步：{hint}", style=_SYSTEM))
     console.print(Panel(
         Group(*parts), border_style=color, box=box.ROUNDED,
         expand=True, padding=(0, 1),

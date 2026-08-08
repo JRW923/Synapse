@@ -305,6 +305,36 @@ def test_live_display_renders_token_breakdown_and_iteration():
     assert "━" in plain
 
 
+def test_live_system_metadata_uses_a_distinct_neutral_style():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay, _SYSTEM
+
+    display = _LiveDisplay(
+        Console(file=io.StringIO(), width=80),
+        lambda: "2.0k",
+        lambda: "4s",
+        lambda: "tokens  in 1.2k · out 840 · total 2.0k tok",
+        lambda: "  ━━━━━━━━━━━━━━━━━━━━━━━━",
+    )
+    display.set_iteration(3, 50)
+    display.add_timeline("✓ shell                         12ms")
+
+    styles = {span.style for span in display._render().renderable.spans}
+    assert _SYSTEM in styles
+    assert "white" not in styles
+
+
+def test_result_summary_uses_system_style():
+    import io
+    from rich.console import Console
+
+    console = Console(file=io.StringIO(), width=80, force_terminal=True, record=True)
+    _print_result(console, _result(ResultStatus.SUCCESS), True)
+    html = console.export_html()
+    assert "#949494" in html  # Rich's grey58 output, separate from task body
+
+
 def test_token_count_format_is_compact_and_stable():
     from synapse.adapters.cli import _format_token_count
 
