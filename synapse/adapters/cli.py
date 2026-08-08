@@ -1261,11 +1261,21 @@ def _make_prompt_session():
 #: Synapse block logo. Each glyph is a full terminal cell, so the logo stays
 #: aligned in PowerShell and CJK workspaces without external image assets.
 _WELCOME_ART = (
-    "█████",
-    "██",
-    "█████",
-    "    ██",
-    "█████",
+    "  ███████  ",
+    " █████████ ",
+    "███        ",
+    " ████████   ",
+    "      ███  ",
+    "██    ███  ",
+    " ███████   ",
+)
+
+_WELCOME_COMPACT_ART = (
+    " ██████ ",
+    "██     ",
+    " █████  ",
+    "     ██ ",
+    "██████  ",
 )
 
 _WELCOME_NAME = "Synapse"
@@ -1403,7 +1413,7 @@ def _middle(text: str, limit: int) -> str:
 
 
 def _show_welcome(console, config, config_path: str = "", session=None):
-    """Render a compact, width-aware workspace header."""
+    """Render an aligned, width-aware workspace header."""
     from synapse import __version__
     from rich.text import Text
 
@@ -1419,71 +1429,120 @@ def _show_welcome(console, config, config_path: str = "", session=None):
         session_label = f"{session.id[:8]} · {len(session.messages)} msgs"
 
     width = max(getattr(console, "width", None) or 80, 40)
+    inner = width - 4
     tools_count = len(getattr(config.tools, "enabled", []) or [])
-    config_label = _middle(str(config_path).replace(" + ", " · "), max(12, width - 26)) if config_path else "defaults"
+    config_label = str(config_path).replace(" + ", " · ") if config_path else "defaults"
 
     def _fit_text(content, limit: int) -> Text:
         if isinstance(content, Text):
-            return _clamp_text_by_cell(content, limit)
-        return Text(_middle(str(content), limit))
+            return _clamp_text_by_cell(content, max(0, limit))
+        return Text(_middle(str(content), max(0, limit)))
 
     def _boxed_line(content="") -> Text:
-        inner = width - 4
-        line = Text("│ ")
         value = _fit_text(content, inner)
+        line = Text("│ ")
         line.append(value)
         line.append(" " * max(0, inner - value.cell_len))
         line.append(" │")
         return line
 
-    def _field(label: str, value: str, style: str = _INFO) -> Text:
-        text = Text()
-        text.append(f"{label:<10}", style=_LABEL)
-        text.append(_middle(value, max(8, width - 18)), style=style)
-        return text
-
     def _plain_line(content: str) -> Text:
         value = _middle(content, width)
         return Text(value + " " * max(0, width - _cell_len(value)))
 
+    def _field(label: str, value: str, limit: int, icon: str = "◆", style: str = _INFO) -> Text:
+        text = Text()
+        text.append(f"{icon} ", style=_BRAND)
+        text.append(f"{label:<10}", style=_LABEL)
+        text.append(_middle(value, max(0, limit - text.cell_len)), style=style)
+        if text.cell_len < limit:
+            text.append(" " * (limit - text.cell_len))
+        return text
+
+    def _art_line(art_line: str, limit: int, row: int) -> Text:
+        text = Text(_middle(art_line, limit), style=_BRAND if row % 2 == 0 else _INFO)
+        if text.cell_len < limit:
+            text.append(" " * (limit - text.cell_len))
+        return text
+
     if width < 52:
-        console.print(_plain_line(f"█ {_WELCOME_NAME}  {status}"))
+        console.print(_plain_line(f"◆ {_WELCOME_NAME}  {status}"))
         console.print(_plain_line(f"{provider}/{model} · {config.planning.mode}"))
         console.print(_plain_line(f"{_middle(cwd, width - 14)} · {session_label}"))
         return
 
     console.print(Text("╭" + "─" * (width - 2) + "╮", style=_BORDER))
-    if width >= 72:
-        for index, art_line in enumerate(_WELCOME_ART):
-            row = Text("  ")
-            row.append(art_line, style=_BRAND)
-            if index == 0:
-                row.append(f"  {_WELCOME_NAME}", style=f"bold {_BRAND}")
-                row.append(f"  v{__version__}", style=_HINT)
-                row.append(" " * 4)
-                row.append("● ", style=status_style)
-                row.append(status, style=f"bold {status_style}")
-            elif index == 1:
-                row.append("  ")
-                row.append(_middle(f"workspace  {cwd}", width - 17), style=_INFO)
-                row.append(f"  session  {session_label}", style=_HINT)
-            elif index == 2:
-                row.append("  ")
-                row.append(_middle(f"model      {provider}/{model}", width - 17), style=_INFO)
-                row.append(f"  plan  {config.planning.mode}", style=_HINT)
-            elif index == 3:
-                row.append("  ")
-                row.append(_middle(f"config     {config_label}", width - 17), style=_HINT)
-                row.append(f"  tools {tools_count}", style=_HINT)
+    if width >= 92:
+        logo_width = max(_cell_len(row) for row in _WELCOME_ART)
+        gap = 3
+        right_width = max(20, inner - logo_width - gap)
+        rows = (
+            Text.assemble(
+                _art_line(_WELCOME_ART[0], logo_width, 0), " " * gap,
+                _field("SYNAPSE", f"v{__version__}  ·  {status}", right_width, "◆", status_style),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_ART[1], logo_width, 1), " " * gap,
+                _field("WORKSPACE", cwd, right_width, "⌂"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_ART[2], logo_width, 2), " " * gap,
+                _field("MODEL", f"{provider}/{model}", right_width, "◈"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_ART[3], logo_width, 3), " " * gap,
+                _field("PLANNING", config.planning.mode, right_width, "◇"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_ART[4], logo_width, 4), " " * gap,
+                _field("SESSION", session_label, right_width, "◎"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_ART[5], logo_width, 5), " " * gap,
+                _field("CONFIG", config_label, right_width, "▣", _HINT),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_ART[6], logo_width, 6), " " * gap,
+                _field("TOOLS", f"{tools_count} enabled", right_width, "⚙", _HINT),
+            ),
+        )
+        for row in rows:
             console.print(_boxed_line(row))
     else:
-        row = Text("  ")
-        row.append(_WELCOME_NAME, style=f"bold {_BRAND}")
-        row.append(f"  ● {status}", style=f"bold {status_style}")
-        console.print(_boxed_line(row))
-        console.print(_boxed_line(_field("WORKSPACE", cwd)))
-        console.print(_boxed_line(_field("MODEL", f"{provider}/{model}")))
-        console.print(_boxed_line(_field("PLAN", f"{config.planning.mode} · session {session_label}", _HINT)))
+        logo_width = max(_cell_len(row) for row in _WELCOME_COMPACT_ART)
+        gap = 3
+        right_width = max(16, inner - logo_width - gap)
+        rows = (
+            Text.assemble(
+                _art_line(_WELCOME_COMPACT_ART[0], logo_width, 0), " " * gap,
+                _field("SYNAPSE", f"v{__version__}  ·  {status}", right_width, "◆", status_style),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_COMPACT_ART[1], logo_width, 1), " " * gap,
+                _field("WORKSPACE", cwd, right_width, "⌂"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_COMPACT_ART[2], logo_width, 2), " " * gap,
+                _field("MODEL", f"{provider}/{model}", right_width, "◈"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_COMPACT_ART[3], logo_width, 3), " " * gap,
+                _field("PLANNING", config.planning.mode, right_width, "◇"),
+            ),
+            Text.assemble(
+                _art_line(_WELCOME_COMPACT_ART[4], logo_width, 4), " " * gap,
+                _field("SESSION", session_label, right_width, "◎"),
+            ),
+        )
+        for row in rows:
+            console.print(_boxed_line(row))
+        tail_prefix = " " * (logo_width + gap)
+        console.print(_boxed_line(Text.assemble(
+            tail_prefix, _field("CONFIG", config_label, right_width, "▣", _HINT),
+        )))
+        console.print(_boxed_line(Text.assemble(
+            tail_prefix, _field("TOOLS", f"{tools_count} enabled", right_width, "⚙", _HINT),
+        )))
     console.print(Text("╰" + "─" * (width - 2) + "╯", style=_BORDER))
 
 

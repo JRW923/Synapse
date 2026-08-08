@@ -88,6 +88,35 @@ def _error_tool_result(tool_name: str, reason: str):
     )
 
 
+def _is_non_retryable_llm_error(exc: BaseException) -> bool:
+    """Return True for authentication/permission failures that cannot heal by retrying."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    markers = (
+        "authentication_error",
+        "invalid_api_key",
+        "invalid api key",
+        "api key is invalid",
+        "authentication fails",
+        "permission denied",
+        "forbidden",
+        "error code: 401",
+        "error code: 403",
+        "status_code=401",
+        "status_code=403",
+    )
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        if getattr(response, "status_code", None) in {401, 403}:
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in markers):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class ReActPlanner:
     """Classic ReAct loop: the LLM thinks, calls tools, observes results, repeats.
 
@@ -391,13 +420,21 @@ class ReActPlanner:
                     )
                     break
                 except Exception as e:
-                    if attempt == max_llm_retries:
+                    non_retryable = _is_non_retryable_llm_error(e)
+                    if non_retryable or attempt == max_llm_retries:
+                        attempts = attempt + 1
+                        detail = (
+                            f"LLM API call failed after {attempts} attempt"
+                            f"{'s' if attempts != 1 else ''}"
+                            + (" (authentication/permission error; retries skipped)" if non_retryable else "")
+                            + f": {e}"
+                        )
                         # All retries exhausted — return FAILED
-                        self._log(f"ERROR: LLM call failed after {max_llm_retries + 1} attempts: {e}")
+                        self._log(f"ERROR: {detail}")
                         metrics.duration_ms = int((time.time() - start_time) * 1000)
                         return AgentResult(
                             status=ResultStatus.FAILED,
-                            output=f"LLM API call failed after {max_llm_retries + 1} attempts: {e}",
+                            output=detail,
                             metrics=metrics,
                         )
                     await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s

@@ -7,6 +7,7 @@ from synapse.core.events import EventBus
 from synapse.protocols.llm import LLMResponse, Message
 from synapse.protocols.tool import ToolResult, ToolCallMetadata
 from synapse.protocols.retriever import Context
+from synapse.core.exceptions import ProviderError
 
 
 @pytest.mark.asyncio
@@ -267,6 +268,39 @@ async def test_react_llm_call_times_out(monkeypatch):
     )
     assert result.status.value == "failed"
     assert "LLM API call failed" in result.output
+
+
+@pytest.mark.asyncio
+async def test_react_auth_error_fails_without_retry(monkeypatch):
+    """401/403 failures are deterministic and must not spend retry backoff."""
+    import asyncio as _asyncio
+
+    sleeps = []
+
+    async def _record_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(_asyncio, "sleep", _record_sleep)
+
+    mock_llm = AsyncMock()
+    mock_llm.stream.side_effect = TypeError
+    mock_llm.chat.side_effect = ProviderError(
+        "Anthropic streaming error: Error code: 401 authentication_error invalid api key"
+    )
+    mock_tools = AsyncMock()
+    mock_tools.get_schemas.return_value = []
+
+    planner = ReActPlanner(max_iterations=1, max_llm_retries=3)
+    result = await planner.execute(
+        task="test", context=Context(), tools=mock_tools, llm=mock_llm,
+        sandbox=AsyncMock(), session=Session(), event_bus=EventBus(),
+    )
+
+    assert result.status.value == "failed"
+    assert "after 1 attempt" in result.output
+    assert "retries skipped" in result.output
+    assert mock_llm.chat.call_count == 1
+    assert sleeps == []
 
 
 @pytest.mark.asyncio

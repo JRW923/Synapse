@@ -201,8 +201,8 @@ def test_welcome_uses_block_logo_on_wide_terminal():
     text = console.export_text()
     assert "█████" in text
     assert ".-=========-." not in text
-    assert "workspace" in text
-    assert "tools" in text
+    assert "WORKSPACE" in text
+    assert "TOOLS" in text
 
 
 def test_welcome_medium_terminal_reflows_to_single_column():
@@ -223,6 +223,27 @@ def test_welcome_medium_terminal_reflows_to_single_column():
     assert {cell_len(line) for line in lines} == {60}
     assert "WORKSPACE" in text
     assert "MODEL" in text
+
+
+def test_welcome_fields_share_a_stable_value_column():
+    import io
+    from unittest.mock import patch
+    from rich.console import Console
+    from synapse.adapters.cli import _show_welcome
+    from synapse.config.schema import SynapseConfig
+
+    console = Console(width=80, file=io.StringIO(), force_terminal=True, record=True)
+    config = SynapseConfig()
+    config.provider.provider = "ollama"
+    config.provider.model = "qwen3.5:4b"
+
+    with patch("synapse.adapters.cli.Path.cwd", return_value="D:/项目/代码"):
+        _show_welcome(console, config, "models.json")
+
+    lines = console.export_text().splitlines()
+    labels = ["SYNAPSE", "WORKSPACE", "MODEL", "PLANNING", "SESSION", "CONFIG", "TOOLS"]
+    positions = [next(line.index(label) for line in lines if label in line) for label in labels]
+    assert len(set(positions)) == 1
 
 
 def test_live_display_renders_token_breakdown_and_iteration():

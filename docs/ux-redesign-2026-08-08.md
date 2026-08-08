@@ -222,10 +222,12 @@ EventBus 或 assistant 文本追加。
 
 本轮已按上述边界完成实现：
 
-- `synapse/adapters/cli.py`：首页改为 5x5 实心色块 logo，按 80/60/40 列分档；元数据、readiness、session 和 tools 数量采用固定列展示。
+- `synapse/adapters/cli.py`：首页改为 7 行实心色块 logo（中屏使用 5 行 compact mark），按 92/52 列分档；图标、标签和值使用固定轨道，元数据、readiness、session 和 tools 数量不再动态挤压。
 - `_LiveDisplay` / `_LiveRun`：任务过程改为圆角 Panel，新增 phase、iteration/max、input/output/total token、elapsed、进度条和最近工具固定列时间线；保留既有 `EventBus`、刷新线程和 token baseline reconciliation。
 - `_print_result`：统一为 `TASK COMPLETE/PARTIAL/FAILED` 收束面板，plain fallback 仍保持无 ANSI 的可读顺序。
 - prompt 更新为 `◆ synapse ›`，未引入 Textual、新依赖或新的事件协议。
-- 新增 40/60/80 列、block logo、token breakdown、iteration 和结果面板回归测试；为配置加载测试显式隔离用户级 `models.json`。
+- 新增 40/60/80/100 列、block logo、字段起始列、token breakdown、iteration 和结果面板回归测试；为配置加载测试显式隔离用户级 `models.json`。
 
-验证记录：`python -m pytest -q` 结果为 **408 passed, 1 skipped**；`python -m compileall -q synapse` 和 `git diff --check` 均通过。测试环境仍有既存的 Starlette/httpx deprecation warning，以及 Qdrant local mode 清理 `.lock` 的 Windows 资源警告，不属于本轮 UI 改动。
+本轮追加错误韧性优化：`ReActPlanner` 对 401/403、`authentication_error`、invalid API key 和 permission denied 做 fail-fast，鉴权错误不再进行无意义的指数退避；超时和限流仍保留原有重试策略。
+
+验证记录：`python -m pytest -q` 结果为 **410 passed, 1 skipped**；`python -m compileall -q synapse` 和 `git diff --check` 均通过。测试环境仍有既存的 Starlette/httpx deprecation warning，以及 Qdrant local mode 清理 `.lock` 的 Windows 资源警告，不属于本轮 UI 改动。
