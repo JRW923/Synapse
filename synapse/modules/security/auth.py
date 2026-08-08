@@ -68,11 +68,17 @@ class ActionAuthorizer:
         allow_external: bool = False,
         confirmation_enabled: bool = True,
         allowed_paths: list[str] | None = None,
+        allowlisted_commands: list[str] | None = None,
     ):
         self.workspace_root = Path(workspace_root).resolve()
         self.allow_external = allow_external
         self.confirmation_enabled = confirmation_enabled
         self._allowed_paths = [self._resolve_scope_boundary(p) for p in (allowed_paths or [])]
+        self._allowlisted_commands = (
+            set(allowlisted_commands)
+            if allowlisted_commands is not None
+            else set(self.ALWAYS_ALLOWED_COMMANDS) | set(self.CONFIRM_REQUIRED_COMMANDS)
+        )
 
     def create_request(
         self, tool_name: str, params: dict, risk_level: RiskLevel, session_id: str,
@@ -304,7 +310,7 @@ class ActionAuthorizer:
         # CONFIRM_REQUIRED commands (python/curl/wget) are allowed but gated by
         # the confirmation branch; without them here `python x.py` would be
         # denied as "not in allowlist" before confirmation was ever offered.
-        allowed = set(self.ALWAYS_ALLOWED_COMMANDS) | set(self.CONFIRM_REQUIRED_COMMANDS)
+        allowed = self._allowlisted_commands
         return all(
             self._first_token(seg) in allowed
             for seg in segments

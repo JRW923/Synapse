@@ -54,6 +54,7 @@ class McpManager:
 
         # server_name -> list of fully-qualified tool names
         self._tool_names: dict[str, list[str]] = {}
+        self._connected_loop = None
 
     # -- Public API ----------------------------------------------------------
 
@@ -95,6 +96,7 @@ class McpManager:
                 client=client,
                 server_name=config.name,
                 tool_schema=tool_schema,
+                risk_level=config.risk_level,
             )
             self._tool_registry.register(wrapper)
             tool_names.append(wrapper.name)
@@ -118,6 +120,7 @@ class McpManager:
         """
         for config in servers:
             await self.add_server(config)
+        self._connected_loop = asyncio.get_running_loop()
 
     async def ensure_current_loop(self, servers: list[McpServerConfig]) -> None:
         """Connect — or reconnect on the current event loop — every server.
@@ -129,12 +132,17 @@ class McpManager:
         down and re-established on the running loop.
         """
         current = asyncio.get_running_loop()
+        if self._connected_loop is current and all(
+            config.name in self._clients for config in servers
+        ):
+            return
         for name in list(self._clients):
             if self._clients[name].loop is not current:
                 await self.remove_server(name)
         for config in servers:
             if config.name not in self._clients:
                 await self.add_server(config)
+        self._connected_loop = current
 
     async def remove_server(self, name: str) -> None:
         """Unregister all tools belonging to *name* and disconnect its client.

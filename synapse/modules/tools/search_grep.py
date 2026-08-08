@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
+from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
 
 
 class GrepTool:
@@ -24,9 +25,20 @@ class GrepTool:
     risk_level = RiskLevel.READ_ONLY
     category = ToolCategory.CODE_UNDERSTANDING
 
+    def __init__(self, workspace_root: str | None = None):
+        self._workspace_root = Path(workspace_root).resolve() if workspace_root else None
+
     async def execute(self, params: dict, sandbox=None) -> ToolResult:
         pattern = params["pattern"]
         search_path = params.get("path", ".")
+        try:
+            search_root = resolve_workspace_path(search_path, self._workspace_root)
+        except (WorkspacePathError, ValueError) as e:
+            return ToolResult(
+                success=False, output="", error=str(e),
+                metadata=ToolCallMetadata(tool_name="grep"),
+            )
+        search_path = str(search_root)
         meta = ToolCallMetadata(tool_name="grep")
 
         # Try ripgrep first via async subprocess (non-blocking)

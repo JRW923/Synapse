@@ -156,17 +156,30 @@ class SwarmPlanner:
     async def execute(self, task, context, tools, llm, sandbox, session, event_bus) -> AgentResult:
         start_time = time.time()
         metrics = ExecutionMetrics()
+        result = None
+        conflicts: list[str] = []
         try:
             if self.autonomous:
-                return await self._execute_autonomous(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
-            return await self._execute_inner(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
+                result = await self._execute_autonomous(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
+            else:
+                result = await self._execute_inner(task, context, tools, llm, sandbox, session, event_bus, start_time, metrics)
         finally:
             # s18 — fold worker edits back into the base workspace BEFORE tearing
             # down, so the swarm's results survive cleanup (otherwise every
             # worker's changes were silently discarded).
             if self._worktree_manager is not None:
-                self._worktree_manager.merge_all()
+                conflicts = self._worktree_manager.merge_all()
                 self._worktree_manager.remove_all()
+        if conflicts:
+            result.status = ResultStatus.PARTIAL
+            names = ", ".join(sorted(set(conflicts)))
+            result.output += f"\n\nWorktree merge conflicts (not overwritten): {names}"
+            await event_bus.emit(SwarmVerified(
+                session_id=session.id,
+                status=ResultStatus.PARTIAL.value,
+                issues=f"Worktree merge conflicts: {names}",
+            ))
+        return result
 
     async def _execute_inner(self, task, context, tools, llm, sandbox, session, event_bus, start_time, metrics) -> AgentResult:
 

@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
+from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
 
 # Cap on emitted content so a huge file can't blow the context window.
 MAX_OUTPUT_CHARS = 60_000
@@ -30,8 +31,17 @@ class ReadTool:
     risk_level = RiskLevel.READ_ONLY
     category = ToolCategory.FILE
 
+    def __init__(self, workspace_root: str | None = None):
+        self._workspace_root = Path(workspace_root).resolve() if workspace_root else None
+
     async def execute(self, params: dict, sandbox=None) -> ToolResult:
-        path = Path(params["path"])
+        try:
+            path = resolve_workspace_path(params["path"], self._workspace_root)
+        except (WorkspacePathError, ValueError) as e:
+            return ToolResult(
+                success=False, output="", error=str(e),
+                metadata=ToolCallMetadata(tool_name="read"),
+            )
         offset = max(1, int(params.get("offset", 1) or 1))
         limit = params.get("limit")
         limit = int(limit) if limit else None

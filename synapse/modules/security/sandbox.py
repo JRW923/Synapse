@@ -16,6 +16,8 @@ they were not. ``method`` now reports what is actually used.)
 import asyncio
 import os
 import signal
+import shutil
+import sys
 from pathlib import Path
 
 from synapse.protocols.sandbox import SandboxResult
@@ -27,14 +29,47 @@ except ImportError:  # pragma: no cover
 
 
 class ProcessSandbox:
-    """Process-tree isolation via process group (Unix) or Job Object (Windows)."""
+    """Process containment with optional filesystem/network sandbox backends."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        backend: str = "process",
+        allow_network: bool = False,
+        docker_image: str = "python:3.12-slim",
+    ) -> None:
         self._job = None  # Windows Job Object handle (per execution)
+        self.allow_network = allow_network
+        self.docker_image = docker_image
+        self.backend = self._resolve_backend(backend)
+
+    @staticmethod
+    def _resolve_backend(backend: str) -> str:
+        requested = backend.lower()
+        aliases = {"bwrap": "bubblewrap", "sandbox-exec": "seatbelt"}
+        requested = aliases.get(requested, requested)
+        if requested == "auto":
+            if os.name != "nt" and shutil.which("bwrap"):
+                return "bubblewrap"
+            if sys.platform == "darwin" and shutil.which("sandbox-exec"):
+                return "seatbelt"
+            return "process"
+        executables = {
+            "bubblewrap": "bwrap",
+            "seatbelt": "sandbox-exec",
+            "docker": "docker",
+        }
+        if requested not in {"process", *executables}:
+            raise ValueError(f"Unknown sandbox backend '{backend}'")
+        executable = executables.get(requested)
+        if executable and not shutil.which(executable):
+            raise RuntimeError(f"Sandbox backend '{requested}' is unavailable")
+        return requested
 
     @property
     def method(self) -> str:
         """The isolation mechanism actually applied to child processes."""
+        if self.backend != "process":
+            return self.backend
         if os.name == "nt":
             return "windows_job_object"
         return "process_group"
@@ -52,7 +87,20 @@ class ProcessSandbox:
         timeout: int = 120,
     ) -> SandboxResult:
         try:
-            if os.name == "nt":
+            workdir = (cwd or Path.cwd()).resolve()
+            argv = self._sandbox_argv(command, workdir)
+            if argv is not None:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=str(workdir),
+                    env=env,
+                    start_new_session=os.name != "nt",
+                )
+                if os.name == "nt":
+                    self._assign_job(proc.pid)
+            elif os.name == "nt":
                 proc = await asyncio.create_subprocess_shell(
                     command,
                     stdout=asyncio.subprocess.PIPE,
@@ -101,6 +149,33 @@ class ProcessSandbox:
                 timed_out=False,
                 platform=self.platform,
             )
+
+    def _sandbox_argv(self, command: str, cwd: Path) -> list[str] | None:
+        """Build argv for an explicitly selected strong backend."""
+        if self.backend == "process":
+            return None
+        if self.backend == "bubblewrap":
+            args = [
+                "bwrap", "--die-with-parent", "--ro-bind", "/", "/",
+                "--bind", str(cwd), str(cwd), "--chdir", str(cwd),
+                "--proc", "/proc", "--dev", "/dev",
+            ]
+            if not self.allow_network:
+                args.append("--unshare-net")
+            return [*args, "/bin/sh", "-lc", command]
+        if self.backend == "seatbelt":
+            network = "(allow network*)" if self.allow_network else "(deny network*)"
+            profile = (
+                "(version 1)(allow process*)(allow file-read*)"
+                f'(allow file-write* (subpath "{cwd}")){network}'
+            )
+            return ["sandbox-exec", "-p", profile, "/bin/sh", "-lc", command]
+        network = "bridge" if self.allow_network else "none"
+        return [
+            "docker", "run", "--rm", "--network", network,
+            "-v", f"{cwd}:/workspace", "-w", "/workspace",
+            self.docker_image, "sh", "-lc", command,
+        ]
 
     # ------------------------------------------------------------------
     # Process-tree kill

@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 from synapse.protocols.llm import Message
+from synapse.core.tokenizer import count_tokens
 
 # Default on-disk location for persisted sessions (mirrors ~/.synapse/config.yaml).
 DEFAULT_SESSION_DIR = Path.home() / ".synapse" / "sessions"
@@ -59,10 +60,12 @@ class Session:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{self.id}.json"
-        path.write_text(
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        temp_path.write_text(
             json.dumps(self.to_dict(), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        temp_path.replace(path)
         return path
 
     @classmethod
@@ -100,4 +103,4 @@ class Session:
     def estimated_tokens(self) -> int:
         """Rough token estimate (~1.3 chars per token for English)."""
         total_chars = sum(len(m.content) for m in self.messages)
-        return max(1, int(total_chars / 1.3))
+        return max(1, sum(count_tokens(m.content) for m in self.messages))

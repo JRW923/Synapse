@@ -7,7 +7,9 @@ from synapse.eval.runner import (
     TaskResult,
     BenchmarkResult,
 )
-from synapse.eval.benchmarks import SWEBenchAdapter, ProcessQualityBenchmark
+from synapse.eval.benchmarks import (
+    SWEBenchAdapter, ProcessQualityBenchmark, RepoPytestBenchmark,
+)
 
 __all__ = [
     "BenchmarkRunner",
@@ -16,5 +18,6 @@ __all__ = [
     "TaskResult",
     "BenchmarkResult",
     "SWEBenchAdapter",
+    "RepoPytestBenchmark",
     "ProcessQualityBenchmark",
 ]

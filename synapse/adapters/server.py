@@ -64,6 +64,7 @@ class RunResponse(BaseModel):
     status: str
     output: str
     session_id: str
+    run_id: str = ""
     artifacts: list[ArtifactResponse] = []
     metrics: MetricsResponse = MetricsResponse()
     run_score: dict[str, Any] | None = None  # L.4 — runtime score + process hint
@@ -176,6 +177,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
             status=result.status.value,
             output=result.output,
             session_id=session.id,
+            run_id=session.metadata.get("last_run_id", ""),
             artifacts=[
                 ArtifactResponse(path=a.path, content=a.content, action=a.action)
                 for a in result.artifacts
@@ -242,6 +244,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
                     "status": res.status.value,
                     "output": res.output,
                     "session_id": session.id,
+                    "run_id": session.metadata.get("last_run_id", ""),
                     "artifacts": [
                         {"path": a.path, "content": a.content, "action": a.action}
                         for a in res.artifacts
@@ -267,15 +270,20 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
         async def _event_stream():
             run_task = asyncio.create_task(_run())
-            while True:
-                item = await queue.get()
-                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-                if item["type"] in ("done", "error"):
-                    break
             try:
+                while True:
+                    item = await queue.get()
+                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                    if item["type"] in ("done", "error"):
+                        break
                 await run_task
-            except Exception:
-                pass
+            finally:
+                # Starlette closes the async generator when the SSE client
+                # disconnects. Cancel the matching agent run so it does not
+                # continue spending tokens and mutating files in the background.
+                if not run_task.done():
+                    run_task.cancel()
+                await asyncio.gather(run_task, return_exceptions=True)
 
         return StreamingResponse(_event_stream(), media_type="text/event-stream")
 

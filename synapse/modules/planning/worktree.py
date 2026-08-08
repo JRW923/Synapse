@@ -8,6 +8,7 @@ ponytail: 仅支持 git 仓库；非 git 目录退化为独立临时子目录（
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -33,6 +34,9 @@ class WorktreeManager:
         )
         self.worktrees_dir.mkdir(parents=True, exist_ok=True)
         self._paths: dict[str, Path] = {}
+        self._snapshots: dict[str, dict[str, str]] = {}
+        self._merged_hashes: dict[str, str] = {}
+        self._conflicts: list[str] = []
 
     # ------------------------------------------------------------------
     def _is_git_repo(self) -> bool:
@@ -62,11 +66,13 @@ class WorktreeManager:
         else:
             path.mkdir(parents=True, exist_ok=True)
         self._paths[agent_id] = path
+        self._snapshots[agent_id] = self._snapshot(path)
         return path
 
     def remove(self, agent_id: str) -> None:
         """Remove the isolated dir (and its git branch, if any) for *agent_id*."""
         path = self._paths.pop(agent_id, None)
+        self._snapshots.pop(agent_id, None)
         if path is None:
             return
         if self._is_git_repo() and (path / ".git").exists() or self._has_git_worktree(path):
@@ -87,7 +93,7 @@ class WorktreeManager:
         else:
             shutil.rmtree(path, ignore_errors=True)
 
-    def merge_back(self, agent_id: str) -> None:
+    def merge_back(self, agent_id: str) -> list[str]:
         """Copy a worker's worktree contents back into the base workspace.
 
         ponytail: a real git merge is left for later (see module docstring).
@@ -98,24 +104,51 @@ class WorktreeManager:
         """
         path = self._paths.get(agent_id)
         if path is None or not path.exists():
-            return
-        for item in path.iterdir():
-            if item.name == ".git":
+            return []
+        baseline = self._snapshots.get(agent_id, {})
+        conflicts: list[str] = []
+        for rel, digest in self._snapshot(path).items():
+            if baseline.get(rel) == digest:
                 continue
-            dest = self.base_root / item.name
+            source = path / rel
+            dest = self.base_root / rel
+            previous = self._merged_hashes.get(rel)
+            if previous is not None and previous != digest:
+                conflicts.append(rel)
+                self._conflicts.append(f"{agent_id}:{rel}")
+                continue
             try:
-                if item.is_dir():
-                    shutil.copytree(item, dest, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(item, dest)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, dest)
+                self._merged_hashes[rel] = digest
             except OSError:
                 # Best-effort: skip files we can't copy rather than abort cleanup.
-                pass
+                continue
+        return conflicts
 
-    def merge_all(self) -> None:
+    def merge_all(self) -> list[str]:
         """Merge every live worktree back into the base workspace."""
+        conflicts: list[str] = []
         for agent_id in list(self._paths):
-            self.merge_back(agent_id)
+            conflicts.extend(self.merge_back(agent_id))
+        return conflicts
+
+    @property
+    def conflicts(self) -> list[str]:
+        return list(self._conflicts)
+
+    @staticmethod
+    def _snapshot(root: Path) -> dict[str, str]:
+        snapshot: dict[str, str] = {}
+        for path in root.rglob("*"):
+            if not path.is_file() or ".git" in path.parts:
+                continue
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+            snapshot[path.relative_to(root).as_posix()] = digest
+        return snapshot
 
     @staticmethod
     def _has_git_worktree(path: Path) -> bool:

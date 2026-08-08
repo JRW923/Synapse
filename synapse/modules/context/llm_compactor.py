@@ -13,6 +13,7 @@ from synapse.protocols.retriever import (
     ContextBudget,
 )
 from synapse.protocols.llm import Message
+from synapse.core.tokenizer import count_tokens
 
 
 # Hard cap on input chars sent to the LLM per block — prevents huge prompts.
@@ -109,7 +110,7 @@ class LLMCompactor:
             content=summary,
             source=block.source,                # preserve original source
             priority=block.priority,
-            token_count=len(summary) // 4,
+            token_count=count_tokens(summary),
             derived_from=block.id,             # link to original
             expires_after_phase=block.expires_after_phase,
             trust_annotation=block.trust_annotation,

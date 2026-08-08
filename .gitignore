@@ -22,6 +22,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+node_modules/
 
 # Synapse config (contains API keys)
 synapse.yaml

@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from synapse.protocols.mcp import McpServerConfig
 from synapse.protocols.llm import LLMResponse
+from synapse.protocols.tool import RiskLevel
 from synapse.core.session import Session
 
 
@@ -104,6 +105,9 @@ async def test_mcp_tool_callable_via_agent():
         transport="stdio",
         command="python",
         args=["-m", "mock.mcp.server"],
+        # This fixture exposes an echo-only server, so the host explicitly
+        # downgrades it from the secure EXTERNAL default.
+        risk_level=RiskLevel.READ_ONLY,
     )
 
     with patch(

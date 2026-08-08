@@ -21,10 +21,24 @@ from __future__ import annotations
 
 import hashlib
 import random
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import ClassVar
 
 from synapse.eval.runner import BenchmarkTask
+
+
+@dataclass
+class SWEBenchExecution:
+    applied: bool
+    passed: bool
+    returncode: int = -1
+    output: str = ""
+    changed_files: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +235,62 @@ class SWEBenchAdapter:
             ``True`` if both *patch* and *private_tests* are non-empty.
         """
         return bool(patch.strip()) and bool(private_tests.strip())
+
+    @staticmethod
+    def execute(
+        repo_url: str,
+        base_commit: str,
+        patch: str,
+        private_tests: dict[str, str],
+        test_command: list[str] | None = None,
+        timeout: int = 900,
+    ) -> SWEBenchExecution:
+        """Clone, checkout, apply a patch, inject private tests, and execute them."""
+        if not patch.strip() or not private_tests:
+            return SWEBenchExecution(applied=False, passed=False, output="empty patch or tests")
+        with tempfile.TemporaryDirectory(prefix="synapse-swebench-") as tmp:
+            root = Path(tmp) / "repo"
+            try:
+                subprocess.run(
+                    ["git", "clone", "--quiet", repo_url, str(root)],
+                    capture_output=True, text=True, check=True, timeout=timeout,
+                )
+                subprocess.run(
+                    ["git", "checkout", "--quiet", base_commit], cwd=root,
+                    capture_output=True, text=True, check=True, timeout=60,
+                )
+                applied = subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn", "-"], cwd=root,
+                    input=patch, capture_output=True, text=True, timeout=60,
+                )
+                if applied.returncode != 0:
+                    return SWEBenchExecution(
+                        applied=False, passed=False,
+                        returncode=applied.returncode, output=applied.stderr,
+                    )
+                for relative, content in private_tests.items():
+                    target = (root / relative).resolve()
+                    if not target.is_relative_to(root.resolve()):
+                        raise ValueError(f"Private test path escapes repo: {relative}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(content, encoding="utf-8")
+                command = test_command or [sys.executable, "-m", "pytest", "-q"]
+                tested = subprocess.run(
+                    command, cwd=root, capture_output=True, text=True, timeout=timeout,
+                )
+                changed = subprocess.run(
+                    ["git", "status", "--short"], cwd=root,
+                    capture_output=True, text=True, check=True,
+                ).stdout.splitlines()
+                return SWEBenchExecution(
+                    applied=True,
+                    passed=tested.returncode == 0,
+                    returncode=tested.returncode,
+                    output=(tested.stdout + tested.stderr)[-8000:],
+                    changed_files=changed,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return SWEBenchExecution(applied=False, passed=False, output=str(exc))
 
 
 # ---------------------------------------------------------------------------

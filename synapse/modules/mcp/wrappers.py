@@ -32,7 +32,7 @@ class McpToolWrapper:
         client: McpClient,
         server_name: str,
         tool_schema: dict,
-        risk_level: RiskLevel = RiskLevel.READ_ONLY,
+        risk_level: RiskLevel = RiskLevel.EXTERNAL,
     ):
         self._client: McpClient = client
         self._server_name: str = server_name

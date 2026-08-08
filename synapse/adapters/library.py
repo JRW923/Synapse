@@ -307,6 +307,9 @@ class Synapse:
         self._mcp_servers = mcp_servers
         self._mcp_manager = None  # populated in _build_container; connected lazily in run()
         self._confirm_callback = confirm_callback
+        # Synapse owns shared planner/metrics instances; serialize runs until
+        # those components become per-run state objects.
+        self._run_lock = asyncio.Lock()
         self._config = self._load_config(config_path, provider, model, overrides)
         self._container = self._build_container()
         self._last_run_score = None  # populated by run()
@@ -337,29 +340,28 @@ class Synapse:
         if session is None:
             session = Session()
 
+        await self._run_lock.acquire()
+
         # L.4: the process-quality hint is per-run; clear it before this run.
         self._last_process_hint = None
 
         # L.3: rebuild the planner with a per-run confirm callback when given.
         override = confirm_callback is not None
         prev_planner = None
-        if override:
-            self._confirm_callback = confirm_callback
-            auth = self._container.resolve(ActionAuthorizer)
-            planner = self._create_planner(auth)
-            prev_planner = self._container.resolve(Planner)
-            self._container.register(type(planner), planner)
-
-        # MCP: ensure external servers are connected ON THIS event loop so their
-        # tools are callable. The old container-build path connected on a
-        # throwaway thread loop, so receiver tasks died before any call. Clients
-        # are kept for the instance lifetime, but a client whose connection was
-        # established on a previous run's loop is torn down and reconnected here
-        # (the CLI asyncio.run()s each task, so loops differ run-to-run).
-        if self._mcp_manager is not None:
-            await self._mcp_manager.ensure_current_loop(self._mcp_servers)
+        prev_confirm_callback = self._confirm_callback
 
         try:
+            if override:
+                self._confirm_callback = confirm_callback
+                auth = self._container.resolve(ActionAuthorizer)
+                planner = self._create_planner(auth)
+                prev_planner = self._container.resolve(Planner)
+                self._container.register(Planner, planner)
+            # MCP: ensure external servers are connected ON THIS event loop so
+            # their tools are callable. Keep this inside the lock/finally block
+            # so a connection error cannot strand the shared run lock.
+            if self._mcp_manager is not None:
+                await self._mcp_manager.ensure_current_loop(self._mcp_servers)
             agent = Agent(self._container)
             self._last_agent = agent   # Phase 4 — retained for /context-report
 
@@ -387,10 +389,12 @@ class Synapse:
             # planner during this run).  A per-request Synapse would remove the
             # ceiling; for an explicit opt-in flag it is an acceptable trade-off.
             if override and prev_planner is not None:
-                self._container.register(type(prev_planner), prev_planner)
+                self._container.register(Planner, prev_planner)
+            self._confirm_callback = prev_confirm_callback
             # ponytail: MCP stays connected for the instance lifetime (see
             # connect guard above) — no per-run shutdown, so registered tools
             # remain discoverable and we don't respawn server subprocesses.
+            self._run_lock.release()
 
     def get_citation_report(self) -> dict | None:
         """Phase 4 — return the citation/usage report for the last run, or None."""
@@ -499,6 +503,8 @@ class Synapse:
                 setattr(config.tools, key, value)
             elif hasattr(config.security, key):
                 setattr(config.security, key, value)
+            elif hasattr(config.plugins, key):
+                setattr(config.plugins, key, value)
 
         return config
 
@@ -511,6 +517,12 @@ class Synapse:
         # Core infrastructure
         event_bus = EventBus()
         c.register(EventBus, event_bus)
+
+        from synapse.modules.plugins import DefaultPluginRegistry
+        from synapse.protocols.plugin import PluginRegistry
+        plugin_registry = DefaultPluginRegistry()
+        plugin_registry.discover(self._config.plugins.paths)
+        c.register(PluginRegistry, plugin_registry)
 
         # s04 — user hooks: run shell commands after the configured events fire.
         if self._config.hooks.hooks:
@@ -583,12 +595,27 @@ class Synapse:
         c.register(ContextCompactor, compactor)
 
         # Security
-        sandbox = ProcessSandbox()
+        sandbox_mode = self._config.security.sandbox_mode.lower()
+        if sandbox_mode not in {"enforce", "warn", "off"}:
+            raise ValueError(f"Unknown sandbox_mode '{sandbox_mode}'")
+        sandbox = None
+        if self._config.security.sandbox_enabled and sandbox_mode != "off":
+            try:
+                sandbox = ProcessSandbox(
+                    backend=self._config.security.sandbox_backend,
+                    allow_network=self._config.security.sandbox_network,
+                    docker_image=self._config.security.sandbox_docker_image,
+                )
+            except Exception as exc:
+                if sandbox_mode == "enforce":
+                    raise RuntimeError("Sandbox initialization failed in enforce mode") from exc
         c.register(Sandbox, sandbox)
 
         auth = ActionAuthorizer(
             workspace_root=self._config.tools.workspace_root,
             confirmation_enabled=self._config.security.auth_confirmation,
+            allowed_paths=self._config.security.allowed_paths,
+            allowlisted_commands=self._config.tools.allowlist_commands,
             # EXTERNAL tools (web/browser/db) run only when explicitly opted in
             # via config (security.allow_external) or the enable_external_tools
             # flag (which also registers them). web_search is READ_ONLY and is
@@ -631,19 +658,41 @@ class Synapse:
         """Instantiate the configured LLM provider."""
         provider_name = self._config.provider.provider.lower()
         cfg = self._config.provider
-
-        provider_cls, base_url = _resolve_provider(provider_name, cfg.custom_providers, cfg.model)
-        kwargs: dict = dict(
-            model=cfg.model,
-            api_key=cfg.api_key,
-            max_tokens=cfg.max_tokens,
-            timeout_seconds=cfg.timeout_seconds,
+        if cfg.routing not in {"fallback", "lowest_cost"}:
+            raise ValueError(f"Unknown provider routing mode '{cfg.routing}'")
+        from synapse.config.schema import _effective_api_key
+        entries = [
+            (provider_name, cfg.model, cfg.api_key, "",
+             cfg.input_cost_per_million, cfg.output_cost_per_million),
+        ]
+        entries.extend(
+            (entry.provider, entry.model, _effective_api_key(entry), entry.base_url,
+             entry.input_cost_per_million, entry.output_cost_per_million)
+            for entry in cfg.fallback_models
         )
-        if base_url:
-            kwargs["base_url"] = base_url
-        # DeepSeek's Anthropic-compatible endpoint may not accept cache_control
-        # blocks; disable prompt caching there to avoid a 400.
-        if base_url == "https://api.deepseek.com/anthropic":
+        if cfg.routing == "lowest_cost":
+            entries.sort(key=lambda e: e[4] + e[5])
+        providers = [self._instantiate_provider(*entry[:4]) for entry in entries]
+        if len(providers) == 1:
+            return providers[0]
+        from synapse.modules.providers.routing import FallbackLLMProvider
+        return FallbackLLMProvider(providers, [e[4] + e[5] for e in entries])
+
+    def _instantiate_provider(self, provider_name: str, model: str, api_key: str, base_url: str = ""):
+        provider_cls, resolved_url = _resolve_provider(
+            (provider_name or self._config.provider.provider).lower(),
+            self._config.provider.custom_providers,
+            model,
+        )
+        kwargs: dict = dict(
+            model=model,
+            api_key=api_key,
+            max_tokens=self._config.provider.max_tokens,
+            timeout_seconds=self._config.provider.timeout_seconds,
+        )
+        if base_url or resolved_url:
+            kwargs["base_url"] = base_url or resolved_url
+        if kwargs.get("base_url") == "https://api.deepseek.com/anthropic":
             kwargs["prompt_caching"] = False
         return provider_cls(**kwargs)
 
@@ -687,7 +736,12 @@ class Synapse:
 
     def _create_planner(self, auth: ActionAuthorizer) -> Planner:
         """Instantiate the configured planning strategy."""
-        return build_planner(self._config.planning, auth, self._confirm_callback)
+        return build_planner(
+            self._config.planning,
+            auth,
+            self._confirm_callback,
+            max_llm_retries=self._config.provider.max_retries,
+        )
 
     # -- Internal: tool factory ----------------------------------------------
 
@@ -698,11 +752,11 @@ class Synapse:
         # s07 — shared so prompt injection and the load_skill tool agree.
         skill_loader = get_default_skill_loader()
         tools: list = [
-            ReadTool(),
+            ReadTool(workspace_root=self._config.tools.workspace_root),
             WriteTool(workspace_root=self._config.tools.workspace_root),
             EditTool(),
-            GlobTool(),
-            GrepTool(),
+            GlobTool(workspace_root=self._config.tools.workspace_root),
+            GrepTool(workspace_root=self._config.tools.workspace_root),
             ShellTool(background_manager=bg_manager),
             GitTool(),
             SkillTool(skill_loader),
@@ -730,10 +784,11 @@ class Synapse:
             if BrowserTool is not None:
                 tools.append(BrowserTool())
 
-        return tools
+        enabled = set(self._config.tools.enabled)
+        return [tool for tool in tools if tool.name in enabled or tool.name.startswith("mcp.")]
 
 
-def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
+def build_planner(planning_config, auth, confirm_callback=None, max_llm_retries: int = 3) -> Planner:
     """Build the planner for a planning config — single source of truth.
 
     Shared by :meth:`Synapse._create_planner` and by CLI/test wiring so the
@@ -751,6 +806,7 @@ def build_planner(planning_config, auth, confirm_callback=None) -> Planner:
         confirm_callback=confirm_callback,
         total_timeout_seconds=cfg.total_timeout_seconds,
         max_tool_result_chars=cfg.max_tool_result_chars,
+        max_llm_retries=max_llm_retries,
         background_manager=get_default_manager(),
         skill_loader=get_default_skill_loader(),
     )

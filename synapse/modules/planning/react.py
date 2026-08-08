@@ -1,6 +1,7 @@
 """ReAct Planner — Think → Act → Observe loop."""
 
 import asyncio
+import inspect
 import json
 import sys
 import time
@@ -14,8 +15,9 @@ from synapse.protocols.events import (
     AuthDecisionMade, FileWritten,
 )
 from synapse.core.exceptions import PlannerError
-from synapse.protocols.tool import RiskLevel
+from synapse.protocols.tool import RiskLevel, ToolResult, ToolCallMetadata
 from synapse.modules.security.injection import InjectionGuard
+from synapse.core.tokenizer import count_tokens
 
 # Content wrapped in <external-content ...> tags originates from untrusted
 # external sources (web/API/DB). Surface this rule so the LLM treats such
@@ -68,14 +70,10 @@ def _summarize_params(params: dict) -> str:
 
 def _denied_tool_result(tool_name: str, reason: str):
     """Build a failed ToolResult for an authorization-denied tool call."""
-    return type("TR", (), {
-        "success": False,
-        "output": "",
-        "error": reason,
-        "metadata": type("M", (), {
-            "tool_name": tool_name, "files_touched": [], "sandbox_used": False,
-        })(),
-    })()
+    return ToolResult(
+        success=False, output="", error=reason,
+        metadata=ToolCallMetadata(tool_name=tool_name),
+    )
 
 
 def _error_tool_result(tool_name: str, reason: str):
@@ -84,14 +82,10 @@ def _error_tool_result(tool_name: str, reason: str):
     The loop must never crash on a misbehaving tool — surface the failure as
     an observation so the LLM can recover instead of killing the process.
     """
-    return type("TR", (), {
-        "success": False,
-        "output": "",
-        "error": reason,
-        "metadata": type("M", (), {
-            "tool_name": tool_name, "files_touched": [], "sandbox_used": False,
-        })(),
-    })()
+    return ToolResult(
+        success=False, output="", error=reason,
+        metadata=ToolCallMetadata(tool_name=tool_name),
+    )
 
 
 class ReActPlanner:
@@ -109,6 +103,7 @@ class ReActPlanner:
                  auth=None, confirm_callback=None, total_timeout_seconds: int = 300,
                  tool_timeout_seconds: int = 120, llm_timeout_seconds: int = 120,
                  max_tool_result_chars: int = 16_000,
+        max_llm_retries: int = 3,
         verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
         background_manager=None, skill_loader=None):
@@ -122,6 +117,7 @@ class ReActPlanner:
         self.tool_timeout_seconds = tool_timeout_seconds
         self.llm_timeout_seconds = llm_timeout_seconds
         self.max_tool_result_chars = max_tool_result_chars
+        self.max_llm_retries = max(0, int(max_llm_retries))
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
         # (e.g. "reviewer") without a separate class.
@@ -194,7 +190,16 @@ class ReActPlanner:
         tool_acc: dict[int, dict] = {}
         usage: dict[str, int] = {}
 
-        async for chunk in llm.stream(messages, tools=tools if tools else None):
+        stream = llm.stream(messages, tools=tools if tools else None)
+        if inspect.isawaitable(stream):
+            stream = await stream
+        # AsyncMock (and a misconfigured provider) can produce an object that
+        # advertises ``__aiter__`` but yields nothing. Treat mock objects and
+        # non-iterators as an unsupported stream so _call_llm falls back to
+        # the protocol's chat() method without leaking an un-awaited coroutine.
+        if type(stream).__module__ == "unittest.mock" or not hasattr(stream, "__aiter__"):
+            raise TypeError("LLM stream() must return an async iterator")
+        async for chunk in stream:
             if chunk.usage:
                 usage = chunk.usage
             if chunk.content:
@@ -374,8 +379,8 @@ class ReActPlanner:
                 session_id=session.id, phase="calling_llm",
                 message=f"Iteration {iteration}: calling LLM..."
             ))
-            max_llm_retries = 3
-            for attempt in range(max_llm_retries + 1):  # 1 initial + 3 retries = 4 total
+            max_llm_retries = self.max_llm_retries
+            for attempt in range(max_llm_retries + 1):  # 1 initial + retries
                 try:
                     response = await asyncio.wait_for(
                         self._call_llm(
@@ -825,7 +830,7 @@ class ReActPlanner:
         kept = []
         running = 0
         for b in sorted_blocks:
-            tc = b.token_count or (len(b.content) // 4)
+            tc = b.token_count or count_tokens(b.content)
             if running + tc > max_tokens:
                 continue
             kept.append(b)

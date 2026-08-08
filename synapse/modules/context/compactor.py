@@ -10,6 +10,7 @@ from synapse.protocols.retriever import (
     ContextBlock,
     ContextBudget,
 )
+from synapse.core.tokenizer import count_tokens
 
 
 # Maximum characters to keep from the start of an OVERFLOW block before truncation.
@@ -61,7 +62,7 @@ class ContextCompactor:
             content=content,
             source=block.source,                    # preserve provenance
             priority=block.priority,
-            token_count=len(content) // 4,
+            token_count=count_tokens(content),
             derived_from=block.id,                  # link to original
             expires_after_phase=block.expires_after_phase,
             trust_annotation=block.trust_annotation,

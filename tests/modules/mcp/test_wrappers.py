@@ -24,7 +24,9 @@ async def test_wrapper_has_mcp_prefix():
 
     assert wrapper.name == "mcp.filesystem.read_file"
     assert wrapper.description == "Read a file from the server"
-    assert wrapper.risk_level == RiskLevel.READ_ONLY
+    # MCP tools are untrusted integrations unless a host explicitly downgrades
+    # the server risk in McpServerConfig.
+    assert wrapper.risk_level == RiskLevel.EXTERNAL
     assert wrapper.category == ToolCategory.INTEGRATION
     assert wrapper.requires_sandbox is False
     assert isinstance(wrapper.parameters, ToolSchema)

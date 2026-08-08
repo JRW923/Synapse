@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import uuid
 from collections import defaultdict
 from collections.abc import Callable, Awaitable
 from synapse.protocols.events import BaseEvent
@@ -21,6 +22,16 @@ class EventBus:
 
     def __init__(self):
         self._handlers: dict[str, list[Handler]] = defaultdict(list)
+        self._run_id = ""
+        self._trace_id = ""
+        self._parent_event_id = ""
+
+    def configure_run(self, run_id: str | None = None, trace_id: str | None = None) -> str:
+        """Start a correlation context for events emitted by the current run."""
+        self._run_id = run_id or str(uuid.uuid4())
+        self._trace_id = trace_id or self._run_id
+        self._parent_event_id = ""
+        return self._run_id
 
     def subscribe(self, event_type: str, handler: Handler) -> None:
         """Register an async handler for an event type."""
@@ -47,6 +58,17 @@ class EventBus:
 
         Handlers run concurrently. Exceptions are logged, never raised.
         """
+        if not getattr(event, "run_id", ""):
+            if not self._run_id:
+                self.configure_run()
+            if hasattr(event, "run_id"):
+                event.run_id = self._run_id
+        if hasattr(event, "trace_id") and not event.trace_id:
+            event.trace_id = self._trace_id or getattr(event, "run_id", "")
+        if hasattr(event, "parent_event_id") and not event.parent_event_id:
+            event.parent_event_id = self._parent_event_id
+        self._parent_event_id = getattr(event, "event_id", self._parent_event_id)
+
         handlers = self._handlers.get(event.event_type, [])
         if not handlers:
             return

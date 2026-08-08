@@ -10,6 +10,8 @@ class ModelEntry(BaseModel):
     model: str = ""          # e.g. claude-sonnet-4-6
     api_key: str = ""        # leave empty → check env var
     base_url: str = ""       # override the default API endpoint (custom providers)
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
 
 
 class CustomProvider(BaseModel):
@@ -71,6 +73,10 @@ class ProviderConfig(BaseModel):
     max_retries: int = 3
     timeout_seconds: int = 120
     max_tokens: int = 4096
+    fallback_models: list[ModelEntry] = Field(default_factory=list)
+    routing: str = "fallback"  # fallback | lowest_cost
+    input_cost_per_million: float = 0.0
+    output_cost_per_million: float = 0.0
     # Pre-configured models shown by /model.  Add entries to ~/.synapse/config.yaml
     # to fill in api_key values (or set the corresponding env var).
     models: list[ModelEntry] = Field(default_factory=_default_models)
@@ -81,7 +87,9 @@ class ProviderConfig(BaseModel):
 class ToolsConfig(BaseModel):
     """Tool configuration."""
     enabled: list[str] = Field(default_factory=lambda: [
-        "read", "write", "edit", "glob", "grep", "shell", "git"
+        "read", "write", "edit", "glob", "grep", "shell", "git",
+        "load_skill", "todo_write", "todo_read", "web_search", "web_fetch",
+        "web", "db", "browser",
     ])
     allowlist_commands: list[str] = Field(default_factory=lambda: [
         "ls", "git", "pytest", "python", "pip", "npm", "cargo", "go", "node",
@@ -125,8 +133,13 @@ class SecurityConfig(BaseModel):
     """Security configuration."""
     sandbox_enabled: bool = True
     sandbox_mode: str = "enforce"  # enforce | warn | off
+    sandbox_backend: str = "process"  # process | auto | bubblewrap | seatbelt | docker
+    sandbox_network: bool = False
+    sandbox_docker_image: str = "python:3.12-slim"
     auth_confirmation: bool = True  # require user confirmation for risky ops
-    allowed_paths: list[str] = Field(default_factory=lambda: ["."])
+    # Empty means the workspace boundary is the default; explicit entries
+    # enable narrower per-worker file scopes.
+    allowed_paths: list[str] = Field(default_factory=list)
     # Gate for RiskLevel.EXTERNAL tools (web, browser, db). False by default so
     # the heavier external tools stay blocked unless explicitly opted in;
     # web_search is READ_ONLY and works regardless of this switch.
@@ -144,6 +157,11 @@ class HooksConfig(BaseModel):
     hooks: dict[str, list[str]] = Field(default_factory=dict)
 
 
+class PluginsConfig(BaseModel):
+    """Directories or manifest files discovered at startup."""
+    paths: list[str] = Field(default_factory=list)
+
+
 class SynapseConfig(BaseModel):
     """Root configuration."""
     provider: ProviderConfig = ProviderConfig()
@@ -152,3 +170,4 @@ class SynapseConfig(BaseModel):
     security: SecurityConfig = SecurityConfig()
     context: ContextConfig = ContextConfig()
     hooks: HooksConfig = HooksConfig()
+    plugins: PluginsConfig = PluginsConfig()

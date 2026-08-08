@@ -38,6 +38,10 @@ class BaseEvent:
     event_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=datetime.now)
     session_id: str
+    # Correlate every event with one logical run and its causal predecessor.
+    run_id: str = ""
+    trace_id: str = ""
+    parent_event_id: str = ""
     # Swarm/Team attribution — empty for non-swarm events.
     agent_id: str = ""
     role: str = ""

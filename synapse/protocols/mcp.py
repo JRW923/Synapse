@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from synapse.protocols.tool import RiskLevel
+
 
 @dataclass
 class McpServerConfig:
@@ -15,6 +17,9 @@ class McpServerConfig:
     url: str | None = None             # streamable_http: HTTP URL
     env: dict[str, str] | None = None  # stdio: environment variables
     timeout: int = 30
+    # Remote MCP tools are external by default. Hosts may explicitly downgrade
+    # a trusted read-only server, but discovery must never grant that trust.
+    risk_level: RiskLevel = RiskLevel.EXTERNAL
 
 
 class McpClient(Protocol):

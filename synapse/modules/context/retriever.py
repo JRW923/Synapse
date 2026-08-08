@@ -27,6 +27,7 @@ from pathlib import Path
 from synapse.protocols.retriever import (
     Context, ContextBlock, ContextBudget, ContextSource,
 )
+from synapse.core.tokenizer import count_tokens
 
 # ponytail: every retrieve() rescans the repo (O(files), one read per file to
 # count terms).  MAX_FILES / MAX_FILE_BYTES are the guard rails.  For a repo
@@ -75,6 +76,8 @@ class BasicContextRetriever:
     def __init__(self) -> None:
         # (rel, len, hash) -> symbol names; see _symbols.
         self._symbol_cache: dict[tuple, list[str]] = {}
+        # resolved path -> (mtime_ns, size, decoded content)
+        self._content_cache: dict[Path, tuple[int, int, str]] = {}
 
     async def retrieve(
         self,
@@ -146,7 +149,7 @@ class BasicContextRetriever:
                     content=content,
                     source=ContextSource.MEMORY,
                     priority=9,
-                    token_count=len(content) // 4,  # rough estimate
+                    token_count=count_tokens(content),
                 ))
         return blocks
 
@@ -190,7 +193,7 @@ class BasicContextRetriever:
                 # — both are classified as deterministic by the InjectionGuard.
                 source=ContextSource.AST if symbols else ContextSource.GLOB,
                 priority=8,
-                token_count=len(content) // 4,
+                token_count=count_tokens(content),
             ))
         return blocks
 
@@ -206,7 +209,7 @@ class BasicContextRetriever:
             content=content,
             source=ContextSource.GLOB,
             priority=7,
-            token_count=len(content) // 4,
+            token_count=count_tokens(content),
         )
 
     # ------------------------------------------------------------------
@@ -258,12 +261,21 @@ class BasicContextRetriever:
                     out.append(entry.relative_to(project_root).as_posix())
         return out
 
-    @staticmethod
-    def _read(path: Path) -> str | None:
+    def _read(self, path: Path) -> str | None:
         try:
-            if path.stat().st_size > MAX_FILE_BYTES:
+            resolved = path.resolve()
+            stat = resolved.stat()
+            if stat.st_size > MAX_FILE_BYTES:
                 return None
-            return path.read_text(encoding="utf-8", errors="replace")
+            signature = (stat.st_mtime_ns, stat.st_size)
+            cached = self._content_cache.get(resolved)
+            if cached is not None and cached[:2] == signature:
+                return cached[2]
+            text = resolved.read_text(encoding="utf-8", errors="replace")
+            if len(self._content_cache) > MAX_FILES * 4:
+                self._content_cache.clear()
+            self._content_cache[resolved] = (*signature, text)
+            return text
         except OSError:
             return None
 
@@ -402,7 +414,7 @@ class BasicContextRetriever:
                     content=entry.content,
                     source=ContextSource.MEMORY,
                     priority=5,
-                    token_count=len(entry.content) // 4,
+                    token_count=count_tokens(entry.content),
                 ))
 
             # Semantic memory (vector layer, optional backend): retrieve prior
@@ -415,7 +427,19 @@ class BasicContextRetriever:
                         content=entry.content,
                         source=ContextSource.MEMORY,
                         priority=4,
-                        token_count=len(entry.content) // 4,
+                        token_count=count_tokens(entry.content),
+                    ))
+
+            # User memory is intentionally lower priority than project/session
+            # context, but it must be visible for cross-project preferences.
+            user = await memory.retrieve(task, MemoryLevel.USER, top_k=3)
+            for entry in user:
+                if entry.content not in {b.content for b in blocks}:
+                    blocks.append(ContextBlock(
+                        content=entry.content,
+                        source=ContextSource.MEMORY,
+                        priority=3,
+                        token_count=count_tokens(entry.content),
                     ))
 
             # Pull the rolling process-quality feedback (fixed id/tag) and inject
@@ -431,7 +455,7 @@ class BasicContextRetriever:
                         content=entry.content,
                         source=ContextSource.MEMORY,
                         priority=6,
-                        token_count=len(entry.content) // 4,
+                        token_count=count_tokens(entry.content),
                     ))
         except Exception:
             pass

@@ -11,6 +11,7 @@ from synapse.protocols.memory import MemoryStore, MemoryLevel, MemoryEntry, Memo
 from synapse.protocols.retriever import ContextRetriever, ContextSource, Context, ContextBudget
 from synapse.protocols.sandbox import Sandbox
 from synapse.core.events import EventBus
+from synapse.core.tokenizer import count_tokens
 
 # Lazy import — InjectionGuard lives in modules/, not core/.
 # It is resolved from the container at runtime when available.
@@ -85,6 +86,8 @@ class Agent:
             pass
 
     async def run(self, task: str, session: Session) -> AgentResult:
+        run_id = self.event_bus.configure_run(trace_id=session.id)
+        session.metadata["last_run_id"] = run_id
         # 1. Build context (Phase 3: task type drives budget selection)
         context = await self._build_context(task, session)
         self._last_context = context  # Phase 4 — retain for /context-report
@@ -241,7 +244,7 @@ class Agent:
                         content=content,
                         source=ContextSource.MEMORY,
                         priority=9,
-                        token_count=len(content) // 4,
+                        token_count=count_tokens(content),
                     ))
                 except Exception:
                     pass
