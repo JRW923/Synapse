@@ -1,53 +1,69 @@
 <p align="center">
-  <img src="docs/icons/synapse_icon_1_black.png" width="160" alt="Synapse logo">
+  <img src="docs/icons/synapse_icon_1_neural-S.png" width="120" alt="Synapse">
 </p>
 
-# Synapse
+<h1 align="center">Synapse</h1>
 
-> Connecting ideas into code — an intelligent, modular code agent.
+<p align="center">
+  <b>连接想法与代码</b> —— 智能、模块化的 Code Agent
+</p>
 
-[中文文档](README_zh.md)
+<p align="center">
+  <a href="README_en.md">English</a> &nbsp;·&nbsp; MIT License
+</p>
 
-## Quick Start
+---
+
+## 特性
+
+- **多供应商接入**：Anthropic / OpenAI / DeepSeek / Google / Ollama，首次向导引导配置
+- **三种规划模式**：ReAct / Plan-Execute / Hierarchical，按需切换
+- **丰富工具 + MCP**：10+ 内置工具，并可通过 MCP 扩展
+- **会话持久化**：每次任务自动保存，支持 `--resume` / `/resume` 续接
+- **HTTP API**：`/run` 与 SSE 流式 `/run/stream`，便于程序化集成
+- **运行时评分**：safety / process / quality / efficiency 四维打分
+
+## 快速开始
 
 ```bash
-# 1. Install
-pip install -e ".[deepseek]"          # pick: anthropic / openai / deepseek / google / ollama
+# 1. 安装（按需选择 provider）
+pip install -e ".[deepseek]"          # 可选: anthropic / openai / deepseek / google / ollama
 
-# 2. Launch — first run walks you through setup
+# 2. 启动 —— 首次运行自动进入配置向导
 synapse
 ```
 
-That's it. The first-run wizard asks which provider and model you want, securely
-prompts for the API key, and writes `~/.synapse/models.json`. Every subsequent
-launch uses that default and goes straight to the REPL.
+首次启动会自动引导你选择 provider 和 model，并隐藏输入 API key，写入
+`~/.synapse/models.json`。之后每次启动会自动使用其中的默认模型，直接进入 REPL。
 
 ```bash
-# One-shot tasks use the same saved default
-synapse run "Fix the bug in auth.py"
+# 一次性任务同样自动使用已保存的默认模型
+synapse run "修复 auth.py 的 bug"
 ```
 
-## In-REPL Commands
+## REPL 命令
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show all commands |
-| `/model` | Show available models (green = ready, gray = needs API key) |
-| `/model <name>` | Switch model and save it as the default |
-| `/model add` | Add a built-in or OpenAI/Anthropic-compatible model |
-| `/provider <name>` | Switch provider |
-| `/memory` | Session info + token usage |
-| `/session` | Show session path |
-| `/reset` | Clear session |
-| `/mode <name>` | Switch planning mode (react / plan_execute / hierarchical) |
-| `/tools` | List tools |
-| `/context-report` | Show context-block citation / usage heatmap |
-| `/score` | Show runtime score (safety / process / quality / efficiency) + process hint |
-| `/exit` | Quit |
+| 命令 | 说明 |
+|------|------|
+| `/help` | 显示所有命令 |
+| `/model` | 显示可用模型（绿色=可用，灰色=需配 API key） |
+| `/model <名称>` | 切换模型并保存为下次默认值 |
+| `/model add` | 添加内置或 OpenAI/Anthropic-compatible 模型 |
+| `/provider <名称>` | 切换供应商 |
+| `/memory` | 会话信息 + token 用量 |
+| `/session` | 显示会话路径 |
+| `/reset` | 清空会话 |
+| `/resume [id]` | 恢复已保存的会话（省略 id 恢复最近一次） |
+| `/sessions` | 列出已保存的会话 |
+| `/mode <名称>` | 切换规划模式 (react / plan_execute / hierarchical) |
+| `/tools` | 列出工具 |
+| `/context-report` | 显示 context 区块引用 / 使用热力图 |
+| `/score` | 显示运行时评分 + 过程质量 hint |
+| `/exit` | 退出 |
 
-## Configuration
+## 配置
 
-LLM models and the default selection live in `~/.synapse/models.json`:
+LLM 模型及默认选择统一保存在 `~/.synapse/models.json`：
 
 ```json
 {
@@ -56,24 +72,24 @@ LLM models and the default selection live in `~/.synapse/models.json`:
   "defaultModel": "deepseek-chat",
   "providers": {
     "deepseek": {
-      "apiKey": "sk-your-key",
+      "apiKey": "sk-你的-key",
       "models": [{ "id": "deepseek-chat" }]
     }
   }
 }
 ```
 
-Use `/model add` instead of editing this file for the common path. API keys may
-also come from `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
-`GOOGLE_API_KEY`; the wizard detects them and avoids copying them into JSON.
+日常使用直接执行 `/model add`，不必手改 JSON。也可使用 `DEEPSEEK_API_KEY`、
+`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`；向导检测到环境变量后不会
+把 key 重复写入文件。
 
-Project and Agent behavior remains in YAML. Config lookup order:
+项目级 Agent 行为继续使用 YAML，查找顺序为：
 
-1. `./synapse.yaml` (then walks up the directory tree)
-2. `<package-root>/synapse.yaml` (automatic for `pip install -e .`)
-3. `~/.synapse/config.yaml` (optional global fallback)
+1. `./synapse.yaml`（然后向上遍历目录树）
+2. `<package-root>/synapse.yaml`（`pip install -e .` 自动发现）
+3. `~/.synapse/config.yaml`（可选的全局兜底）
 
-Example `synapse.yaml`:
+示例 `synapse.yaml`：
 
 ```yaml
 provider:
@@ -83,73 +99,99 @@ planning:
   mode: react
 ```
 
+## 预置模型
+
+向导内置 5 家供应商的常用 Model ID 推荐值：
+
+| 供应商 | 模型 |
+|--------|------|
+| anthropic | claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5 |
+| openai | gpt-5.5, gpt-5.4, o4-mini |
+| deepseek | deepseek-chat, deepseek-v4-pro, deepseek-v4-flash |
+| google | gemini-3-flash, gemini-3-pro |
+| ollama | qwen3.5:4b, llama4:8b |
+
+首次向导只写入你选择的模型；其余模型按需用 `/model add` 添加，避免默认列表堆满
+不会使用的条目。
+
 ## CLI
 
-```bash
-synapse                              # Main REPL
-synapse setup                        # Install launcher scripts
-synapse chat                         # Chat session
-synapse run "task"                   # One-shot task (streams progress live)
-synapse serve                        # HTTP API (port 8000)
-synapse version                      # Show version
-```
+| 命令 | 说明 |
+|------|------|
+| `synapse` | 主 REPL |
+| `synapse setup` | 安装启动器脚本 |
+| `synapse chat` | 聊天会话 |
+| `synapse run "任务"` | 一次性任务（实时流式进度） |
+| `synapse serve` | HTTP API（端口 8000） |
+| `synapse version` | 显示版本 |
+
+**常用参数**
 
 ```
--c, --config  PATH     Path to synapse.yaml
--p, --provider NAME    Optional one-run provider override
--m, --model    NAME    Optional one-run model override
---mode         NAME    Planning mode
--y, --yes            (run) auto-approve confirmation-required actions (headless opt-in)
+-c, --config PATH     指定 synapse.yaml 路径
+-p, --provider NAME   仅覆盖本次运行的 provider
+-m, --model NAME      仅覆盖本次运行的 model
+--mode NAME           规划模式
+--resume [ID]         恢复已保存的会话（省略 ID 恢复最近一次；run/chat/REPL 均支持）
+-y, --yes             （run）自动批准需要确认的操作（无交互场景下的显式放行）
 ```
 
-`run` and `chat` stream progress (tool calls, swarm lifecycle, tokens) in a live
-panel instead of blocking silently. When a tool needs confirmation and no human
-is at the terminal, the action is **auto-denied** unless you pass `--yes`.
+会话会在每次任务结束后自动持久化到 `~/.synapse/sessions/<id>.json`，
+退出后用 `synapse --resume` 或 REPL 内 `/resume` 可继续之前的对话。
 
-The CLI adapts to the terminal: wide terminals show the full workspace header,
-narrow terminals use a compact single-column layout, and redirected output falls
-back to plain text without ANSI codes. The live panel shows the current phase,
-the last five tool steps, elapsed time, and tokens; partial/failed results include
-metrics and a concrete resume or retry hint.
+`run` 与 `chat` 会以实时面板流式展示进度（工具调用、Swarm 生命周期、token），
+不再静默阻塞。当某工具需要确认而终端无人应答时，默认**自动拒绝**，除非你加
+`--yes` 显式放行。
+
+交互界面会根据终端能力自动降级：宽终端显示完整工作区首页，窄终端使用 compact 布局，
+重定向/非 TTY 环境输出无 ANSI 的纯文本。任务面板统一显示当前 phase、最近 5 个工具步骤、
+elapsed 与 token；结束后给出耗时、工具成功率，以及 `partial`/`failed` 的继续操作提示。
 
 ## HTTP API
 
-`/run` and `/run/stream` (SSE) are the programmatic equivalents of `run`. Both
-accept a `RunRequest`:
+`/run` 与 `/run/stream`（SSE）是 `run` 的程序化等价物，二者均接受 `RunRequest`：
 
 ```json
-{ "task": "Refactor auth.py", "auto_approve": false }
+{ "task": "重构 auth.py", "auto_approve": false }
 ```
 
-- `auto_approve` — opt-in to approve confirmation-required tools (mirrors `--yes`).
-- `/run/stream` emits `agent_progress`, `llm_token`, `tool_call_*`, and the swarm
-  events (`worker_spawned`, `worker_completed`, `review_submitted`, `vote_cast`,
-  `swarm_verified`) so external callers see the same live progress as the CLI.
-- The response (and the stream's final `done` event) includes `run_score` — the
-  runtime score (`safety` / `process` / `quality` / `efficiency`) plus the latest
-  `process_hint` for the next task.
+- `auto_approve` —— 显式放行需确认的工具（等价于 `--yes`）。
+- `/run/stream` 会推送 `agent_progress`、`llm_token`、`tool_call_*` 以及 Swarm
+  事件（`worker_spawned`、`worker_completed`、`review_submitted`、`vote_cast`、
+  `swarm_verified`），让外部调用者看到与 CLI 一致的实时进度。
+- 响应（以及流式最终 `done` 事件）包含 `run_score` —— 运行时评分
+  （`safety` / `process` / `quality` / `efficiency`）及供下一次任务参考的
+  `process_hint`。
 
-Errors are returned as friendly `reason / suggested-action` messages; raw
-tracebacks are never surfaced to the user.
+错误以友好的「原因 / 建议」文案返回，绝不向用户暴露原始 traceback。
 
-## Architecture
+## 架构
 
 ```
 synapse/
-├── protocols/     # Pure interface definitions
-├── core/          # Agent, Container, EventBus, Session
+├── protocols/     # 纯接口定义（零依赖）
+├── core/          # Agent、Container、EventBus、Session
 ├── modules/
-│   ├── providers/ # Anthropic / OpenAI / Google / DeepSeek / Ollama
-│   ├── tools/     # Read, Write, Edit, Glob, Grep, Shell, Git, HTTP, DB, Browser
-│   ├── planning/  # ReAct / Plan-Execute / Hierarchical
-│   ├── memory/    # Session / Project / User / Semantic (ChromaDB+Qdrant)
-│   ├── context/   # Retriever + Partitioner + Compactor
-│   ├── security/  # Sandbox, ActionAuth, Audit, Injection Defense
-│   └── mcp/       # MCP client (stdio + Streamable HTTP)
-├── eval/          # Metrics, benchmarks, A/B experiments
-├── adapters/      # CLI, Library API, HTTP Server
-└── config/        # Pydantic schema + YAML/env loader
+│   ├── providers/ # 5 家 LLM 供应商
+│   ├── tools/     # 10 个工具（文件/搜索/Shell/Git/HTTP/DB/Browser）
+│   ├── planning/  # 3 种规划模式（ReAct / PlanExecute / Hierarchical）
+│   ├── memory/    # 记忆：Session/Project/User 为磁盘持久化；Semantic 向量层为可选后端
+│   ├── context/   # 上下文治理（Retriever + Partitioner + Compactor）
+│   ├── security/  # 4 层安全（Sandbox/ActionAuth/Audit/Injection Defense）
+│   └── mcp/       # MCP 客户端
+├── eval/          # 指标、Benchmark、A/B 实验
+├── adapters/      # CLI、Library API、HTTP Server
+└── config/        # Pydantic Schema + YAML/环境变量加载
 ```
+
+## 已知限制
+
+为避免误导，以下是当前**尚未真正接线**或仅停留在脚手架阶段的能力，使用前请知悉：
+
+- **Semantic 记忆层**：向量后端（ChromaDB/Qdrant）为可选依赖。任务结束后会把摘要写入向量层，后续任务按相似度召回；未安装后端时自动降级为仅 Session/Project/User 记忆。
+- **Eval / Benchmark**：`eval/` 下的指标管道与 redteam 框架可运行，但 `swebench` **未连接真实数据集**（无 clone/docker/打补丁/跑测试），`process_bench` 为针对虚构仓库的示例任务；二者属于评估脚手架，请勿当作真实基准结果。
+- **Security Sandbox**：`ProcessSandbox` 现为进程树隔离——Windows 用 Job Object（`KILL_ON_JOB_CLOSE`）、Unix 用进程组 + `killpg`，超时/退出时整棵子进程树被杀，孙进程不再逃逸成孤儿。它保证的是「资源/生命周期不失控」，**不是文件系统/网络的强隔离**（无 bubblewrap/Seatbelt/namespace）；文件写入的真正安全边界在 `ActionAuthorizer` 命令审批闸门。
+- **Swarm + Worktree**：worker 结果已在清理前 merge 回主工作区，但并行 worker 对同文件的写冲突为「后写覆盖」，无真正三方合并。
 
 ## License
 
