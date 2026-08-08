@@ -113,3 +113,10 @@
 - 当前环境是 Windows，无法在本轮对 bubblewrap/Seatbelt 或真实 provider 长流做端到端 UI 测试；新增测试使用 EventBus 和 Rich StringIO 模拟流。
 - Qdrant local mode 退出时偶发 `.lock` 清理 warning；FastAPI/Starlette 仍有 `httpx` deprecation warning，均与本次 CLI 改动无关。
 - server SSE 事件契约保持不变，尚未新增可视化前端；后续若要做 P2 历史任务浏览，应先复用现有 session API。
+
+## 9. 后续 UI v2 重设计
+
+本文件中的“保留现有 Rich banner/ASCII art”是上一轮优化的历史记录，已由
+[ux-redesign-2026-08-08.md](ux-redesign-2026-08-08.md) supersede。UI v2 改为实心色块
+block logo、信息优先首页、统一任务 Panel、input/output/total token 统计和三档终端宽度
+布局；Agent loop、EventBus 和 SSE 契约保持不变。

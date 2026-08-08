@@ -308,6 +308,16 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
     return _confirm
 
 
+def _format_token_count(value: int | float | None) -> str:
+    """Format token counters for a stable, compact terminal readout."""
+    value = int(value or 0)
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}k"
+    return str(value)
+
+
 class _LiveDisplay:
     """Rich Live panel that shows streamed LLM text with a live footer.
 
@@ -336,7 +346,7 @@ class _LiveDisplay:
     # 200ms so a fast provider cannot monopolize the terminal.
     _MIN_REFRESH_INTERVAL = 0.05
 
-    def __init__(self, console, fmt_tokens, fmt_elapsed):
+    def __init__(self, console, fmt_tokens, fmt_elapsed, fmt_stats=None, fmt_progress=None):
         from rich.live import Live
         from rich.panel import Panel
         from rich.text import Text
@@ -344,9 +354,13 @@ class _LiveDisplay:
         self._console = console
         self._fmt_tokens = fmt_tokens
         self._fmt_elapsed = fmt_elapsed
+        self._fmt_stats = fmt_stats
+        self._fmt_progress = fmt_progress
         self._buf: list[str] = []
         self._buf_len = 0
         self._label = "Thinking..."
+        self._iteration = 0
+        self._max_iterations = None
         self._spin = 0
         self._swarm_lines: list[str] = []
         self._timeline: list[str] = []
@@ -405,6 +419,13 @@ class _LiveDisplay:
             self._label = text
         self._refresh(force=True)
 
+    def set_iteration(self, current: int, maximum: int | None = None) -> None:
+        with self._lock:
+            self._iteration = max(0, int(current or 0))
+            if maximum is not None:
+                self._max_iterations = max(0, int(maximum))
+        self._refresh(force=True)
+
     def add_timeline(self, text: str) -> None:
         """Append one compact completed step, keeping the panel bounded."""
         with self._lock:
@@ -453,6 +474,7 @@ class _LiveDisplay:
             pass
 
     def _render(self):
+        from rich import box
         from rich.panel import Panel
         from rich.text import Text
 
@@ -460,6 +482,8 @@ class _LiveDisplay:
             body = "".join(self._buf)
             label = self._label
             spin = self._spin
+            iteration = self._iteration
+            max_iterations = self._max_iterations
             swarm_lines = list(self._swarm_lines)
             timeline = list(self._timeline)
         style = _status_style_for(label)
@@ -467,23 +491,39 @@ class _LiveDisplay:
         # static dot so the panel reads as "settled" the moment it completes.
         dot = _SPINNER[spin % len(_SPINNER)] if style == _BRAND else "●"
         pieces = [f"[{style}]{dot} {label}[/{style}]"]
+        if iteration:
+            maximum = str(max_iterations) if max_iterations else "--"
+            pieces.append(f"[dim]iter {iteration:02d}/{maximum}[/dim]")
         tk = self._fmt_tokens()
-        if tk:
+        if tk and not self._fmt_stats:
             pieces.append(f"[dim]{tk} tok[/dim]")
         el = self._fmt_elapsed()
         if el:
             pieces.append(f"[dim]{el}[/dim]")
         header = "  ·  ".join(pieces)
-        text = Text(body, style="none") if body else Text("…", style="dim")
+        lines = body[-1600:].splitlines() if body else []
+        line_limit = max(20, getattr(self._console, "width", 80) - 8)
+        lines = [_middle(line, line_limit) for line in lines[-6:]]
+        text = Text()
+        if self._fmt_stats:
+            text.append(self._fmt_stats() + "\n", style=_HINT)
+        if self._fmt_progress:
+            progress = self._fmt_progress()
+            if progress:
+                text.append(progress + "\n", style=_INFO)
+        if lines:
+            text.append("\n".join(lines), style="none")
+        else:
+            text.append("…", style=_HINT)
         if timeline:
-            text.append("\n\n最近步骤\n", style="dim")
+            text.append("\n\nRECENT TOOLS\n", style=f"bold {_INFO}")
             for line in timeline:
-                text.append(f"  {line}\n", style="cyan")
+                text.append(f"  {line}\n", style=_INFO)
         if swarm_lines:
-            text.append("\n\n")
+            text.append("\nSWARM\n", style=f"bold {_INFO}")
             for line in swarm_lines:
-                text.append(line + "\n", style="cyan")
-        return Panel(text, title=header, border_style=_BORDER, expand=True)
+                text.append(line + "\n", style=_INFO)
+        return Panel(text, title=header, border_style=_BORDER, box=box.ROUNDED, expand=True)
 
 
 class _LiveRun:
@@ -500,7 +540,16 @@ class _LiveRun:
         self.tokens = {"input": 0, "output": 0}
         self.baseline = {"in": 0, "out": 0}
         self.elapsed = {"start": _time.monotonic()}
-        self.live = _LiveDisplay(console, self._fmt_tokens, self._fmt_elapsed)
+        self.iteration = 0
+        self.max_iterations = getattr(getattr(synapse, "_config", None), "planning", None)
+        self.max_iterations = getattr(self.max_iterations, "max_iterations", None)
+        self.live = _LiveDisplay(
+            console,
+            self._fmt_tokens,
+            self._fmt_elapsed,
+            self._fmt_token_stats,
+            self._fmt_progress,
+        )
         self.event_bus = None
         self.swarm_tracker = None
         self._handlers: list[tuple[str, object]] = []
@@ -508,7 +557,21 @@ class _LiveRun:
 
     def _fmt_tokens(self) -> str:
         total = self.tokens["input"] + self.tokens["output"]
-        return f"{total / 1000:.1f}k" if total >= 1000 else str(total)
+        return _format_token_count(total)
+
+    def _fmt_token_stats(self) -> str:
+        return (
+            f"tokens  in {_format_token_count(self.tokens['input'])} · "
+            f"out {_format_token_count(self.tokens['output'])} · "
+            f"total {_format_token_count(self.tokens['input'] + self.tokens['output'])} tok"
+        )
+
+    def _fmt_progress(self) -> str:
+        if not self.max_iterations or not self.iteration:
+            return ""
+        ratio = min(1.0, self.iteration / self.max_iterations)
+        filled = int(round(ratio * 24))
+        return "  " + "━" * filled + "░" * (24 - filled)
 
     def _fmt_elapsed(self) -> str:
         seconds = _time.monotonic() - self.elapsed["start"]
@@ -529,10 +592,9 @@ class _LiveRun:
         if phase == "thinking":
             return "分析任务"
         if phase == "calling_llm":
-            iteration = self._iteration(message)
-            return f"调用模型 · 第 {iteration} 轮" if iteration else "调用模型"
+            return "调用模型"
         if phase == "token_budget":
-            return f"接近 token 预算 · {message}"
+            return "接近 token 预算"
         if phase == "context_timeout":
             return "上下文检索超时"
         if phase == "done":
@@ -544,6 +606,10 @@ class _LiveRun:
         if getattr(event, "phase", "") == "calling_llm":
             self.baseline["in"] = self.tokens["input"]
             self.baseline["out"] = self.tokens["output"]
+            iteration = self._iteration(message)
+            if iteration:
+                self.iteration = int(iteration)
+                self.live.set_iteration(self.iteration, self.max_iterations)
             self.live.reset_text()
             self.live.set_label(self._progress_label(event))
             return
@@ -575,7 +641,10 @@ class _LiveRun:
         suffix = f"({summary})" if summary else ""
         files = len(getattr(event, "files_touched", []) or [])
         file_suffix = f" · 文件 {files}" if files else ""
-        self.live.add_timeline(f"[{status}] {event.tool_name}{suffix} · {event.duration_ms}ms{file_suffix}")
+        mark = "✓" if event.success else "!"
+        args = _middle(summary or "-", 28)
+        timeline = f"{mark} {event.tool_name:<10} {args:<28} {event.duration_ms:>5}ms{file_suffix}"
+        self.live.add_timeline(timeline)
         self.live.set_label(
             f"工具完成 · {event.tool_name}" if event.success else f"工具失败 · {event.tool_name}"
         )
@@ -1189,29 +1258,26 @@ def _make_prompt_session():
 # ---- Main interface -------------------------------------------------------
 
 
-#: Synapse ASCII art — solid brain with synaptic stem.
+#: Synapse block logo. Each glyph is a full terminal cell, so the logo stays
+#: aligned in PowerShell and CJK workspaces without external image assets.
 _WELCOME_ART = (
-    r"        .-=========-.",
-    r"     .-'  #########  '-.",
-    r"    /   ###  o o  ###   \\",
-    r"   |   ####   ~   ####   |",
-    r"   |   #####     #####   |",
-    r"    \\  '###########'   /",
-    r"     '-.  '##### '   .-'",
-    r"        '-.__| |__.-'",
-    r"            |   |",
-    r"         ---+   +---",
+    "█████",
+    "██",
+    "█████",
+    "    ██",
+    "█████",
 )
 
 _WELCOME_NAME = "Synapse"
-_WELCOME_SUBTITLE = "connecting ideas into code"
-_WELCOME_STATUS = "* ready"
 
 #: Brand palette — single place to tweak the CLI look.
-_BRAND = "bright_cyan"          # primary accent (art, name, prompt)
-_LABEL = "bold bright_cyan"     # field labels in the banner (same blue family)
-_BORDER = "cyan"                # box border — same blue tone as the art
-_HINT = "dim"                   # secondary text / hints
+_BRAND = "bright_cyan"          # logo, prompt and current activity
+_INFO = "bright_blue"            # stable workspace/model metadata
+_LABEL = "bold bright_blue"      # metadata labels
+_BORDER = "grey35"               # quiet frame; semantic colors carry attention
+_HINT = "grey70"                 # secondary text / hints
+_SUCCESS = "green"
+_WARNING = "yellow"
 
 # Braille spinner — animates continuously while the agent works so the panel
 # never looks frozen (e.g. while the model is "thinking" before the first
@@ -1235,7 +1301,7 @@ def _result_summary(result) -> str:
     metrics = result.metrics
     total_tokens = metrics.tokens_input + metrics.tokens_output
     return (
-        f"耗时 {metrics.duration_ms / 1000:.1f}s · token {total_tokens} · "
+        f"耗时 {metrics.duration_ms / 1000:.1f}s · token {_format_token_count(total_tokens)} · "
         f"工具 {metrics.tool_success_count}/{metrics.tool_call_count} 成功"
     )
 
@@ -1260,18 +1326,31 @@ def _print_result(console, result, use_rich: bool) -> None:
         if hint:
             print(f"下一步：{hint}")
         return
+    from rich.console import Group
+    from rich import box
     from rich.markdown import Markdown
+    from rich.panel import Panel
     from rich.rule import Rule
+    from rich.text import Text
     color = {"success": "green", "partial": "yellow", "failed": "red"}.get(
         result.status.value, "dim"
     )
     console.print()
-    console.print(Rule(style=_BORDER))
-    console.print(f"  [{color}]● {result.status.value.upper()}[/{color}]")
-    console.print(Markdown(result.output))
-    console.print(f"  [{_HINT}]{summary}[/{_HINT}]")
+    title = {"success": "TASK COMPLETE", "partial": "TASK PARTIAL", "failed": "TASK FAILED"}.get(
+        status, "TASK FINISHED"
+    )
+    parts = [
+        Text(f"● {title}", style=f"bold {color}"),
+        Markdown(result.output or ""),
+        Rule(style=_BORDER),
+        Text(summary, style=_HINT),
+    ]
     if hint:
-        console.print(f"  [{_HINT}]下一步：{hint}[/{_HINT}]")
+        parts.append(Text(f"下一步：{hint}", style=f"{_WARNING}"))
+    console.print(Panel(
+        Group(*parts), border_style=color, box=box.ROUNDED,
+        expand=True, padding=(0, 1),
+    ))
     console.print()
 
 
@@ -1324,7 +1403,7 @@ def _middle(text: str, limit: int) -> str:
 
 
 def _show_welcome(console, config, config_path: str = "", session=None):
-    """pico-style boxed welcome banner with Rich colour accents."""
+    """Render a compact, width-aware workspace header."""
     from synapse import __version__
     from rich.text import Text
 
@@ -1333,110 +1412,79 @@ def _show_welcome(console, config, config_path: str = "", session=None):
     cwd = str(Path.cwd())
     available, _ = _available_models(config)
     ready = any(e.provider == provider and e.model == model for e in available)
-    status = "ready" if ready else "needs config"
+    status = "READY" if ready else "SETUP"
+    status_style = _SUCCESS if ready else _WARNING
     session_label = "new"
     if session is not None:
         session_label = f"{session.id[:8]} · {len(session.messages)} msgs"
 
-    # 宽度沿用 Console 创建时检测到的值（已在 _main_interface 用 OS API 设置）。
     width = max(getattr(console, "width", None) or 80, 40)
-    inner = width - 4
-    gap = 4
-    # Label column: icon (2 cells) + label text; values take the rest.
-    label_w = 12
-    left_w = (inner - gap) // 2
-    right_w = inner - gap - left_w
+    tools_count = len(getattr(config.tools, "enabled", []) or [])
+    config_label = _middle(str(config_path).replace(" + ", " · "), max(12, width - 26)) if config_path else "defaults"
 
-    def _print_plain(text: str, **kwargs) -> None:
-        console.print(text, **kwargs)
+    def _fit_text(content, limit: int) -> Text:
+        if isinstance(content, Text):
+            return _clamp_text_by_cell(content, limit)
+        return Text(_middle(str(content), limit))
 
-    def _b(char: str = "=") -> Text:
-        return Text(f"+{char * (width - 2)}+", style=_BORDER)
+    def _boxed_line(content="") -> Text:
+        inner = width - 4
+        line = Text("│ ")
+        value = _fit_text(content, inner)
+        line.append(value)
+        line.append(" " * max(0, inner - value.cell_len))
+        line.append(" │")
+        return line
 
-    def _centered(body: str, style: str = "") -> Text:
-        """Center *body* in the box by display cell width (CJK-safe)."""
-        stripped = body.strip()
-        content = _middle(stripped, inner) if stripped else ""
-        pad = max(0, inner - _cell_len(content))
-        left_pad = pad // 2
-        t = Text("| ")
-        t.append(" " * left_pad)
-        t.append(content, style=style)
-        t.append(" " * (pad - left_pad))
-        t.append(" |")
-        return t
+    def _field(label: str, value: str, style: str = _INFO) -> Text:
+        text = Text()
+        text.append(f"{label:<10}", style=_LABEL)
+        text.append(_middle(value, max(8, width - 18)), style=style)
+        return text
 
-    def _row(*segments) -> None:
-        """Print one boxed row from styled Text segments (CJK-safe padding)."""
-        line = Text("| ")
-        vis = 0
-        for seg in segments:
-            line.append(seg)
-            vis += _cell_len(seg)
-        if vis < inner:
-            line.append(" " * (inner - vis))
-        line.append(" |")
-        console.print(line)
+    def _plain_line(content: str) -> Text:
+        value = _middle(content, width)
+        return Text(value + " " * max(0, width - _cell_len(value)))
 
-    def _field(label: str, icon: str, value: str) -> Text:
-        """One 'icon LABEL value' field; label fixed-width, value truncated."""
-        t = Text()
-        t.append(f"{icon} ", style=_BRAND)
-        t.append(f"{label:<{label_w - 2}}", style=_LABEL)
-        t.append(_middle(str(value), 60))
-        return t
+    if width < 52:
+        console.print(_plain_line(f"█ {_WELCOME_NAME}  {status}"))
+        console.print(_plain_line(f"{provider}/{model} · {config.planning.mode}"))
+        console.print(_plain_line(f"{_middle(cwd, width - 14)} · {session_label}"))
+        return
 
-    def _pair(l_label: str, l_icon: str, l_val: str,
-              r_label: str, r_icon: str, r_val: str) -> None:
-        """Two-column row with aligned label columns (CJK-safe)."""
-        if width < 72:
-            _row(_clamp_text_by_cell(_field(l_label, l_icon, l_val), inner))
-            _row(_clamp_text_by_cell(_field(r_label, r_icon, r_val), inner))
-            return
-        l_field = _clamp_text_by_cell(_field(l_label, l_icon, l_val), left_w)
-        r_field = _clamp_text_by_cell(_field(r_label, r_icon, r_val), right_w)
-        l_pad = max(0, left_w - l_field.cell_len)
-        r_pad = max(0, right_w - r_field.cell_len)
-        _row(
-            Text.assemble(l_field, " " * l_pad),
-            Text(" " * gap),
-            Text.assemble(r_field, " " * r_pad),
-        )
-
-    # ── render ────────────────────────────────────────────────────────
-    console.print(_b("="))
+    console.print(Text("╭" + "─" * (width - 2) + "╮", style=_BORDER))
     if width >= 72:
-        for art_line in _WELCOME_ART:
-            console.print(_centered(art_line, style=_BRAND))
-    # Name · subtitle · status on one line
-    tagline_plain = f"{_WELCOME_NAME}  |  {_WELCOME_SUBTITLE}  |  {status}"
-    tagline_body = _middle(tagline_plain, inner).center(inner)
-    tagline_rich = (
-        tagline_body
-        .replace(_WELCOME_NAME, f"[bold {_BRAND}]{_WELCOME_NAME}[/bold {_BRAND}]")
-        .replace(_WELCOME_SUBTITLE, f"[dim italic]{_WELCOME_SUBTITLE}[/dim italic]")
-        .replace(status, f"[{'green' if ready else 'yellow'}]{status}[/{'green' if ready else 'yellow'}]")
-    )
-    console.print(f"| {tagline_rich} |")
-    console.print(_b("-"))
-    _row(Text(""))
-
-    # Workspace row
-    ws = _field("WORKSPACE", ">", cwd)
-    _row(_clamp_text_by_cell(ws, inner))
-
-    _pair("MODEL", "*", model, "VERSION", "#", f"v{__version__}")
-    _pair("PROVIDER", "@", provider, "PLANNING", "~", config.planning.mode)
-    _pair("SESSION", "&", session_label, "STATUS", "!", status)
-    if config_path:
-        cfg = Text()
-        cfg.append("% ", style=_BRAND)
-        cfg.append(_middle(f"config  {config_path}", inner - 2), style=_HINT)
-        _row(cfg)
-
-    _row(Text(""))
-    console.print(_centered("输入 /help 查看命令", style=_HINT))
-    console.print(_b("="))
+        for index, art_line in enumerate(_WELCOME_ART):
+            row = Text("  ")
+            row.append(art_line, style=_BRAND)
+            if index == 0:
+                row.append(f"  {_WELCOME_NAME}", style=f"bold {_BRAND}")
+                row.append(f"  v{__version__}", style=_HINT)
+                row.append(" " * 4)
+                row.append("● ", style=status_style)
+                row.append(status, style=f"bold {status_style}")
+            elif index == 1:
+                row.append("  ")
+                row.append(_middle(f"workspace  {cwd}", width - 17), style=_INFO)
+                row.append(f"  session  {session_label}", style=_HINT)
+            elif index == 2:
+                row.append("  ")
+                row.append(_middle(f"model      {provider}/{model}", width - 17), style=_INFO)
+                row.append(f"  plan  {config.planning.mode}", style=_HINT)
+            elif index == 3:
+                row.append("  ")
+                row.append(_middle(f"config     {config_label}", width - 17), style=_HINT)
+                row.append(f"  tools {tools_count}", style=_HINT)
+            console.print(_boxed_line(row))
+    else:
+        row = Text("  ")
+        row.append(_WELCOME_NAME, style=f"bold {_BRAND}")
+        row.append(f"  ● {status}", style=f"bold {status_style}")
+        console.print(_boxed_line(row))
+        console.print(_boxed_line(_field("WORKSPACE", cwd)))
+        console.print(_boxed_line(_field("MODEL", f"{provider}/{model}")))
+        console.print(_boxed_line(_field("PLAN", f"{config.planning.mode} · session {session_label}", _HINT)))
+    console.print(Text("╰" + "─" * (width - 2) + "╯", style=_BORDER))
 
 
 def _show_help(console):
@@ -2158,12 +2206,12 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             if prompt_session is not None:
                 from prompt_toolkit.formatted_text import HTML
                 user_input = await prompt_session.prompt_async(
-                    HTML('<ansicyan><b>synapse &gt; </b></ansicyan>')
+                    HTML('<ansicyan><b>◆ synapse › </b></ansicyan>')
                 )
             elif use_rich:
-                user_input = console.input(f"  [bold {_BRAND}]synapse > [/bold {_BRAND}]")
+                user_input = console.input(f"  [bold {_BRAND}]◆ synapse › [/bold {_BRAND}]")
             else:
-                user_input = input("synapse> ")
+                user_input = input("◆ synapse › ")
         except EOFError:
             # Ctrl+C may cause a spurious EOF on some console hosts.
             if _ctrl_c_pressed:

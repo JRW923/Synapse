@@ -27,7 +27,7 @@ def test_print_result_rich():
     console = Console(file=out, width=80)
     _print_result(console, _result(ResultStatus.SUCCESS), True)
     text = out.getvalue()
-    assert "SUCCESS" in text
+    assert "TASK COMPLETE" in text
     assert "done" in text
 
 
@@ -142,7 +142,7 @@ def test_live_display_bounds_and_renders_timeline():
 
     assert live._timeline == [f"step-{i}" for i in range(5, 10)]
     rendered = live._render().renderable.plain
-    assert "最近步骤" in rendered
+    assert "RECENT TOOLS" in rendered
     assert "step-9" in rendered
     assert "step-0" not in rendered
 
@@ -181,6 +181,76 @@ def test_welcome_uses_compact_layout_on_narrow_terminal():
 
     text = console.export_text()
     assert _WELCOME_ART[0].strip() not in text
-    assert "ready" in text
+    assert "READY" in text
     assert "abcdef12" in text
     assert {cell_len(line) for line in text.splitlines()} == {40}
+
+
+def test_welcome_uses_block_logo_on_wide_terminal():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _show_welcome
+    from synapse.config.schema import SynapseConfig
+
+    console = Console(width=80, file=io.StringIO(), force_terminal=True, record=True)
+    config = SynapseConfig()
+    config.provider.provider = "ollama"
+    config.provider.model = "qwen3.5:4b"
+    _show_welcome(console, config, "models.json")
+
+    text = console.export_text()
+    assert "█████" in text
+    assert ".-=========-." not in text
+    assert "workspace" in text
+    assert "tools" in text
+
+
+def test_welcome_medium_terminal_reflows_to_single_column():
+    import io
+    from rich.cells import cell_len
+    from rich.console import Console
+    from synapse.adapters.cli import _show_welcome
+    from synapse.config.schema import SynapseConfig
+
+    console = Console(width=60, file=io.StringIO(), force_terminal=True, record=True)
+    config = SynapseConfig()
+    config.provider.provider = "ollama"
+    config.provider.model = "qwen3.5:4b"
+    _show_welcome(console, config, "models.json")
+
+    text = console.export_text()
+    lines = text.splitlines()
+    assert {cell_len(line) for line in lines} == {60}
+    assert "WORKSPACE" in text
+    assert "MODEL" in text
+
+
+def test_live_display_renders_token_breakdown_and_iteration():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _LiveDisplay
+
+    display = _LiveDisplay(
+        Console(file=io.StringIO(), width=80),
+        lambda: "2.0k",
+        lambda: "4s",
+        lambda: "tokens  in 1.2k · out 840 · total 2.0k tok",
+        lambda: "  ━━━━━━━░░░░░░░░░░░░░",
+    )
+    display.set_iteration(3, 50)
+    display.set_label("调用模型")
+    plain = display._render().renderable.plain
+
+    assert "iter 03/50" in display._render().title
+    assert "in 1.2k" in plain
+    assert "out 840" in plain
+    assert "2.0k tok" in plain
+    assert "━" in plain
+
+
+def test_token_count_format_is_compact_and_stable():
+    from synapse.adapters.cli import _format_token_count
+
+    assert _format_token_count(42) == "42"
+    assert _format_token_count(1_200) == "1.2k"
+    assert _format_token_count(1_200_000) == "1.2M"

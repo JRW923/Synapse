@@ -14,7 +14,9 @@ def test_env_key_applies_only_to_current_provider(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")
     monkeypatch.setenv("GOOGLE_API_KEY", "sk-google")
-    config, _ = load_config(str(config_file))
+    config, _ = load_config(
+        str(config_file), models_path=tmp_path / "missing-models.json",
+    )
     assert config.provider.api_key == "sk-anthropic"
 
 
@@ -28,7 +30,9 @@ def test_env_provider_uses_its_own_key(tmp_path, monkeypatch):
     monkeypatch.setenv("SYNAPSE_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek")
-    config, _ = load_config(str(config_file))
+    config, _ = load_config(
+        str(config_file), models_path=tmp_path / "missing-models.json",
+    )
     assert config.provider.provider == "openai"
     assert config.provider.api_key == "sk-openai"
 

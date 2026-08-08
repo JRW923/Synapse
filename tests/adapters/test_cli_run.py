@@ -156,7 +156,7 @@ async def test_run_task_streamed_shows_phase_and_tool_timeline():
     rendered = console.file.getvalue()
     assert "read" in rendered
     assert "23ms" in rendered
-    assert "最近步骤" in rendered
+    assert "RECENT TOOLS" in rendered
 
 
 @pytest.mark.asyncio
