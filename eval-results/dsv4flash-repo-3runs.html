@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>repo_pytest Dashboard</title>
+<style>
+:root { color-scheme: dark; --bg:#10151b; --panel:#18212a; --line:#2c3b46; --text:#edf4f5; --muted:#9aadb5; --cyan:#55c6d8; --green:#2fbf9f; --red:#e07a5f; }
+* { box-sizing:border-box; } body { margin:0; padding:32px; background:var(--bg); color:var(--text); font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+main { max-width:1180px; margin:auto; } header { display:flex; justify-content:space-between; gap:24px; align-items:flex-end; border-bottom:1px solid var(--line); padding-bottom:20px; }
+h1 { margin:0; font-size:28px; letter-spacing:.02em; } h2 { margin:0 0 14px; font-size:16px; } .muted { color:var(--muted); }
+.grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin:20px 0; } .card,.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; } .card { padding:16px; } .card strong { display:block; margin-top:4px; font-size:24px; color:var(--cyan); }
+.charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; } .panel { padding:18px; margin-bottom:16px; } svg { width:100%; height:auto; min-height:120px; overflow:visible; } .label,.value { fill:var(--text); font-size:12px; } .value { fill:var(--muted); } .track { fill:#25333d; } .bar { fill:var(--cyan); }
+table { width:100%; border-collapse:collapse; } th,td { text-align:left; padding:10px 8px; border-bottom:1px solid var(--line); } th { color:var(--muted); font-weight:500; } .ok { color:var(--green); font-weight:700; } .bad { color:var(--red); font-weight:700; }
+@media (max-width:800px) { body { padding:18px; } .grid,.charts { grid-template-columns:1fr 1fr; } header { display:block; } table { font-size:12px; } }
+@media (max-width:520px) { .grid,.charts { grid-template-columns:1fr; } }
+</style></head><body><main>
+<header><div><h1>repo_pytest</h1><div class="muted">Synapse Benchmark Dashboard · 2026-08-08T21:19:18+0800</div></div>
+<div class="muted">deepseek/deepseek-v4-flash</div></header>
+<section class="grid">
+<div class="card">Pass rate<strong>100.0%</strong><span class="muted">95% CI 43.8%–100.0%</span></div>
+<div class="card">Pass@k<strong>100.0%</strong><span class="muted">独立重复任务</span></div>
+<div class="card">Mean score<strong>1.000</strong></div>
+<div class="card">Passed<strong>3/3</strong></div>
+<div class="card">Duration<strong>37.2s</strong></div>
+<div class="card">Tokens / cost<strong>8,980</strong><span class="muted">$0.0593</span></div>
+</section>
+<section class="charts"><div class="panel"><h2>Category pass rate</h2><svg viewBox="0 0 500 80"><g><text x="0" y="20" class="label">functional</text><rect x="120" y="7" width="280" height="18" rx="4" class="track"/><rect x="120" y="7" width="280" height="18" rx="4" class="bar"/><text x="414" y="21" class="value">100.0%</text></g></svg></div>
+<div class="panel"><h2>Task duration</h2><svg viewBox="0 0 560 114"><g><text x="0" y="20" class="label">calculator-add#1</text><rect x="170" y="7" width="280" height="16" rx="4" class="track"/><rect x="170" y="7" width="265" height="16" rx="4" fill="#2fbf9f"/><text x="462" y="20" class="value">5,993 ms</text></g><g><text x="0" y="50" class="label">calculator-add#2</text><rect x="170" y="37" width="280" height="16" rx="4" class="track"/><rect x="170" y="37" width="280" height="16" rx="4" fill="#2fbf9f"/><text x="462" y="50" class="value">6,310 ms</text></g><g><text x="0" y="80" class="label">calculator-add#3</text><rect x="170" y="67" width="280" height="16" rx="4" class="track"/><rect x="170" y="67" width="261" height="16" rx="4" fill="#2fbf9f"/><text x="462" y="80" class="value">5,892 ms</text></g></svg></div></section>
+<section class="panel"><h2>Task results</h2><div style="overflow:auto"><table><thead><tr><th>Task</th><th>Category</th><th>Status</th><th>Score</th><th>Duration</th><th>Grader</th></tr></thead><tbody><tr><td>calculator-add#1</td><td>functional</td><td class="ok">PASS</td><td>1.000</td><td>5,993 ms</td><td>pytest suite passed</td></tr><tr><td>calculator-add#2</td><td>functional</td><td class="ok">PASS</td><td>1.000</td><td>6,310 ms</td><td>pytest suite passed</td></tr><tr><td>calculator-add#3</td><td>functional</td><td class="ok">PASS</td><td>1.000</td><td>5,892 ms</td><td>pytest suite passed</td></tr></tbody></table></div></section>
+<footer class="muted">Generated locally by Synapse · official benchmark runner/data version remains external when metadata says so.</footer>
+</main></body></html>

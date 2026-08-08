@@ -151,6 +151,7 @@ agent patch、private tests、失败原因和超时统一落到任务报告。
 - **Task-specific tool subset** 已在 schema 发送前裁剪：代码任务默认只暴露文件、搜索、shell、git、todo、skill，完整 registry 和安全授权仍保持不变。
 - **DeepSeek v4 provider smoke** 已覆盖 Anthropic-compatible 路由、`/anthropic` endpoint、关闭 prompt caching，以及既有 streaming/tool-use/401 retry regression tests。
 - **SWE-bench** 已从“仅加载 JSONL”升级为 clone → checkout → Agent patch → 新 checkout apply → private tests/test command → `TaskGrade` 的闭环，CLI 命令仍要求用户提供本地数据集。
-- **Terminal-Bench 风格适配** 已加入 `terminal_smoke` 和 `terminal_bench`：前者离线可复现，后者支持常见 JSON/JSONL 任务字段和隔离 workspace grader。完整调研、边界和 τ-bench/GAIA/ToolBench/AgentBench/Aider/OpenHands 对比见 `docs/evaluation-harness-research-2026-08-08.md`。
+- **Terminal-Bench 风格适配** 已加入 `terminal_smoke` 和 `terminal_bench`：前者离线可复现，后者支持常见 JSON/JSONL 任务字段和隔离 workspace grader。完整调研、边界和 τ-bench/GAIA/ToolBench/AgentBench/Aider/OpenHands 对比见 `docs/评测/evaluation-harness-research-2026-08-08.md`。
+- **重复运行与统计** 已进入通用 `BenchmarkRunner`：`--repeat N` 会保存每次 attempt，报告 `pass_at_k`、Wilson 95% pass-rate CI、mean-score CI、Token、cost 和 tool success rate，并自动生成 HTML/SVG 与 CSV。
 
 本轮实现是适配层，不是官方 benchmark runner 的替代品：没有把外部数据集、Docker 镜像或 API 环境硬编码进 Synapse，因此报告中的 `official_runner=external` 必须保留，避免把本地 smoke 分数误报为榜单分数。

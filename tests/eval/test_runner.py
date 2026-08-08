@@ -142,3 +142,34 @@ async def test_runner_task_runner_receives_metadata():
     )
     assert seen == ["isolated"]
     assert result.passed == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_repeat_reports_ci_pass_at_k_and_runtime_totals():
+    benchmark = Benchmark(name="repeat", tasks=[BenchmarkTask(id="t", description="task")])
+    calls = 0
+
+    async def run_task(_task):
+        nonlocal calls
+        calls += 1
+        status = ResultStatus.SUCCESS if calls == 2 else ResultStatus.FAILED
+        return AgentResult(status=status, output="ok"), {
+            "efficiency": {
+                "tokens_input": 10,
+                "tokens_output": 5,
+                "tool_call_count": 2,
+                "tool_success_count": 1,
+                "cost_estimate_usd": 0.01,
+            },
+        }
+
+    result = await BenchmarkRunner().run(benchmark, run_task, repeat=2)
+    assert [item.task_id for item in result.results] == ["t#1", "t#2"]
+    assert result.total == 2
+    assert result.passed == 1
+    assert result.pass_at_k == 1.0
+    assert result.tokens_input == 20
+    assert result.tokens_output == 10
+    assert result.total_cost_usd == 0.02
+    assert result.tool_success_rate == 0.5
+    assert result.pass_rate_ci95[0] <= 0.5 <= result.pass_rate_ci95[1]

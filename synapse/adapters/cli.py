@@ -980,7 +980,7 @@ def main():
         "--repeat",
         type=int,
         default=1,
-        help="Repeat isolated functional tasks this many times",
+        help="Repeat every benchmark task this many times",
     )
     eval_parser.add_argument(
         "--report",
@@ -2650,14 +2650,23 @@ def _eval_report_path(args) -> Path:
 
 
 def _print_eval_result(result, report_path: Path) -> None:
+    dashboard_path = result.write_html(report_path.with_suffix(".html"))
+    csv_path = result.write_csv(report_path.with_suffix(".csv"))
     print("\n--- Results ---")
     print(f"Total:      {result.total}")
     print(f"Completed:  {result.completed}")
     print(f"Failed:     {result.failed}")
     print(f"Passed:     {result.passed}/{result.total} ({result.pass_rate:.1%})")
+    print(f"Pass@k:     {result.pass_at_k:.1%}")
+    print(f"95% CI:     [{result.pass_rate_ci95[0]:.1%}, {result.pass_rate_ci95[1]:.1%}]")
     print(f"Mean score: {result.mean_score:.3f}")
+    print(f"Tokens:     {result.tokens_input + result.tokens_output}")
+    print(f"Cost:       ${result.total_cost_usd:.6f}")
+    print(f"Tool rate:  {result.tool_success_rate:.1%}")
     print(f"Duration:   {result.duration_ms}ms")
     print(f"Report:     {report_path.resolve()}")
+    print(f"Dashboard:  {dashboard_path}")
+    print(f"CSV:        {csv_path}")
     for task in result.results:
         mark = "+" if task.passed else "!"
         print(
@@ -2670,7 +2679,13 @@ async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Pa
     """Run the isolated local functional fixture and persist a normal report."""
     from synapse.adapters.library import Synapse
     from synapse.eval.benchmarks.repo_pytest import RepoPytestBenchmark
-    from synapse.eval.runner import BenchmarkResult, TaskResult
+    from synapse.eval.runner import (
+        BenchmarkResult,
+        TaskResult,
+        _find_runtime_score,
+        _mean_interval,
+        _wilson_interval,
+    )
 
     async def approve(_request) -> bool:
         return True
@@ -2717,6 +2732,17 @@ async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Pa
     completed = sum(int(item.status == "success") for item in task_results)
     failed = sum(int(item.status in {"failed", "error"}) for item in task_results)
     mean_score = sum(item.score for item in task_results) / total if total else 0.0
+    scores = [item.score for item in task_results]
+    tokens_input = tokens_output = tool_calls = tool_successes = 0
+    total_cost = 0.0
+    for item in task_results:
+        runtime = _find_runtime_score(item.run_score)
+        efficiency = runtime.get("efficiency", {})
+        tokens_input += int(efficiency.get("tokens_input", 0) or 0)
+        tokens_output += int(efficiency.get("tokens_output", 0) or 0)
+        tool_calls += int(efficiency.get("tool_call_count", 0) or 0)
+        tool_successes += int(efficiency.get("tool_success_count", 0) or 0)
+        total_cost += float(efficiency.get("cost_estimate_usd", 0) or 0)
     result = BenchmarkResult(
         name="repo_pytest",
         total=total,
@@ -2734,6 +2760,13 @@ async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Pa
             "mean_score": mean_score,
         }},
         results=task_results,
+        pass_rate_ci95=_wilson_interval(passed, total),
+        mean_score_ci95=_mean_interval(scores),
+        pass_at_k=1.0 if passed else 0.0,
+        tokens_input=tokens_input,
+        tokens_output=tokens_output,
+        total_cost_usd=round(total_cost, 6),
+        tool_success_rate=round(tool_successes / tool_calls, 4) if tool_calls else 0.0,
         metadata={
             "provider": provider,
             "model": model,
@@ -2823,6 +2856,7 @@ async def _run_swebench_eval(args, provider: str, model: str, report_path: Path)
         benchmark,
         lambda _description: run_task(benchmark.tasks[0]),
         task_runner=run_task,
+        repeat=max(1, int(getattr(args, "repeat", 1) or 1)),
         report_path=report_path,
         metadata={"provider": provider, "model": model, "isolation": "temporary_git_checkout"},
     )
@@ -2896,6 +2930,7 @@ async def _run_terminal_eval(args, provider: str, model: str, report_path: Path)
         benchmark,
         lambda _description: run_task(benchmark.tasks[0]),
         task_runner=run_task,
+        repeat=max(1, int(getattr(args, "repeat", 1) or 1)),
         report_path=report_path,
         metadata={
             "provider": provider,
@@ -2980,6 +3015,7 @@ async def _run_eval(args) -> None:
         result = await runner.run(
             benchmark,
             run_task,
+            repeat=max(1, int(getattr(args, "repeat", 1) or 1)),
             report_path=report_path,
             metadata={
                 "provider": provider,

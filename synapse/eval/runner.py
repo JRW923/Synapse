@@ -12,6 +12,7 @@ from __future__ import annotations
 import time
 import inspect
 import json
+import math
 from collections.abc import Callable, Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -132,6 +133,13 @@ class BenchmarkResult:
     by_category: dict[str, dict[str, float | int]] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
     started_at: str = ""
+    pass_rate_ci95: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    mean_score_ci95: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    pass_at_k: float = 0.0
+    tokens_input: int = 0
+    tokens_output: int = 0
+    total_cost_usd: float = 0.0
+    tool_success_rate: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe report with bounded task output."""
@@ -161,6 +169,13 @@ class BenchmarkResult:
             "mean_score": self.mean_score,
             "duration_ms": self.duration_ms,
             "started_at": self.started_at,
+            "pass_rate_ci95": self.pass_rate_ci95,
+            "mean_score_ci95": self.mean_score_ci95,
+            "pass_at_k": self.pass_at_k,
+            "tokens_input": self.tokens_input,
+            "tokens_output": self.tokens_output,
+            "total_cost_usd": self.total_cost_usd,
+            "tool_success_rate": self.tool_success_rate,
             "metadata": self.metadata,
             "by_category": self.by_category,
             "results": tasks,
@@ -175,6 +190,18 @@ class BenchmarkResult:
             encoding="utf-8",
         )
         return target
+
+    def write_html(self, path: str | Path) -> Path:
+        """Persist a self-contained dashboard for the benchmark report."""
+        from synapse.eval.visualize import render_html
+
+        return render_html(self.to_dict(), path)
+
+    def write_csv(self, path: str | Path) -> Path:
+        """Persist flattened task metrics for spreadsheets/plotting."""
+        from synapse.eval.visualize import write_csv
+
+        return write_csv(self.to_dict(), path)
 
 
 @dataclass
@@ -199,6 +226,50 @@ class Benchmark:
         [BenchmarkTask, AgentResult, dict[str, Any] | None], TaskGrade
     ] | None = field(default=None, repr=False, compare=False)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def _wilson_interval(successes: int, total: int) -> list[float]:
+    """Return a conservative 95% Wilson interval for a pass proportion."""
+    if total <= 0:
+        return [0.0, 0.0]
+    z = 1.96
+    p = successes / total
+    denominator = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator
+    return [round(max(0.0, center - margin), 4), round(min(1.0, center + margin), 4)]
+
+
+def _mean_interval(values: list[float]) -> list[float]:
+    """Return a normal-approximation 95% interval for mean task score."""
+    if not values:
+        return [0.0, 0.0]
+    mean = sum(values) / len(values)
+    if len(values) == 1:
+        return [round(mean, 4), round(mean, 4)]
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    margin = 1.96 * math.sqrt(variance / len(values))
+    return [round(max(0.0, mean - margin), 4), round(min(1.0, mean + margin), 4)]
+
+
+def _find_runtime_score(value: Any) -> dict[str, Any]:
+    """Find the first nested runtime snapshot without coupling to a benchmark."""
+    if not isinstance(value, dict):
+        return {}
+    if isinstance(value.get("efficiency"), dict):
+        return value
+    for key in ("runtime", "run_score"):
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            found = _find_runtime_score(nested)
+            if found:
+                return found
+    for nested in value.values():
+        if isinstance(nested, dict):
+            found = _find_runtime_score(nested)
+            if found:
+                return found
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +315,7 @@ class BenchmarkRunner:
         report_path: str | Path | None = None,
         metadata: dict[str, Any] | None = None,
         task_runner: Callable[[BenchmarkTask], Awaitable[Any]] | None = None,
+        repeat: int = 1,
     ) -> BenchmarkResult:
         """Execute every task in *benchmark* and aggregate results.
 
@@ -264,6 +336,9 @@ class BenchmarkRunner:
             is used, then a successful AgentResult is treated as score ``1``.
         report_path:
             Optional JSON path for a bounded, machine-readable report.
+        repeat:
+            Number of independent attempts per task. Repeated task IDs use a
+            ``#N`` suffix and the report also exposes aggregate pass@k.
 
         Returns
         -------
@@ -277,86 +352,89 @@ class BenchmarkRunner:
         failed = 0
         passed = 0
 
+        repeat_count = max(1, int(repeat or 1))
         for task in benchmark.tasks:
-            t_start = time.monotonic()
-            try:
-                execution = await (
-                    task_runner(task) if task_runner is not None else run_task(task.description)
+            for attempt in range(repeat_count):
+                t_start = time.monotonic()
+                task_id = task.id if repeat_count == 1 else f"{task.id}#{attempt + 1}"
+                try:
+                    execution = await (
+                        task_runner(task) if task_runner is not None else run_task(task.description)
+                    )
+                    run_score = None
+                    if (
+                        isinstance(execution, tuple)
+                        and len(execution) == 2
+                        and isinstance(execution[0], AgentResult)
+                    ):
+                        agent_result, run_score = execution
+                    else:
+                        agent_result = execution
+                    if not isinstance(agent_result, AgentResult):
+                        raise TypeError(
+                            "run_task must return AgentResult or (AgentResult, run_score)"
+                        )
+                except Exception as exc:
+                    results.append(TaskResult(
+                        task_id=task_id,
+                        status="error",
+                        output="",
+                        duration_ms=int((time.monotonic() - t_start) * 1000),
+                        error=str(exc),
+                        category=str(task.metadata.get("category", "uncategorized")),
+                    ))
+                    failed += 1
+                    continue
+
+                status = (
+                    agent_result.status.value
+                    if hasattr(agent_result.status, "value")
+                    else str(agent_result.status)
                 )
-                run_score = None
-                if (
-                    isinstance(execution, tuple)
-                    and len(execution) == 2
-                    and isinstance(execution[0], AgentResult)
-                ):
-                    agent_result, run_score = execution
-                else:
-                    agent_result = execution
-                if not isinstance(agent_result, AgentResult):
-                    raise TypeError(
-                        "run_task must return AgentResult or (AgentResult, run_score)"
-                    )
-            except Exception as exc:
+                duration_ms = int((time.monotonic() - t_start) * 1000)
+
+                if status == ResultStatus.SUCCESS.value:
+                    completed += 1
+                elif status in (ResultStatus.FAILED.value, "error"):
+                    failed += 1
+                # PARTIAL counts as completed (partial success)
+
+                grader = grade_task or benchmark.grader
+                try:
+                    if grader is None:
+                        grade = TaskGrade(
+                            passed=status == ResultStatus.SUCCESS.value,
+                            score=1.0 if status == ResultStatus.SUCCESS.value else 0.0,
+                            reason="agent reported success" if status == ResultStatus.SUCCESS.value
+                            else f"agent reported {status}",
+                        )
+                    else:
+                        grade = grader(task, agent_result, run_score)
+                        if inspect.isawaitable(grade):
+                            grade = await grade
+                        if not isinstance(grade, TaskGrade):
+                            raise TypeError("grader must return TaskGrade")
+                except Exception as exc:
+                    grade = TaskGrade(False, 0.0, reason=f"grader error: {exc}")
+
+                if grade.passed:
+                    passed += 1
+
                 results.append(TaskResult(
-                    task_id=task.id,
-                    status="error",
-                    output="",
-                    duration_ms=int((time.monotonic() - t_start) * 1000),
-                    error=str(exc),
+                    task_id=task_id,
+                    status=status,
+                    output=agent_result.output,
+                    duration_ms=duration_ms,
+                    passed=grade.passed,
+                    score=grade.score,
                     category=str(task.metadata.get("category", "uncategorized")),
+                    grade_reason=grade.reason,
+                    grade_details=grade.details,
+                    run_score=run_score,
                 ))
-                failed += 1
-                continue
-
-            status = (
-                agent_result.status.value
-                if hasattr(agent_result.status, "value")
-                else str(agent_result.status)
-            )
-            duration_ms = int((time.monotonic() - t_start) * 1000)
-
-            if status == ResultStatus.SUCCESS.value:
-                completed += 1
-            elif status in (ResultStatus.FAILED.value, "error"):
-                failed += 1
-            # PARTIAL counts as completed (partial success)
-
-            grader = grade_task or benchmark.grader
-            try:
-                if grader is None:
-                    grade = TaskGrade(
-                        passed=status == ResultStatus.SUCCESS.value,
-                        score=1.0 if status == ResultStatus.SUCCESS.value else 0.0,
-                        reason="agent reported success" if status == ResultStatus.SUCCESS.value
-                        else f"agent reported {status}",
-                    )
-                else:
-                    grade = grader(task, agent_result, run_score)
-                    if inspect.isawaitable(grade):
-                        grade = await grade
-                    if not isinstance(grade, TaskGrade):
-                        raise TypeError("grader must return TaskGrade")
-            except Exception as exc:
-                grade = TaskGrade(False, 0.0, reason=f"grader error: {exc}")
-
-            if grade.passed:
-                passed += 1
-
-            results.append(TaskResult(
-                task_id=task.id,
-                status=status,
-                output=agent_result.output,
-                duration_ms=duration_ms,
-                passed=grade.passed,
-                score=grade.score,
-                category=str(task.metadata.get("category", "uncategorized")),
-                grade_reason=grade.reason,
-                grade_details=grade.details,
-                run_score=run_score,
-            ))
 
         total_ms = int((time.monotonic() - t0) * 1000)
-        total = len(benchmark.tasks)
+        total = len(results)
         category_buckets: dict[str, dict[str, float | int]] = {}
         for result in results:
             bucket = category_buckets.setdefault(
@@ -371,6 +449,33 @@ class BenchmarkRunner:
             bucket["pass_rate"] = round(int(bucket["passed"]) / count, 4) if count else 0.0
             bucket["mean_score"] = round(float(bucket["mean_score"]) / count, 4) if count else 0.0
 
+        pass_rate = round(passed / total, 4) if total else 0.0
+        scores = [item.score for item in results]
+        mean_score = round(sum(scores) / total, 4) if total else 0.0
+        pass_ci = _wilson_interval(passed, total)
+        score_ci = _mean_interval(scores)
+        groups: dict[str, list[bool]] = {}
+        for item in results:
+            base_id = item.task_id.rsplit("#", 1)[0] if repeat_count > 1 else item.task_id
+            groups.setdefault(base_id, []).append(item.passed)
+        pass_at_k = (
+            sum(any(outcomes) for outcomes in groups.values()) / len(groups)
+            if groups else 0.0
+        )
+        tokens_input = 0
+        tokens_output = 0
+        total_cost = 0.0
+        tool_calls = 0
+        tool_successes = 0
+        for item in results:
+            runtime = _find_runtime_score(item.run_score)
+            efficiency = runtime.get("efficiency", {})
+            tokens_input += int(efficiency.get("tokens_input", 0) or 0)
+            tokens_output += int(efficiency.get("tokens_output", 0) or 0)
+            total_cost += float(efficiency.get("cost_estimate_usd", 0) or 0)
+            tool_calls += int(efficiency.get("tool_call_count", 0) or 0)
+            tool_successes += int(efficiency.get("tool_success_count", 0) or 0)
+
         result = BenchmarkResult(
             name=benchmark.name,
             total=total,
@@ -379,11 +484,18 @@ class BenchmarkRunner:
             results=results,
             duration_ms=total_ms,
             passed=passed,
-            pass_rate=round(passed / total, 4) if total else 0.0,
-            mean_score=round(sum(item.score for item in results) / total, 4) if total else 0.0,
+            pass_rate=pass_rate,
+            mean_score=mean_score,
             by_category=category_buckets,
-            metadata={**benchmark.metadata, **(metadata or {})},
+            metadata={**benchmark.metadata, "repeat": repeat_count, **(metadata or {})},
             started_at=started_at,
+            pass_rate_ci95=pass_ci,
+            mean_score_ci95=score_ci,
+            pass_at_k=round(pass_at_k, 4),
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
+            total_cost_usd=round(total_cost, 6),
+            tool_success_rate=round(tool_successes / tool_calls, 4) if tool_calls else 0.0,
         )
         if report_path is not None:
             result.write_json(report_path)

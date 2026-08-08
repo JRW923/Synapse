@@ -334,7 +334,7 @@ Synapse/
 │   ├── adapters/      # CLI (synapse run / synapse version)
 │   └── config/        # Pydantic schema + YAML/env loader
 ├── tests/             # 58 tests（全部通过，含集成测试）
-├── docs/superpowers/  # 设计 Spec + 实施 Plan
+├── docs/设计方案/      # 设计 Spec + 实施 Plan
 ├── DEVELOPMENT.md     # 本文件
 └── pyproject.toml
 ```
@@ -402,7 +402,7 @@ Synapse/
 │   └── config/        # (无变化)
 ├── tests/             # 98 tests（0 failures）
 ├── tools/             # +check_boundaries.py
-└── docs/superpowers/  # +Phase 2 Plan
+└── docs/设计方案/      # +Phase 2 Plan
 ```
 
 | 指标 | Phase 1 | Phase 2 |
@@ -789,7 +789,7 @@ CLI --mcp-server "name:cmd"     Synapse(mcp_servers=[...])
 | `synapse/modules/planning/react.py` | 修改 | token_update 事件、系统提示更新 |
 | `synapse/modules/tools/web_search.py` | 新增 | DuckDuckGo 搜索工具 |
 | `pyproject.toml` | 修改 | 新增 `prompt_toolkit>=3.0` 依赖 |
-| `DEVELOPMENT.md`（根目录） | 新增（误） | 误建在根目录，已合并到 `docs/DEVELOPMENT.md` 并删除 |
+| `DEVELOPMENT.md`（根目录） | 新增（误） | 误建在根目录，已合并到 `docs/开发规划/DEVELOPMENT.md` 并删除 |
 
 ### 当前状态
 
@@ -1314,7 +1314,7 @@ TODO L 系列把"黑盒式一次性任务"和"晦涩异常"两类体验痛点一
 
 ### 背景
 
-依据 [learn.claude code · timeline](https://learn.shareai.run/en/timeline/) 划分的 20 个 harness 章节（s01–s20）做对照审计，形成 `docs/harness_audit.md`。审计发现 s04/s05/s07/s12/s13/s14/s16/s17/s18 此前为缺口，制定本开发计划并按 P0→P1→P2 三批落地，**全部复用既有 `EventBus` / `Session.fork` / `DefaultToolRegistry` / planner 接口，不引入新依赖，每批带可运行单测（check）**。
+依据 [learn.claude code · timeline](https://learn.shareai.run/en/timeline/) 划分的 20 个 harness 章节（s01–s20）做对照审计，形成 `docs/架构审查/harness_audit.md`。审计发现 s04/s05/s07/s12/s13/s14/s16/s17/s18 此前为缺口，制定本开发计划并按 P0→P1→P2 三批落地，**全部复用既有 `EventBus` / `Session.fork` / `DefaultToolRegistry` / planner 接口，不引入新依赖，每批带可运行单测（check）**。
 
 计划与落地顺序：
 
@@ -1436,4 +1436,3 @@ s14 Cron → s16 协议完善                                        # P2：运�
 | 新增工具 | `load_skill` / `todo_write` / `todo_read`（+ shell `run_in_background` / `read_task_id`） |
 | CLI 入口 | REPL `/todos` 视图 |
 | 依赖新增 | 0（全程 stdlib） |
-

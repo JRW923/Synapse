@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/icons/synapse_icon_1_neural-S.png" width="120" alt="Synapse">
+  <img src="docs/资源/图标/synapse_icon_1_neural-S.png" width="120" alt="Synapse">
 </p>
 
 <h1 align="center">Synapse</h1>
@@ -82,10 +82,12 @@ synapse/
 └── config/        # Pydantic Schema + YAML/环境变量加载
 ```
 
+文档导航：[docs/文档索引.md](docs/文档索引.md)
+
 ## 未来可拓展方向
 
 - **更强的安全隔离**：在现有进程树隔离基础上，引入 bubblewrap / Seatbelt / namespace，实现文件系统与网络的真正沙箱。
-- **真实基准接入**：`swebench` 已支持隔离 checkout、patch/private-test grader；新增 `terminal_smoke` / `terminal_bench` 适配层。详见 `docs/evaluation-harness-research-2026-08-08.md`。
+- **真实基准接入**：`swebench` 已支持隔离 checkout、patch/private-test grader；新增 `terminal_smoke` / `terminal_bench` 适配层。详见 `docs/评测/evaluation-harness-research-2026-08-08.md`。
 - **Swarm 三方合并**：并行 worker 对同文件的写冲突从「后写覆盖」演进为真正的三方合并。
 - **语义记忆默认化**：把 ChromaDB/Qdrant 向量召回作为默认记忆层，提升长程上下文关联能力。
 - **MCP 生态接入**：通过 MCP 协议热插拔更多外部工具与模型 provider，保持核心稳定。

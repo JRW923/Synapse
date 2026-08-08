@@ -235,7 +235,8 @@ class BasicContextRetriever:
         try:
             proc = subprocess.run(
                 ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
-                cwd=str(project_root), capture_output=True, text=True, timeout=15,
+                cwd=str(project_root), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=15,
             )
         except (OSError, subprocess.SubprocessError):
             return None

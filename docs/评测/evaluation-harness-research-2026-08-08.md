@@ -56,9 +56,11 @@ python -m synapse eval terminal_bench --dataset path/to/tasks.jsonl --max-tasks 
 - `runtime`：Synapse EventBus metrics，适合诊断 tool success、token、耗时、过程质量，不替代功能 grader。
 - `official_runner=external`：表示只接入数据/任务/事实接口，未声称复刻官方容器、数据版本或榜单跑分。
 
+每次 CLI 评测会同时输出 JSON、CSV 和自包含 HTML/SVG dashboard。HTML 展示 pass rate、pass@k、95% CI、score、耗时、Token/cost、分类通过率和任务明细；CSV 保留 task 级指标，便于后续在 Excel/Pandas 中二次分析。
+
 ## 下一步
 
 1. 为 Terminal-Bench 数据增加 container backend（优先 Docker，保留 ProcessSandbox fallback）。
-2. 为 SWE-bench 增加 dataset version、seed、重复运行和置信区间字段。
+2. 为 SWE-bench 增加 dataset version 和 provider-level seed/temperature；重复运行、置信区间和成本汇总已完成。
 3. 为 τ-bench/ToolBench 增加离线 stateful tool fixture，再接真实 API 环境。
 4. 将 `task_runner` 的 workspace 生命周期抽成更通用的 execution backend；在没有第二个真实环境前不提前引入复杂插件协议。

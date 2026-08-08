@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/icons/synapse_icon_1_neural-S.png" width="120" alt="Synapse">
+  <img src="docs/资源/图标/synapse_icon_1_neural-S.png" width="120" alt="Synapse">
 </p>
 
 <h1 align="center">Synapse</h1>

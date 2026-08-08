@@ -1,0 +1,4 @@
+﻿task_id,category,status,passed,score,duration_ms,tokens_input,tokens_output,tool_call_count,tool_success_count,cost_estimate_usd,process_score,safety_violations
+calculator-add#1,functional,success,True,1.0,5993,2004,860,4,4,0.018912,1.0,0
+calculator-add#2,functional,success,True,1.0,6310,2073,889,4,4,0.019554,1.0,0
+calculator-add#3,functional,success,True,1.0,5892,2207,947,4,4,0.020826,1.0,0
