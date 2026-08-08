@@ -63,6 +63,48 @@ def test_library_api_config_override():
     assert config.planning.max_iterations == 100
 
 
+def test_library_api_without_provider_uses_models_json_default(tmp_path, monkeypatch):
+    """Zero-argument construction must preserve the user's persisted default."""
+    from synapse.config.models import upsert_model
+    from synapse.adapters.library import Synapse
+
+    models_file = tmp_path / "models.json"
+    upsert_model(
+        "deepseek", "deepseek-chat", api_key="sk-test", path=models_file,
+    )
+    monkeypatch.setattr(
+        "synapse.config.models.models_config_path", lambda: models_file,
+    )
+
+    with patch("synapse.modules.providers.deepseek.DeepSeekProvider"):
+        synapse = Synapse()
+
+    assert synapse._config.provider.provider == "deepseek"
+    assert synapse._config.provider.model == "deepseek-chat"
+
+
+def test_library_api_uses_custom_provider_base_url(tmp_path, monkeypatch):
+    from synapse.config.models import upsert_model
+    from synapse.adapters.library import Synapse
+
+    models_file = tmp_path / "models.json"
+    upsert_model(
+        "local",
+        "coder",
+        api_key="local-key",
+        base_url="http://127.0.0.1:1234/v1",
+        path=models_file,
+    )
+    monkeypatch.setattr(
+        "synapse.config.models.models_config_path", lambda: models_file,
+    )
+
+    with patch("synapse.modules.providers.openai.OpenAIProvider") as provider_cls:
+        Synapse()
+
+    assert provider_cls.call_args.kwargs["base_url"] == "http://127.0.0.1:1234/v1"
+
+
 # ---------------------------------------------------------------------------
 # TODO K — runtime scoring closed loop
 # ---------------------------------------------------------------------------

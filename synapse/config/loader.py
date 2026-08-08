@@ -1,13 +1,18 @@
-"""Configuration loader: YAML file + environment variables."""
+"""Configuration loader: YAML + user model registry + environment variables."""
 
 import os
 from pathlib import Path
 import yaml
 from synapse.config.schema import SynapseConfig, _PROVIDER_ENV_VARS
+from synapse.config import models as model_registry
 
 
-def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
-    """Load config from YAML file, with env var overrides.
+def load_config(
+    config_path: str | None = None,
+    *,
+    models_path: str | Path | None = None,
+) -> tuple[SynapseConfig, str]:
+    """Load project config, user models, then environment overrides.
 
     Lookup order (when *config_path* is ``None``):
 
@@ -16,6 +21,9 @@ def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
     3. Check the synapse package's parent directory (handles ``pip install -e .``)
     4. ``~/.synapse/config.yaml``
     5. Built-in defaults
+
+    The user-level ``~/.synapse/models.json`` is overlaid after YAML and owns
+    the active provider/model plus registered model credentials.
 
     Returns ``(config, source)`` where *source* is the path that was loaded
     (or ``"defaults"`` if no file was found).
@@ -65,11 +73,23 @@ def load_config(config_path: str | None = None) -> tuple[SynapseConfig, str]:
             config = SynapseConfig.model_validate(raw)
             source = str(path)
 
+    registry_path = (
+        Path(models_path) if models_path is not None else model_registry.models_config_path()
+    )
+    registry = model_registry.load_models_config(registry_path)
+    if registry is not None:
+        model_registry.apply_models_config(config, registry)
+        source = str(registry_path) if source == "defaults" else f"{source} + {registry_path}"
+
     # Environment variable overrides
-    if os.environ.get("SYNAPSE_PROVIDER"):
-        config.provider.provider = os.environ["SYNAPSE_PROVIDER"]
-    if os.environ.get("SYNAPSE_MODEL"):
-        config.provider.model = os.environ["SYNAPSE_MODEL"]
+    env_provider = os.environ.get("SYNAPSE_PROVIDER")
+    env_model = os.environ.get("SYNAPSE_MODEL")
+    if env_provider or env_model:
+        model_registry.apply_model_selection(
+            config,
+            env_provider or config.provider.provider,
+            env_model or config.provider.model,
+        )
     # provider API keys: only the CURRENT provider's env var applies. Looping
     # over all providers let e.g. ANTHROPIC + GOOGLE keys both set clobber the
     # active key arbitrarily (dict order decided the winner).

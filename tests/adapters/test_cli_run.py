@@ -284,6 +284,28 @@ def test_ollama_model_is_ready_without_api_key():
     assert any(e.provider == "ollama" and e.model == "qwen3.5:4b" for e in available)
 
 
+def test_first_run_wizard_plain_writes_models_json(tmp_path, monkeypatch):
+    from synapse.adapters import cli
+    from synapse.config.models import load_models_config
+    from synapse.config.schema import SynapseConfig
+
+    models_file = tmp_path / "models.json"
+    answers = iter(["deepseek", ""])
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr("getpass.getpass", lambda _prompt="": "sk-test")
+    monkeypatch.setattr("synapse.config.models.models_config_path", lambda: models_file)
+    monkeypatch.setattr(cli, "models_config_path", lambda: models_file)
+
+    cli._first_run_wizard_plain(SynapseConfig())
+
+    registry = load_models_config(models_file)
+    assert registry is not None
+    assert registry.default_provider == "deepseek"
+    assert registry.default_model == "deepseek-chat"
+    assert registry.providers["deepseek"].api_key == "sk-test"
+
+
 def test_repl_enter_submits_content():
     """The REPL prompt must submit on Enter. key_processor picks the LAST
     matching binding (matches[-1]), so the custom Enter binding is merged AFTER

@@ -1,4 +1,6 @@
 """Tests for config loader env-var overrides."""
+import json
+
 from synapse.config.loader import load_config
 
 
@@ -29,3 +31,60 @@ def test_env_provider_uses_its_own_key(tmp_path, monkeypatch):
     config, _ = load_config(str(config_file))
     assert config.provider.provider == "openai"
     assert config.provider.api_key == "sk-openai"
+
+
+def test_models_json_supplies_default_and_env_can_override_key(tmp_path, monkeypatch):
+    models_file = tmp_path / "models.json"
+    models_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaultProvider": "deepseek",
+                "defaultModel": "deepseek-chat",
+                "providers": {
+                    "deepseek": {
+                        "apiKey": "sk-file",
+                        "models": [{"id": "deepseek-chat"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env")
+
+    config, source = load_config(
+        str(tmp_path / "missing.yaml"), models_path=models_file,
+    )
+
+    assert config.provider.provider == "deepseek"
+    assert config.provider.model == "deepseek-chat"
+    assert config.provider.api_key == "sk-env"
+    assert source == str(models_file)
+
+
+def test_models_json_registers_custom_openai_compatible_provider(tmp_path):
+    models_file = tmp_path / "models.json"
+    models_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaultProvider": "local",
+                "defaultModel": "coder",
+                "providers": {
+                    "local": {
+                        "baseUrl": "http://127.0.0.1:1234/v1",
+                        "protocol": "openai",
+                        "models": [{"id": "coder"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config, _ = load_config(models_path=models_file)
+
+    assert config.provider.provider == "local"
+    assert config.provider.base_url == "http://127.0.0.1:1234/v1"
+    assert config.provider.custom_providers[0].name == "local"

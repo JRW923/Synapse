@@ -3,7 +3,7 @@
 Usage:
     from synapse import Synapse
 
-    agent = Synapse(provider="anthropic", model="claude-sonnet-4-6")
+    agent = Synapse()
     result = await agent.run("Fix the bug in auth.py")
 """
 
@@ -243,7 +243,7 @@ class Synapse:
 
         from synapse import Synapse
 
-        agent = Synapse(provider="anthropic", model="claude-sonnet-4-6")
+        agent = Synapse()  # uses ~/.synapse/models.json
         result = await agent.run("Fix the bug in auth.py")
         # -- or synchronously --
         result = agent.run_sync("Fix the bug in auth.py")
@@ -251,10 +251,10 @@ class Synapse:
     Parameters
     ----------
     provider:
-        LLM provider name.  One of ``anthropic`` (default), ``openai``,
-        ``deepseek``, ``google``, ``ollama``.
+        Optional LLM provider override. If omitted, use the default from
+        ``~/.synapse/models.json`` (or the legacy YAML fallback).
     model:
-        Model identifier string.  If *None*, the provider's default is used.
+        Optional model override. If omitted, use the persisted default model.
     config_path:
         Path to a YAML configuration file.  If *None*, the default lookup
         order is used (``synapse.yaml``, then ``~/.synapse/config.yaml``).
@@ -285,7 +285,7 @@ class Synapse:
 
     def __init__(
         self,
-        provider: str = "anthropic",
+        provider: str | None = None,
         model: str | None = None,
         config_path: str | None = None,
         enable_eval: bool = False,
@@ -295,7 +295,6 @@ class Synapse:
         confirm_callback=None,  # async (AuthRequest) -> bool
         **overrides: Any,
     ) -> None:
-        self._provider_name = provider
         self._enable_eval = enable_eval
         if memory_backend.lower() not in {"chromadb", "qdrant"}:
             raise ValueError(
@@ -311,6 +310,7 @@ class Synapse:
         # those components become per-run state objects.
         self._run_lock = asyncio.Lock()
         self._config = self._load_config(config_path, provider, model, overrides)
+        self._provider_name = self._config.provider.provider
         self._container = self._build_container()
         self._last_run_score = None  # populated by run()
         self._last_process_hint = None  # L.4 — last process-quality hint
@@ -482,16 +482,20 @@ class Synapse:
     @staticmethod
     def _load_config(
         config_path: str | None,
-        provider: str,
+        provider: str | None,
         model: str | None,
         overrides: dict[str, Any],
     ):
         config, _ = load_config(config_path)
 
-        # Explicit positional arguments
-        config.provider.provider = provider
-        if model is not None:
-            config.provider.model = model
+        # Explicit arguments override the persisted default only for this instance.
+        if provider is not None or model is not None:
+            from synapse.config.models import apply_model_selection
+            apply_model_selection(
+                config,
+                provider or config.provider.provider,
+                model or config.provider.model,
+            )
 
         # **overrides applied to matching config sections
         for key, value in overrides.items():
@@ -662,7 +666,7 @@ class Synapse:
             raise ValueError(f"Unknown provider routing mode '{cfg.routing}'")
         from synapse.config.schema import _effective_api_key
         entries = [
-            (provider_name, cfg.model, cfg.api_key, "",
+            (provider_name, cfg.model, cfg.api_key, cfg.base_url,
              cfg.input_cost_per_million, cfg.output_cost_per_million),
         ]
         entries.extend(

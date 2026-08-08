@@ -70,6 +70,7 @@ class ProviderConfig(BaseModel):
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-6"
     api_key: str = ""
+    base_url: str = ""
     max_retries: int = 3
     timeout_seconds: int = 120
     max_tokens: int = 4096
@@ -77,8 +78,8 @@ class ProviderConfig(BaseModel):
     routing: str = "fallback"  # fallback | lowest_cost
     input_cost_per_million: float = 0.0
     output_cost_per_million: float = 0.0
-    # Pre-configured models shown by /model.  Add entries to ~/.synapse/config.yaml
-    # to fill in api_key values (or set the corresponding env var).
+    # Model entries are populated from ~/.synapse/models.json when present.
+    # Built-in presets remain the compatibility fallback for legacy YAML users.
     models: list[ModelEntry] = Field(default_factory=_default_models)
     # User-defined providers with custom base URLs.
     custom_providers: list[CustomProvider] = Field(default_factory=list)

@@ -92,7 +92,8 @@ else:
 
     _signal.signal(_signal.SIGINT, _unix_sigint_handler)
 
-from synapse.config import load_config
+from synapse.config import load_config, models_config_path
+from synapse.config.models import apply_model_selection, set_default_model
 from synapse.config.schema import _effective_api_key
 from synapse.protocols.mcp import McpServerConfig
 from synapse.core.agent import Agent
@@ -225,9 +226,8 @@ def _check_api_key(config):
         print(f"  Set it with one of:\n")
         print(f"    1. Environment:  set {env_var}=sk-your-key    (Windows CMD)")
         print(f"                     $env:{env_var} = \"sk-...\"    (PowerShell)")
-        print(f"    2. Config file:  echo 'provider:'  > synapse.yaml")
-        print(f"                     echo '  api_key: sk-...' >> synapse.yaml")
-        print(f"    3. User config:  same format at ~/.synapse/config.yaml")
+        print(f"    2. Interactive:  run synapse and use /model add")
+        print(f"    3. User config:  add the model to ~/.synapse/models.json")
         print()
 
 
@@ -887,9 +887,9 @@ def main():
     )
     eval_parser.add_argument(
         "--provider", "-p",
-        default="anthropic",
+        default=None,
         choices=["anthropic", "openai", "deepseek", "google", "ollama"],
-        help="LLM provider (default: anthropic)",
+        help="LLM provider (default: models.json selection)",
     )
     eval_parser.add_argument(
         "--model", "-m",
@@ -947,16 +947,27 @@ def main():
         except Exception as exc:
             print(_friendly_error(exc))
             return
+        if not _ensure_first_model(config):
+            return
+        config, _ = load_config()
+        if args.provider or args.model:
+            apply_model_selection(
+                config,
+                args.provider or config.provider.provider,
+                args.model or config.provider.model,
+            )
         _check_api_key(config)
 
         from synapse.adapters.library import Synapse
 
         kwargs: dict[str, object] = {
-            "provider": args.provider or config.provider.provider,
-            "model": args.model or config.provider.model,
             "memory_backend": args.memory_backend,
             "enable_external_tools": args.enable_external_tools,
         }
+        if args.provider:
+            kwargs["provider"] = args.provider
+        if args.model:
+            kwargs["model"] = args.model
         if args.mode:
             kwargs["mode"] = args.mode
 
@@ -1035,14 +1046,11 @@ def main():
         except Exception as exc:
             print(_friendly_error(exc))
             return
-        if args.provider:
-            config.provider.provider = args.provider
-        if args.model:
-            config.provider.model = args.model
+        if not _ensure_first_model(config):
+            return
+        config, _ = load_config()
 
         synapse = Synapse(
-            provider=config.provider.provider,
-            model=config.provider.model,
             memory_backend=args.memory_backend,
             enable_external_tools=args.enable_external_tools,
         )
@@ -1094,6 +1102,7 @@ _SLASH_COMMANDS: tuple = (
     ("/reset",           "清空会话"),
     ("/clear",           "/reset 的别名"),
     ("/model",           "显示/切换模型"),
+    ("/model add",       "添加模型配置"),
     ("/provider",        "显示/切换供应商"),
     ("/mode",            "切换规划模式"),
     ("/tools",           "列出可用工具"),
@@ -1444,7 +1453,8 @@ def _show_help(console):
     t.add_row("  /sessions", "列出已保存的会话")
     t.add_row("  /resume [id]", "恢复会话（默认最近一次）")
     t.add_row("  /reset, /clear", "清空会话")
-    t.add_row("  /model [name|num]", "显示/切换模型（数字快速选择）")
+    t.add_row("  /model [name|num]", "显示/切换模型（切换会保存为默认）")
+    t.add_row("  /model add", "添加模型配置")
     t.add_row("  /provider [name]", "显示/切换供应商")
     t.add_row("  /mode [name]", "规划模式 (react / plan_execute / hierarchical / swarm)")
     t.add_row("  /tools", "列出可用工具")
@@ -1674,10 +1684,14 @@ def _available_models(config):
 
     # Custom providers → synthetic ModelEntry objects
     for cp in config.provider.custom_providers:
-        key = cp.api_key or main_key
+        from urllib.parse import urlparse
+
+        key = cp.api_key
+        host = (urlparse(cp.base_url).hostname or "").lower()
+        keyless_local = host in {"localhost", "127.0.0.1", "::1"}
         for model_name in cp.models:
             entry = ModelEntry(provider=cp.name, model=model_name, api_key=cp.api_key, base_url=cp.base_url)
-            if key or cp.api_key:
+            if key or keyless_local:
                 avail.append(entry)
             else:
                 unavail.append(entry)
@@ -1727,123 +1741,238 @@ def _pick_model(console, entries, initial: int = 0) -> int | None:
 # ---- First-run wizard -----------------------------------------------------
 
 
-def _first_run_wizard(console, config) -> None:
-    """Rich-powered interactive setup for first-time users."""
+def _recommended_model(config, provider: str) -> str:
+    """Return a useful prompt default even when JSON replaced built-in entries."""
+    from synapse.config.schema import _DEFAULT_MODELS
+
+    for entry in config.provider.models:
+        if entry.provider == provider:
+            return entry.model
+    for entry in _DEFAULT_MODELS:
+        if entry["provider"] == provider:
+            return entry["model"]
+    return ""
+
+
+def _wizard_providers(config) -> list[str]:
+    from synapse.config.schema import _PROVIDER_ENV_VARS
+
+    return sorted(
+        set(_PROVIDER_ENV_VARS) | {provider.name for provider in config.provider.custom_providers}
+    )
+
+
+def _has_stored_provider_key(config, provider: str) -> bool:
+    return any(
+        entry.provider == provider and bool(entry.api_key)
+        for entry in config.provider.models
+    ) or any(
+        entry.name == provider and bool(entry.api_key)
+        for entry in config.provider.custom_providers
+    )
+
+
+def _first_run_wizard(console, config, *, first_run: bool = True) -> None:
+    """Rich-powered model setup used by first run and ``/model add``."""
+    from urllib.parse import urlparse
+
+    from synapse.config.models import upsert_model
     from synapse.config.schema import _PROVIDER_ENV_VARS
 
     console.print()
-    console.print(f"  [bold {_BRAND}]Welcome to Synapse![/bold {_BRAND}]")
-    console.print(f"  [{_HINT}]No API key found. Let's configure your first model.[/{_HINT}]")
-    console.print()
+    title = "欢迎使用 Synapse" if first_run else "添加模型"
+    detail = "首次启动只需配置一次，之后将自动使用默认模型。" if first_run else "新配置会保存并设为默认模型。"
+    console.print(f"  [bold {_BRAND}]{title}[/bold {_BRAND}]")
+    console.print(f"  [{_HINT}]{detail}[/{_HINT}]\n")
 
-    # Show providers
-    providers = sorted(_PROVIDER_ENV_VARS.keys())
-    console.print("  [bold]Available providers:[/bold]")
-    for i, p in enumerate(providers, 1):
-        env = _PROVIDER_ENV_VARS[p]
-        hint = f"env: {env}" if env else "no key needed"
-        console.print(f"  [bold {_BRAND}]{i}.[/bold {_BRAND}] [{_LABEL}]{p}[/{_LABEL}] [{_HINT}]({hint})[/{_HINT}]")
+    providers = _wizard_providers(config)
+    for i, name in enumerate(providers, 1):
+        env = _PROVIDER_ENV_VARS.get(name, "")
+        hint = f"env: {env}" if env else ("无需 key" if name == "ollama" else "已配置")
+        console.print(
+            f"  [bold {_BRAND}]{i}.[/bold {_BRAND}] [{_LABEL}]{name}[/{_LABEL}] "
+            f"[{_HINT}]({hint})[/{_HINT}]"
+        )
+    console.print(f"  [bold {_BRAND}]0.[/bold {_BRAND}] [{_LABEL}]自定义兼容接口[/{_LABEL}]")
 
+    custom = False
     while True:
-        choice = console.input(f"\n  [bold]Pick one [1-{len(providers)}]:[/bold] ").strip()
+        choice = console.input(
+            f"\n  [bold]选择 provider [0-{len(providers)}，也可输入名称]:[/bold] "
+        ).strip().lower()
         if choice.isdigit() and 1 <= int(choice) <= len(providers):
             provider = providers[int(choice) - 1]
             break
-        console.print("[red]Invalid choice.[/red]")
+        if choice == "0":
+            custom = True
+            while True:
+                provider = console.input("  [bold]Provider 名称:[/bold] ").strip().lower()
+                if provider and all(ch.isalnum() or ch in "._-" for ch in provider):
+                    break
+                console.print("  [red]仅支持字母、数字、点、下划线和连字符。[/red]")
+            break
+        if choice in providers:
+            provider = choice
+            custom = provider not in _PROVIDER_ENV_VARS
+            break
+        console.print("  [red]无效选择。[/red]")
+
+    base_url = ""
+    protocol = "anthropic" if provider == "anthropic" else "openai"
+    if custom:
+        while True:
+            base_url = console.input("  [bold]Base URL:[/bold] ").strip().rstrip("/")
+            parsed = urlparse(base_url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                break
+            console.print("  [red]请输入完整的 http:// 或 https:// URL。[/red]")
+        while True:
+            protocol = console.input(
+                "  [bold]API 协议[/bold] [dim](openai/anthropic，默认 openai)[/dim]: "
+            ).strip().lower() or "openai"
+            if protocol in {"openai", "anthropic"}:
+                break
+            console.print("  [red]仅支持 openai 或 anthropic。[/red]")
 
     env_var = _PROVIDER_ENV_VARS.get(provider, "")
     if provider == "ollama":
         api_key = ""
-        console.print(f"\n  [dim]Ollama runs locally — no API key needed.[/dim]")
+        console.print("  [dim]Ollama 在本地运行，无需 API key。[/dim]")
+    elif _has_stored_provider_key(config, provider):
+        api_key = None
+        console.print("  [dim]将沿用该 provider 已保存的 API key。[/dim]")
+    elif env_var and _os.environ.get(env_var):
+        api_key = None
+        console.print(f"  [dim]已检测到环境变量 {env_var}，无需重复输入。[/dim]")
     else:
-        api_key = console.input(f"  [bold]API key for {provider} ({env_var}):[/bold] ").strip()
-        if not api_key:
-            console.print(f"  [dim]No key entered. Set {env_var} in your environment instead.[/dim]")
+        prompt = f"  API key ({env_var}): " if env_var else "  API key（本地无鉴权可留空）: "
+        while True:
+            api_key = console.input(prompt, password=True).strip()
+            if api_key or custom:
+                break
+            console.print("  [red]API key 不能为空；也可以先设置对应环境变量。[/red]")
 
-    # Pick first model for this provider
-    default_model = "unknown"
-    for entry in config.provider.models:
-        if entry.provider == provider:
-            default_model = entry.model
+    default_model = _recommended_model(config, provider)
+    suffix = f" [dim](默认: {default_model})[/dim]" if default_model else ""
+    while True:
+        model = console.input(f"  [bold]Model ID[/bold]{suffix}: ").strip() or default_model
+        if model:
             break
+        console.print("  [red]Model ID 不能为空。[/red]")
 
-    model = console.input(
-        f"  [bold]Model name[/bold] [dim](default: {default_model})[/dim]: "
-    ).strip()
-    if not model:
-        model = default_model
-
-    # Write config
-    out_dir = Path.home() / ".synapse"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "config.yaml"
-    import yaml
-    out_path.write_text(
-        "# Synapse config — auto-generated by first-run wizard\n"
-        + yaml.safe_dump(
-            {"provider": {"provider": provider, "model": model, "api_key": api_key}},
-            allow_unicode=True,
-            sort_keys=False,
-        ),
-        encoding="utf-8",
+    upsert_model(
+        provider,
+        model,
+        api_key=api_key,
+        base_url=base_url,
+        protocol=protocol,
     )
-    console.print(f"\n  [green]Config written to {out_path}[/green]")
-    console.print(f"  [dim]provider: {provider}, model: {model}[/dim]\n")
+    console.print(f"\n  [green]已保存到 {models_config_path()}[/green]")
+    console.print(f"  [dim]默认模型：{provider}/{model}[/dim]\n")
 
 
-def _first_run_wizard_plain(config) -> None:
-    """Plain-text setup wizard (no Rich)."""
+def _first_run_wizard_plain(config, *, first_run: bool = True) -> None:
+    """Plain-text model setup used when Rich is unavailable."""
+    import getpass
+    from urllib.parse import urlparse
+
+    from synapse.config.models import upsert_model
     from synapse.config.schema import _PROVIDER_ENV_VARS
 
-    print("\nWelcome to Synapse!")
-    print("No API key found. Let's configure your first model.\n")
+    print("\n欢迎使用 Synapse" if first_run else "\n添加模型")
+    print("首次启动只需配置一次，之后将自动使用默认模型。\n" if first_run else "新配置会保存并设为默认模型。\n")
+    providers = _wizard_providers(config)
+    for i, name in enumerate(providers, 1):
+        env = _PROVIDER_ENV_VARS.get(name, "")
+        hint = f"env: {env}" if env else ("无需 key" if name == "ollama" else "已配置")
+        print(f"  {i}. {name} ({hint})")
+    print("  0. 自定义兼容接口")
 
-    providers = sorted(_PROVIDER_ENV_VARS.keys())
-    print("Available providers:")
-    for i, p in enumerate(providers, 1):
-        env = _PROVIDER_ENV_VARS[p]
-        hint = f"env: {env}" if env else "no key needed"
-        print(f"  {i}. {p} ({hint})")
-
+    custom = False
     while True:
-        choice = input(f"\nPick one [1-{len(providers)}]: ").strip()
+        choice = input(f"\n选择 provider [0-{len(providers)}，也可输入名称]: ").strip().lower()
         if choice.isdigit() and 1 <= int(choice) <= len(providers):
             provider = providers[int(choice) - 1]
             break
-        print("Invalid choice.")
+        if choice == "0":
+            custom = True
+            while True:
+                provider = input("Provider 名称: ").strip().lower()
+                if provider and all(ch.isalnum() or ch in "._-" for ch in provider):
+                    break
+                print("仅支持字母、数字、点、下划线和连字符。")
+            break
+        if choice in providers:
+            provider = choice
+            custom = provider not in _PROVIDER_ENV_VARS
+            break
+        print("无效选择。")
 
+    base_url = ""
+    protocol = "anthropic" if provider == "anthropic" else "openai"
+    if custom:
+        while True:
+            base_url = input("Base URL: ").strip().rstrip("/")
+            parsed = urlparse(base_url)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                break
+            print("请输入完整的 http:// 或 https:// URL。")
+        while True:
+            protocol = input("API 协议 (openai/anthropic，默认 openai): ").strip().lower() or "openai"
+            if protocol in {"openai", "anthropic"}:
+                break
+            print("仅支持 openai 或 anthropic。")
+
+    env_var = _PROVIDER_ENV_VARS.get(provider, "")
     if provider == "ollama":
         api_key = ""
-        print("\nOllama runs locally — no API key needed.")
+        print("Ollama 在本地运行，无需 API key。")
+    elif _has_stored_provider_key(config, provider):
+        api_key = None
+        print("将沿用该 provider 已保存的 API key。")
+    elif env_var and _os.environ.get(env_var):
+        api_key = None
+        print(f"已检测到环境变量 {env_var}，无需重复输入。")
     else:
-        env_var = _PROVIDER_ENV_VARS.get(provider, "")
-        api_key = input(f"API key for {provider} ({env_var}): ").strip()
-        if not api_key:
-            print(f"No key entered. Set {env_var} in your environment instead.")
+        prompt = f"API key ({env_var}): " if env_var else "API key（本地无鉴权可留空）: "
+        while True:
+            api_key = getpass.getpass(prompt).strip()
+            if api_key or custom:
+                break
+            print("API key 不能为空；也可以先设置对应环境变量。")
 
-    default_model = "unknown"
-    for entry in config.provider.models:
-        if entry.provider == provider:
-            default_model = entry.model
+    default_model = _recommended_model(config, provider)
+    suffix = f" (默认: {default_model})" if default_model else ""
+    while True:
+        model = input(f"Model ID{suffix}: ").strip() or default_model
+        if model:
             break
+        print("Model ID 不能为空。")
 
-    model = input(f"Model name (default: {default_model}): ").strip()
-    if not model:
-        model = default_model
-
-    out_dir = Path.home() / ".synapse"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / "config.yaml"
-    out_path.write_text(
-        f"# Synapse config — auto-generated by first-run wizard\n"
-        f"provider:\n"
-        f"  provider: {provider}\n"
-        f"  model: {model}\n"
-        f"  api_key: \"{api_key}\"\n",
-        encoding="utf-8",
+    upsert_model(
+        provider,
+        model,
+        api_key=api_key,
+        base_url=base_url,
+        protocol=protocol,
     )
-    print(f"\nConfig written to {out_path}")
-    print(f"provider: {provider}, model: {model}\n")
+    print(f"\n已保存到 {models_config_path()}")
+    print(f"默认模型：{provider}/{model}\n")
+
+
+def _ensure_first_model(config) -> bool:
+    """Configure the first model for command modes without a Rich home screen."""
+    if models_config_path().exists():
+        return True
+    if not sys.stdin.isatty():
+        print(f"尚未配置模型。请先在交互终端运行 synapse，配置将保存到 {models_config_path()}。")
+        return False
+    try:
+        _first_run_wizard_plain(config)
+        return True
+    except (EOFError, KeyboardInterrupt):
+        print("已取消首次配置；未写入 models.json。")
+        return False
 
 
 # ---- Setup command --------------------------------------------------------
@@ -1936,18 +2065,26 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
 
     from synapse.core.session import Session
 
-    # First-run wizard: the selected model must be usable; an unrelated key (or
-    # the always-keyless Ollama preset) must not suppress setup.
+    # models.json is the first-run marker. A legacy YAML key must not skip the
+    # one-time model setup, otherwise later launches still lack a persisted default.
+    first_run = not models_config_path().exists()
     avail, _ = _available_models(config)
     current_ready = any(
         e.provider == config.provider.provider and e.model == config.provider.model
         for e in avail
     )
-    if not current_ready:
-        if use_rich:
-            _first_run_wizard(console, config)
-        else:
-            _first_run_wizard_plain(config)
+    if first_run or not current_ready:
+        if not sys.stdin.isatty():
+            print(f"模型尚未就绪。请先在交互终端运行 synapse，配置将保存到 {models_config_path()}。")
+            return
+        try:
+            if use_rich:
+                _first_run_wizard(console, config, first_run=first_run)
+            else:
+                _first_run_wizard_plain(config, first_run=first_run)
+        except (EOFError, KeyboardInterrupt):
+            print("已取消首次配置；未写入 models.json。")
+            return
         # Reload config after wizard writes it.
         try:
             config, config_source = load_config(config_path)
@@ -1976,6 +2113,23 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
     # Deferred — created on first user input.
     _synapse: object = None
     last_status = ""
+
+    def _activate_model(entry) -> bool:
+        """Switch this session and persist the same model for the next launch."""
+        nonlocal provider, model, _synapse
+        try:
+            set_default_model(entry.provider, entry.model)
+        except Exception as exc:
+            message = _friendly_error(exc)
+            if use_rich:
+                console.print(f"[red]{message}[/red]")
+            else:
+                print(message)
+            return False
+        provider, model = entry.provider, entry.model
+        apply_model_selection(config, provider, model)
+        _synapse = None
+        return True
 
     def _get_synapse():
         """Create (or return) the Synapse instance lazily."""
@@ -2115,17 +2269,37 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             elif cmd == "/todos":
                 _show_todos(console, use_rich)
             elif cmd == "/model":
-                if arg:
+                if arg.lower() == "add":
+                    try:
+                        if use_rich:
+                            _first_run_wizard(console, config, first_run=False)
+                        else:
+                            _first_run_wizard_plain(config, first_run=False)
+                        config, config_source = load_config(config_path)
+                        provider = config.provider.provider
+                        model = config.provider.model
+                        _synapse = None
+                    except (EOFError, KeyboardInterrupt):
+                        if use_rich:
+                            console.print("[dim]已取消添加模型。[/dim]")
+                        else:
+                            print("已取消添加模型。")
+                    except Exception as exc:
+                        message = _friendly_error(exc)
+                        if use_rich:
+                            console.print(f"[red]{message}[/red]")
+                        else:
+                            print(message)
+                elif arg:
                     avail, _ = _available_models(config)
                     if arg.isdigit():
                         idx = int(arg) - 1
                         if 0 <= idx < len(avail):
                             entry = avail[idx]
-                            provider, model = entry.provider, entry.model
-                            _synapse = None
-                            prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
-                            if use_rich: console.print(prefix)
-                            else: print(prefix)
+                            if _activate_model(entry):
+                                prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model} · 已设为默认[/dim]" if use_rich else f"{provider}/{model} · 已设为默认"
+                                if use_rich: console.print(prefix)
+                                else: print(prefix)
                         else:
                             if use_rich: console.print(f"[red]Invalid number (1-{len(avail)}).[/red]")
                             else: print(f"Invalid number (1-{len(avail)}).")
@@ -2133,11 +2307,10 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                         candidates = [e for e in avail if e.model == arg or f"{e.provider}/{e.model}" == arg]
                         if candidates:
                             entry = candidates[0]
-                            provider, model = entry.provider, entry.model
-                            _synapse = None
-                            prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
-                            if use_rich: console.print(prefix)
-                            else: print(prefix)
+                            if _activate_model(entry):
+                                prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model} · 已设为默认[/dim]" if use_rich else f"{provider}/{model} · 已设为默认"
+                                if use_rich: console.print(prefix)
+                                else: print(prefix)
                         else:
                             if use_rich: console.print(f"[red]'{arg}' is not available.[/red]")
                             else: print(f"'{arg}' is not available.")
@@ -2156,16 +2329,20 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                             label += " [dim](current)[/dim]"
                             cur_idx = i
                         pick_entries.append((label, (e.provider, e.model)))
+                    if not use_rich:
+                        for i, (label, _) in enumerate(pick_entries, 1):
+                            print(f"  {i}. {label.replace(' [dim]', ' ').replace('[/dim]', '')}")
+                        print("使用 /model <编号|名称> 切换，/model add 添加模型。")
+                        continue
                     idx = _pick_model(console, pick_entries, initial=cur_idx)
                     if idx is not None:
                         entry = avail[idx]
-                        provider, model = entry.provider, entry.model
-                        _synapse = None
-                        n_msgs = len(session.messages)
-                        if n_msgs:
-                            hint = f"[dim]Session preserved ({n_msgs} messages).[/dim]"
-                            if use_rich: console.print(hint)
-                            else: print(f"Session preserved ({n_msgs} messages).")
+                        if _activate_model(entry):
+                            n_msgs = len(session.messages)
+                            if n_msgs:
+                                hint = f"[dim]Session preserved ({n_msgs} messages).[/dim]"
+                                if use_rich: console.print(hint)
+                                else: print(f"Session preserved ({n_msgs} messages).")
             elif cmd == "/provider":
                 if not arg:
                     avail, _ = _available_models(config)
@@ -2189,18 +2366,17 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                         else:
                             print(f"'{new_provider}' is not available (no API key).")
                     else:
-                        provider = new_provider
                         # Pick the first model for this provider
                         for e in avail:
-                            if e.provider == provider:
-                                model = e.model
+                            if e.provider == new_provider:
+                                entry = e
                                 break
-                        _synapse = None
-                        prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}[/dim]" if use_rich else f"{provider}/{model}"
-                        if use_rich:
-                            console.print(prefix)
-                        else:
-                            print(prefix)
+                        if _activate_model(entry):
+                            prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model} · 已设为默认[/dim]" if use_rich else f"{provider}/{model} · 已设为默认"
+                            if use_rich:
+                                console.print(prefix)
+                            else:
+                                print(prefix)
             elif cmd == "/mode":
                 if not arg:
                     prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode: {config.planning.mode}[/dim]" if use_rich else f"Mode: {config.planning.mode}"
@@ -2274,8 +2450,11 @@ async def _run_eval(args) -> None:
     from synapse.adapters.library import Synapse
     from synapse.eval.runner import BenchmarkRunner, Benchmark
 
+    config, _ = load_config()
+    provider = args.provider or config.provider.provider
+    model = args.model or config.provider.model
     print(f"Benchmark: {args.benchmark}")
-    print(f"Provider:  {args.provider}")
+    print(f"Provider:  {provider}/{model}")
 
     # Build the benchmark
     if args.benchmark == "process_quality":
@@ -2293,7 +2472,9 @@ async def _run_eval(args) -> None:
     print(f"Tasks:     {len(tasks)}")
 
     # Create Synapse instance
-    kwargs: dict = {"provider": args.provider, "enable_eval": True}
+    kwargs: dict = {"enable_eval": True}
+    if args.provider:
+        kwargs["provider"] = args.provider
     if args.model:
         kwargs["model"] = args.model
 

@@ -14,11 +14,12 @@ pip install -e ".[deepseek]"          # 可选: anthropic / openai / deepseek / 
 synapse
 ```
 
-首次启动会自动引导你选择供应商、输入 API key，写入 `~/.synapse/config.yaml`。之后每次启动直接进入 REPL。
+首次启动会自动引导你选择 provider 和 model，并隐藏输入 API key，写入
+`~/.synapse/models.json`。之后每次启动会自动使用其中的默认模型，直接进入 REPL。
 
 ```bash
-# 也可以通过命令行参数指定
-synapse -p anthropic -m claude-sonnet-4-6 "修复 auth.py 的 bug"
+# 一次性任务同样自动使用已保存的默认模型
+synapse run "修复 auth.py 的 bug"
 ```
 
 ## REPL 命令
@@ -27,7 +28,8 @@ synapse -p anthropic -m claude-sonnet-4-6 "修复 auth.py 的 bug"
 |------|------|
 | `/help` | 显示所有命令 |
 | `/model` | 显示可用模型（绿色=可用，灰色=需配 API key） |
-| `/model <名称>` | 切换到已配置的模型 |
+| `/model <名称>` | 切换模型并保存为下次默认值 |
+| `/model add` | 添加内置或 OpenAI/Anthropic-compatible 模型 |
 | `/provider <名称>` | 切换供应商 |
 | `/memory` | 会话信息 + token 用量 |
 | `/session` | 显示会话路径 |
@@ -42,32 +44,45 @@ synapse -p anthropic -m claude-sonnet-4-6 "修复 auth.py 的 bug"
 
 ## 配置
 
-配置文件查找顺序：
+LLM 模型及默认选择统一保存在 `~/.synapse/models.json`：
+
+```json
+{
+  "version": 1,
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-chat",
+  "providers": {
+    "deepseek": {
+      "apiKey": "sk-你的-key",
+      "models": [{ "id": "deepseek-chat" }]
+    }
+  }
+}
+```
+
+日常使用直接执行 `/model add`，不必手改 JSON。也可使用 `DEEPSEEK_API_KEY`、
+`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`；向导检测到环境变量后不会
+把 key 重复写入文件。
+
+项目级 Agent 行为继续使用 YAML，查找顺序为：
 
 1. `./synapse.yaml`（然后向上遍历目录树）
 2. `<package-root>/synapse.yaml`（`pip install -e .` 自动发现）
-3. `~/.synapse/config.yaml`（全局兜底，首次运行向导自动生成）
+3. `~/.synapse/config.yaml`（可选的全局兜底）
 
 示例 `synapse.yaml`：
 
 ```yaml
 provider:
-  provider: deepseek
-  model: deepseek-v4-pro
-  api_key: "sk-你的key"
-
-# 追加更多供应商，让 /model 可以列出切换
-  models:
-    - provider: openai
-      model: gpt-5.5
-      api_key: "sk-openai-key"
+  max_retries: 3
+  timeout_seconds: 120
+planning:
+  mode: react
 ```
-
-或使用环境变量：`DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GOOGLE_API_KEY`。
 
 ## 预置模型
 
-安装后自带 5 家供应商 13 款主流模型：
+向导内置 5 家供应商的常用 Model ID 推荐值：
 
 | 供应商 | 模型 |
 |--------|------|
@@ -77,7 +92,8 @@ provider:
 | google | gemini-3-flash, gemini-3-pro |
 | ollama | qwen3.5:4b, llama4:8b |
 
-API key 填好后即为可用（绿色），未填者显示为灰色。
+首次向导只写入你选择的模型；其余模型按需用 `/model add` 添加，避免默认列表堆满
+不会使用的条目。
 
 ## CLI
 
@@ -92,8 +108,8 @@ synapse version                      # 显示版本
 
 ```
 -c, --config  PATH     指定 synapse.yaml 路径
--p, --provider NAME    指定 LLM 供应商
--m, --model    NAME    指定模型 ID
+-p, --provider NAME    可选：仅覆盖本次运行的 provider
+-m, --model    NAME    可选：仅覆盖本次运行的 model
 --mode         NAME    规划模式
 --resume [ID]          恢复已保存的会话（省略 ID 恢复最近一次；run/chat/REPL 均支持）
 -y, --yes             （run）自动批准需要确认的操作（无交互场景下的显式放行）

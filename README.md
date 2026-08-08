@@ -14,11 +14,13 @@ pip install -e ".[deepseek]"          # pick: anthropic / openai / deepseek / go
 synapse
 ```
 
-That's it. The first-run wizard asks which provider you want, takes your API key, and writes `~/.synapse/config.yaml`. Every subsequent launch goes straight to the REPL.
+That's it. The first-run wizard asks which provider and model you want, securely
+prompts for the API key, and writes `~/.synapse/models.json`. Every subsequent
+launch uses that default and goes straight to the REPL.
 
 ```bash
-# Alternatively, specify everything on the command line
-synapse -p anthropic -m claude-sonnet-4-6 "Fix the bug in auth.py"
+# One-shot tasks use the same saved default
+synapse run "Fix the bug in auth.py"
 ```
 
 ## In-REPL Commands
@@ -27,7 +29,8 @@ synapse -p anthropic -m claude-sonnet-4-6 "Fix the bug in auth.py"
 |---------|-------------|
 | `/help` | Show all commands |
 | `/model` | Show available models (green = ready, gray = needs API key) |
-| `/model <name>` | Switch to a configured model |
+| `/model <name>` | Switch model and save it as the default |
+| `/model add` | Add a built-in or OpenAI/Anthropic-compatible model |
 | `/provider <name>` | Switch provider |
 | `/memory` | Session info + token usage |
 | `/session` | Show session path |
@@ -40,28 +43,41 @@ synapse -p anthropic -m claude-sonnet-4-6 "Fix the bug in auth.py"
 
 ## Configuration
 
-Config lookup order:
+LLM models and the default selection live in `~/.synapse/models.json`:
+
+```json
+{
+  "version": 1,
+  "defaultProvider": "deepseek",
+  "defaultModel": "deepseek-chat",
+  "providers": {
+    "deepseek": {
+      "apiKey": "sk-your-key",
+      "models": [{ "id": "deepseek-chat" }]
+    }
+  }
+}
+```
+
+Use `/model add` instead of editing this file for the common path. API keys may
+also come from `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or
+`GOOGLE_API_KEY`; the wizard detects them and avoids copying them into JSON.
+
+Project and Agent behavior remains in YAML. Config lookup order:
 
 1. `./synapse.yaml` (then walks up the directory tree)
 2. `<package-root>/synapse.yaml` (automatic for `pip install -e .`)
-3. `~/.synapse/config.yaml` (global fallback, written by first-run wizard)
+3. `~/.synapse/config.yaml` (optional global fallback)
 
 Example `synapse.yaml`:
 
 ```yaml
 provider:
-  provider: deepseek
-  model: deepseek-v4-pro
-  api_key: "sk-your-key"
-
-# Add more providers so /model can list them
-  models:
-    - provider: openai
-      model: gpt-5.5
-      api_key: "sk-openai-key"
+  max_retries: 3
+  timeout_seconds: 120
+planning:
+  mode: react
 ```
-
-Or use environment variables: `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`.
 
 ## CLI
 
@@ -76,8 +92,8 @@ synapse version                      # Show version
 
 ```
 -c, --config  PATH     Path to synapse.yaml
--p, --provider NAME    LLM provider
--m, --model    NAME    Model ID
+-p, --provider NAME    Optional one-run provider override
+-m, --model    NAME    Optional one-run model override
 --mode         NAME    Planning mode
 -y, --yes            (run) auto-approve confirmation-required actions (headless opt-in)
 ```
