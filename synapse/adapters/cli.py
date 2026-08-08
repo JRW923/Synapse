@@ -951,7 +951,7 @@ def main():
     eval_parser = sub.add_parser("eval", help="Run a benchmark evaluation")
     eval_parser.add_argument(
         "benchmark",
-        choices=["process_quality", "swebench"],
+        choices=["process_quality", "repo_pytest", "swebench"],
         help="Benchmark to run",
     )
     eval_parser.add_argument(
@@ -964,6 +964,33 @@ def main():
         "--model", "-m",
         default=None,
         help="Model name (overrides config)",
+    )
+    eval_parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Local SWE-bench JSONL dataset (required for swebench)",
+    )
+    eval_parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Run at most this many tasks",
+    )
+    eval_parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="Repeat isolated functional tasks this many times",
+    )
+    eval_parser.add_argument(
+        "--report",
+        default=None,
+        help="JSON report path (default: eval-results/<benchmark>-<timestamp>.json)",
+    )
+    eval_parser.add_argument(
+        "--workspace",
+        default=None,
+        help="Explicit evaluation workspace (default: isolated temporary directory)",
     )
 
     experiment_parser = sub.add_parser("experiment", help="Run an A/B experiment")
@@ -2615,54 +2642,191 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
 # ---- Eval command handler -------------------------------------------------
 
 
+def _eval_report_path(args) -> Path:
+    if args.report:
+        return Path(args.report).expanduser()
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    return Path("eval-results") / f"{args.benchmark}-{stamp}.json"
+
+
+def _print_eval_result(result, report_path: Path) -> None:
+    print("\n--- Results ---")
+    print(f"Total:      {result.total}")
+    print(f"Completed:  {result.completed}")
+    print(f"Failed:     {result.failed}")
+    print(f"Passed:     {result.passed}/{result.total} ({result.pass_rate:.1%})")
+    print(f"Mean score: {result.mean_score:.3f}")
+    print(f"Duration:   {result.duration_ms}ms")
+    print(f"Report:     {report_path.resolve()}")
+    for task in result.results:
+        mark = "+" if task.passed else "!"
+        print(
+            f"  [{mark}] {task.task_id}: {task.status} "
+            f"score={task.score:.2f} ({task.duration_ms}ms)"
+        )
+
+
+async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Path) -> None:
+    """Run the isolated local functional fixture and persist a normal report."""
+    from synapse.adapters.library import Synapse
+    from synapse.eval.benchmarks.repo_pytest import RepoPytestBenchmark
+    from synapse.eval.runner import BenchmarkResult, TaskResult
+
+    async def approve(_request) -> bool:
+        return True
+
+    async def run_agent(task: str, root: Path):
+        agent = Synapse(
+            provider=provider,
+            model=model,
+            enable_eval=True,
+            workspace_root=str(root),
+            confirm_callback=approve,
+        )
+        result = await agent.run(task, confirm_callback=approve)
+        return result, agent.get_run_score()
+
+    started = _time.monotonic()
+    benchmark = RepoPytestBenchmark()
+    task = RepoPytestBenchmark.benchmark().tasks[0]
+    task_results = []
+    repeat = max(1, int(getattr(args, "repeat", 1) or 1))
+    for attempt in range(repeat):
+        outcome = await benchmark.run(run_agent)
+        agent_result = outcome.agent_result
+        if agent_result is None:
+            from synapse.protocols.planner import AgentResult, ResultStatus
+            agent_result = AgentResult(ResultStatus.FAILED, "agent did not return a result")
+        facts = {"repo_pytest": outcome.to_dict(), "runtime": outcome.run_score}
+        grade = RepoPytestBenchmark.grade(task, agent_result, facts)
+        status = agent_result.status.value
+        task_results.append(TaskResult(
+            task_id=f"{task.id}#{attempt + 1}" if repeat > 1 else task.id,
+            status=status,
+            output=agent_result.output,
+            duration_ms=agent_result.metrics.duration_ms,
+            passed=grade.passed,
+            score=grade.score,
+            category="functional",
+            grade_reason=grade.reason,
+            grade_details=grade.details,
+            run_score=facts,
+        ))
+    total = len(task_results)
+    passed = sum(int(item.passed) for item in task_results)
+    completed = sum(int(item.status == "success") for item in task_results)
+    failed = sum(int(item.status in {"failed", "error"}) for item in task_results)
+    mean_score = sum(item.score for item in task_results) / total if total else 0.0
+    result = BenchmarkResult(
+        name="repo_pytest",
+        total=total,
+        completed=completed,
+        failed=failed,
+        passed=passed,
+        pass_rate=passed / total if total else 0.0,
+        mean_score=mean_score,
+        duration_ms=int((_time.monotonic() - started) * 1000),
+        started_at=_time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        by_category={"functional": {
+            "total": total,
+            "passed": passed,
+            "pass_rate": passed / total if total else 0.0,
+            "mean_score": mean_score,
+        }},
+        results=task_results,
+        metadata={
+            "provider": provider,
+            "model": model,
+            "isolation": "temporary_git_repo",
+            "repeat": repeat,
+        },
+    )
+    result.write_json(report_path)
+    _print_eval_result(result, report_path)
+
+
 async def _run_eval(args) -> None:
     """Execute a named benchmark via the Synapse facade."""
-    import json as _json
-
     from synapse.adapters.library import Synapse
-    from synapse.eval.runner import BenchmarkRunner, Benchmark
+    from synapse.eval.runner import Benchmark, BenchmarkRunner
 
     config, _ = load_config()
     provider = args.provider or config.provider.provider
     model = args.model or config.provider.model
     print(f"Benchmark: {args.benchmark}")
     print(f"Provider:  {provider}/{model}")
+    report_path = _eval_report_path(args)
 
-    # Build the benchmark
+    if args.benchmark == "repo_pytest":
+        try:
+            await _run_repo_pytest_eval(args, provider, model, report_path)
+        except Exception as exc:
+            print(f"Evaluation unavailable: {exc}")
+        return
+
     if args.benchmark == "process_quality":
         from synapse.eval.benchmarks.process_bench import ProcessQualityBenchmark
         tasks = ProcessQualityBenchmark.tasks()
+        if args.max_tasks is not None:
+            tasks = tasks[:max(0, args.max_tasks)]
+        benchmark = ProcessQualityBenchmark.benchmark(tasks)
     elif args.benchmark == "swebench":
         from synapse.eval.benchmarks.swebench import SWEBenchAdapter
-        adapter = SWEBenchAdapter()
-        tasks = adapter.tasks()
+        tasks = SWEBenchAdapter.tasks(args.dataset, args.max_tasks)
+        if not tasks:
+            print("swebench requires a local JSONL dataset; pass --dataset PATH")
+            return
+        benchmark = Benchmark(
+            name="swebench",
+            tasks=tasks,
+            metadata={"functional_grader": "not_configured"},
+        )
     else:
         print(f"Unknown benchmark: {args.benchmark}")
         return
 
-    benchmark = Benchmark(name=args.benchmark, tasks=tasks)
     print(f"Tasks:     {len(tasks)}")
 
-    # Create Synapse instance
-    kwargs: dict = {"enable_eval": True}
-    if args.provider:
-        kwargs["provider"] = args.provider
-    if args.model:
-        kwargs["model"] = args.model
+    async def approve(_request) -> bool:
+        return True
 
-    synapse = Synapse(**kwargs)
-    runner = BenchmarkRunner()
-    result = await runner.run(benchmark, synapse.run)
+    import tempfile
+    temporary_workspace = None
+    workspace_root = args.workspace
+    if not workspace_root:
+        temporary_workspace = tempfile.TemporaryDirectory(
+            prefix=f"synapse-eval-{args.benchmark}-"
+        )
+        workspace_root = temporary_workspace.name
+    try:
+        synapse = Synapse(
+            enable_eval=True,
+            provider=provider,
+            model=model,
+            workspace_root=workspace_root,
+            confirm_callback=approve,
+        )
+        runner = BenchmarkRunner()
 
-    print(f"\n--- Results ---")
-    print(f"Total:     {result.total}")
-    print(f"Completed: {result.completed}")
-    print(f"Failed:    {result.failed}")
-    print(f"Duration:  {result.duration_ms}ms")
+        async def run_task(task: str):
+            result = await synapse.run(task, confirm_callback=approve)
+            return result, synapse.get_run_score()
 
-    for tr in result.results:
-        status_icon = "+" if tr.status == "success" else "!" if tr.status == "failed" else "?"
-        print(f"  [{status_icon}] {tr.task_id}: {tr.status} ({tr.duration_ms}ms)")
+        result = await runner.run(
+            benchmark,
+            run_task,
+            report_path=report_path,
+            metadata={
+                "provider": provider,
+                "model": model,
+                "workspace": str(Path(workspace_root).resolve()),
+                "temporary_workspace": temporary_workspace is not None,
+            },
+        )
+        _print_eval_result(result, report_path)
+    finally:
+        if temporary_workspace is not None:
+            temporary_workspace.cleanup()
 
 
 # ---- Experiment command handler -------------------------------------------

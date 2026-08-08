@@ -87,7 +87,10 @@ class ProcessSandbox:
         timeout: int = 120,
     ) -> SandboxResult:
         try:
-            workdir = (cwd or Path.cwd()).resolve()
+            # Tool schemas carry paths as strings; normalize at the sandbox
+            # boundary so every backend receives one stable path type.
+            cwd_path = Path(cwd) if cwd is not None else None
+            workdir = (cwd_path or Path.cwd()).resolve()
             argv = self._sandbox_argv(command, workdir)
             if argv is not None:
                 proc = await asyncio.create_subprocess_exec(
@@ -105,7 +108,7 @@ class ProcessSandbox:
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=str(cwd) if cwd else None,
+                    cwd=str(workdir),
                     env=env,
                 )
                 self._assign_job(proc.pid)
@@ -116,7 +119,7 @@ class ProcessSandbox:
                     command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=str(cwd) if cwd else None,
+                    cwd=str(workdir),
                     env=env,
                     start_new_session=True,
                 )

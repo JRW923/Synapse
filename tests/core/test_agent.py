@@ -113,3 +113,28 @@ async def test_fallback_context_event_returns_event_not_coroutine():
     assert hasattr(evt, "event_type")
     # Emitting must not raise.
     await event_bus.emit(evt)
+
+
+@pytest.mark.asyncio
+async def test_context_retrieval_uses_configured_workspace_root(tmp_path):
+    from synapse.modules.security.auth import ActionAuthorizer
+    from synapse.protocols.planner import AgentResult, ResultStatus
+    from synapse.protocols.retriever import Context
+
+    container = Container()
+    mock_planner = AsyncMock(spec=Planner)
+    mock_planner.execute.return_value = AgentResult(ResultStatus.SUCCESS, "done")
+    mock_retriever = AsyncMock(spec=ContextRetriever)
+    mock_retriever.retrieve.return_value = Context()
+
+    container.register(LLMProvider, AsyncMock(spec=LLMProvider))
+    container.register(Planner, mock_planner)
+    container.register(ToolRegistry, AsyncMock(spec=ToolRegistry))
+    container.register(MemoryStore, AsyncMock(spec=MemoryStore))
+    container.register(ContextRetriever, mock_retriever)
+    container.register(Sandbox, AsyncMock(spec=Sandbox))
+    container.register(EventBus, EventBus())
+    container.register(ActionAuthorizer, type("Authorizer", (), {"workspace_root": str(tmp_path)})())
+
+    await Agent(container).run("inspect the fixture", Session())
+    assert mock_retriever.retrieve.await_args.kwargs["project_root"] == tmp_path.resolve()

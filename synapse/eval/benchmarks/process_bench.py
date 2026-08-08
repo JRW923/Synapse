@@ -21,7 +21,8 @@ acceptable quality thresholds on each relevant dimension.
 
 from __future__ import annotations
 
-from synapse.eval.runner import BenchmarkTask
+from synapse.eval.runner import Benchmark, BenchmarkTask, TaskGrade
+from synapse.protocols.planner import AgentResult, ResultStatus
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +45,46 @@ class ProcessQualityBenchmark:
     """
 
     BENCHMARK_NAME: str = "process_quality"
+
+    @classmethod
+    def benchmark(cls, tasks: list[BenchmarkTask] | None = None) -> Benchmark:
+        """Build a scored benchmark for the generic runner."""
+        return Benchmark(
+            name=cls.BENCHMARK_NAME,
+            tasks=tasks if tasks is not None else cls.tasks(),
+            grader=cls.grade,
+            metadata={"grader": "runtime_process_snapshot", "functional": False},
+        )
+
+    @staticmethod
+    def grade(task, agent_result: AgentResult, run_score: dict | None) -> TaskGrade:
+        """Compare runtime process metrics with task-specific thresholds."""
+        actual = (run_score or {}).get("process", {})
+        checks: dict[str, dict[str, float | bool]] = {}
+        ratios: list[float] = []
+        for metric, expected in task.expected_process_scores.items():
+            observed = float(actual.get(metric, 0.0) or 0.0)
+            if metric.startswith("instruction_drift"):
+                passed = observed <= expected
+                ratio = 1.0 if expected == 0 and passed else (
+                    min(1.0, expected / max(observed, 1.0)) if expected else 0.0
+                )
+            else:
+                passed = observed >= expected
+                ratio = min(1.0, observed / expected) if expected > 0 else 1.0
+            checks[metric] = {"observed": observed, "expected": expected, "passed": passed}
+            ratios.append(ratio)
+
+        score = sum(ratios) / len(ratios) if ratios else 0.0
+        passed = bool(agent_result.status == ResultStatus.SUCCESS and checks and all(
+            bool(item["passed"]) for item in checks.values()
+        ))
+        return TaskGrade(
+            passed=passed,
+            score=score,
+            reason="process thresholds met" if passed else "process thresholds not met",
+            details={"metrics": checks, "agent_status": agent_result.status.value},
+        )
 
     # ------------------------------------------------------------------
     # Task definitions

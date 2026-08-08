@@ -4,6 +4,7 @@ from synapse.eval.runner import (
     BenchmarkRunner,
     Benchmark,
     BenchmarkTask,
+    TaskGrade,
     TaskResult,
     BenchmarkResult,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "BenchmarkRunner",
     "Benchmark",
     "BenchmarkTask",
+    "TaskGrade",
     "TaskResult",
     "BenchmarkResult",
     "SWEBenchAdapter",

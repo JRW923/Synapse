@@ -1,6 +1,7 @@
 """Core Agent -- assembles dependencies and delegates to Planner."""
 
 import inspect
+from pathlib import Path
 
 from synapse.core.container import Container
 from synapse.core.session import Session
@@ -30,6 +31,15 @@ class Agent:
     """
 
     def __init__(self, container: Container):
+        self._workspace_root = Path.cwd()
+        try:
+            from synapse.modules.security.auth import ActionAuthorizer
+            authorizer = container.resolve(ActionAuthorizer)
+            configured_root = getattr(authorizer, "workspace_root", None)
+            if configured_root:
+                self._workspace_root = Path(configured_root).resolve()
+        except (KeyError, ImportError, OSError, TypeError, ValueError):
+            pass
         self.llm: LLMProvider = container.resolve(LLMProvider)
         self.tools: ToolRegistry = container.resolve(ToolRegistry)
         self.memory: MemoryStore = container.resolve(MemoryStore)
@@ -191,7 +201,7 @@ class Agent:
             context = await asyncio.wait_for(
                 self.retriever.retrieve(
                     task=task,
-                    project_root=Path.cwd(),
+                    project_root=self._workspace_root,
                     tools=self.tools,
                     memory=self.memory,
                     budget=budget,
@@ -234,7 +244,7 @@ class Agent:
         from pathlib import Path
 
         system: list[ContextBlock] = []
-        cwd = Path.cwd()
+        cwd = self._workspace_root
         for name in ("AGENTS.md", "CLAUDE.md", "README.md"):
             p = cwd / name
             if p.exists():

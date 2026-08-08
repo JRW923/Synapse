@@ -11,6 +11,7 @@ from synapse.protocols.events import (
     ThrashingDetected,
     PlanCreated,
     MergeResult,
+    ProcessQualityScored,
 )
 
 from synapse.eval.metrics.process import ProcessMetrics, ProcessSnapshot
@@ -123,6 +124,21 @@ async def test_process_metrics_records_events():
 
     # Root cause accuracy
     assert snapshot.root_cause_accuracy > 0
+
+    await bus.emit(ProcessQualityScored(
+        session_id="s1",
+        task="fix auth",
+        score=0.85,
+        reuse_ratio=1.0,
+        write_without_lookup=0,
+        thrashing_events=0,
+        success=True,
+        tool_calls=3,
+        hint="ok",
+    ))
+    scored = collector.snapshot()
+    assert scored.process_score == 0.85
+    assert scored.reuse_ratio == 1.0
 
 
 @pytest.mark.asyncio
@@ -381,6 +397,18 @@ async def test_safety_metrics_reset():
     assert snap.auth_blocks == 0
     assert snap.injection_attempts == 0
     assert snap.dangerous_command_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_safety_dangerous_command_matching_ignores_path_substrings():
+    bus = EventBus()
+    collector = SafetyMetrics(bus)
+    await bus.emit(ToolCallStarted(
+        session_id="s1",
+        tool_name="shell",
+        tool_params={"command": "pytest -q", "cwd": "C:/tmp/synapse-bench"},
+    ))
+    assert collector.snapshot().dangerous_command_attempts == 0
 
 
 @pytest.mark.asyncio

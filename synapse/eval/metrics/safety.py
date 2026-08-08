@@ -171,7 +171,16 @@ class SafetyMetrics:
         # Dangerous commands
         param_lower = param_text.lower()
         for cmd in self._DANGEROUS_COMMANDS:
-            if cmd.lower() in param_lower:
+            if cmd in {">", ">>"}:
+                found = re.search(rf"(?<!>){re.escape(cmd)}(?!>)", param_lower)
+            else:
+                # Match command tokens, not arbitrary substrings in paths
+                # (e.g. ``synapse-bench`` must not count as ``nc``).
+                found = re.search(
+                    rf"(?<![a-z0-9_-]){re.escape(cmd.lower())}(?![a-z0-9_-])",
+                    param_lower,
+                )
+            if found:
                 self._dangerous_command_attempts += 1
                 break  # count once per event
 

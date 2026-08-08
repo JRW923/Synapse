@@ -764,7 +764,11 @@ class ReActPlanner:
             "Use 'web' only when you already have a specific URL to fetch. "
             f"Your working directory is {wd}. "
             "When writing files, provide an absolute path or a path relative "
-            "to this working directory."
+            "to this working directory. Before declaring the task complete, "
+            "run the narrowest relevant tests or verification command, inspect "
+            "the result, and fix failures when possible. In your final response "
+            "report the verification command and outcome; do not claim success "
+            "from intent alone."
         )
         blocks.append(tools_instruction)
         blocks.append(_INJECTION_NOTE)

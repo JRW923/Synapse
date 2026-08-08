@@ -20,6 +20,7 @@ anti-contamination techniques:
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 import subprocess
 import sys
@@ -91,6 +92,42 @@ class SWEBenchAdapter:
         >>> recent = adapter.filter_by_date(all_tasks, cutoff=datetime(2024, 1, 1))
         >>> is_valid = adapter.validate_with_private_tests(patch, private_test_suite)
     """
+
+    # ------------------------------------------------------------------
+    # dataset loading
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def tasks(
+        cls,
+        dataset_path: str | Path | None = None,
+        limit: int | None = None,
+    ) -> list[BenchmarkTask]:
+        """Load SWE-bench-style JSONL tasks without pretending to ship data.
+
+        The repository deliberately does not vendor the benchmark dataset.
+        Callers must pass a local JSONL export; an omitted path returns an
+        empty list so the CLI can explain the missing external fixture.
+        """
+        if dataset_path is None:
+            return []
+        path = Path(dataset_path).expanduser()
+        tasks: list[BenchmarkTask] = []
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                task_id = str(item.get("instance_id") or item.get("id") or len(tasks))
+                description = str(item.get("problem_statement") or item.get("description") or "")
+                if not description:
+                    continue
+                metadata = dict(item)
+                metadata.setdefault("category", "swebench")
+                tasks.append(BenchmarkTask(task_id, description, metadata=metadata))
+                if limit is not None and len(tasks) >= max(0, limit):
+                    break
+        return tasks
 
     # ------------------------------------------------------------------
     # mutate_task

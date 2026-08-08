@@ -63,6 +63,14 @@ def test_library_api_config_override():
     assert config.planning.max_iterations == 100
 
 
+def test_deepseek_v4_flash_uses_anthropic_compatible_endpoint():
+    from synapse.adapters.library import _resolve_provider
+
+    provider_cls, base_url = _resolve_provider("deepseek", model="deepseek-v4-flash")
+    assert provider_cls.__name__ == "AnthropicProvider"
+    assert base_url == "https://api.deepseek.com/anthropic"
+
+
 def test_library_api_without_provider_uses_models_json_default(tmp_path, monkeypatch):
     """Zero-argument construction must preserve the user's persisted default."""
     from synapse.config.models import upsert_model

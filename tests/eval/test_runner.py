@@ -2,7 +2,14 @@
 
 import pytest
 
-from synapse.eval.runner import BenchmarkRunner, Benchmark, BenchmarkTask, TaskResult, BenchmarkResult
+from synapse.eval.runner import (
+    BenchmarkRunner,
+    Benchmark,
+    BenchmarkTask,
+    TaskGrade,
+    TaskResult,
+    BenchmarkResult,
+)
 from synapse.protocols.planner import AgentResult, ResultStatus
 
 
@@ -79,3 +86,39 @@ async def test_runner_executes_simple_benchmark(
 
     # Duration is recorded
     assert result.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_runner_grades_tasks_and_writes_bounded_report(tmp_path) -> None:
+    async def run_task(task: str):
+        return AgentResult(
+            status=ResultStatus.SUCCESS if task == "pass" else ResultStatus.PARTIAL,
+            output="x" * 5000,
+        ), {"efficiency": {"tool_call_count": 1}}
+
+    def grade(task, result, run_score):
+        return TaskGrade(
+            passed=result.status == ResultStatus.SUCCESS,
+            score=1.0 if result.status == ResultStatus.SUCCESS else 0.25,
+            reason=task.id,
+            details={"has_score": run_score is not None},
+        )
+
+    benchmark = Benchmark(
+        name="graded",
+        tasks=[
+            BenchmarkTask(id="p", description="pass", metadata={"category": "functional"}),
+            BenchmarkTask(id="q", description="partial", metadata={"category": "functional"}),
+        ],
+        grader=grade,
+    )
+    report = tmp_path / "report.json"
+    result = await BenchmarkRunner().run(benchmark, run_task, report_path=report)
+
+    assert result.passed == 1
+    assert result.pass_rate == 0.5
+    assert result.mean_score == 0.625
+    assert result.by_category["functional"]["passed"] == 1
+    payload = report.read_text(encoding="utf-8")
+    assert len(payload) < 10_000
+    assert '"run_score"' in payload

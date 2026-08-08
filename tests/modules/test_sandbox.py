@@ -33,3 +33,14 @@ async def test_sandbox_failing_command():
     sandbox = ProcessSandbox()
     result = await sandbox.execute("nonexistent_command_xyz")
     assert result.exit_code != 0
+
+
+@pytest.mark.asyncio
+async def test_sandbox_accepts_string_cwd(tmp_path):
+    sandbox = ProcessSandbox()
+    result = await sandbox.execute(
+        "python -c \"open('cwd-marker.txt', 'w').write('ok')\"",
+        cwd=str(tmp_path),
+    )
+    assert result.exit_code == 0
+    assert (tmp_path / "cwd-marker.txt").read_text() == "ok"

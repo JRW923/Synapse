@@ -3,8 +3,10 @@
 import pytest
 
 from synapse.eval.runner import BenchmarkTask
+from synapse.protocols.planner import AgentResult, ResultStatus
 from synapse.eval.benchmarks.swebench import SWEBenchAdapter
 from synapse.eval.benchmarks.process_bench import ProcessQualityBenchmark
+from synapse.eval.benchmarks.repo_pytest import RepoPytestBenchmark
 
 
 # ---------------------------------------------------------------------------
@@ -57,3 +59,31 @@ def test_process_bench_tasks_loadable() -> None:
     assert "rootcause" in categories
     assert "testpersist" in categories
     assert "instruct" in categories
+
+
+def test_process_benchmark_grader_uses_runtime_snapshot() -> None:
+    task = ProcessQualityBenchmark.tasks()[0]
+    result = AgentResult(status=ResultStatus.SUCCESS, output="ok")
+    grade = ProcessQualityBenchmark.grade(
+        task,
+        result,
+        {"process": {"reuse_attempted": 1, "reuse_found": 1}},
+    )
+    assert grade.passed is True
+    assert grade.score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_repo_pytest_benchmark_is_reproducible_and_filters_cache_files() -> None:
+    async def fix_add(task, root):
+        (root / "calculator.py").write_text(
+            "def add(a: int, b: int) -> int:\n    return a + b\n",
+            encoding="utf-8",
+        )
+        return AgentResult(status=ResultStatus.SUCCESS, output="fixed"), {"efficiency": {"tool_call_count": 1}}
+
+    result = await RepoPytestBenchmark().run(fix_add)
+    assert result.baseline_failed is True
+    assert result.tests_passed is True
+    assert all("__pycache__" not in path for path in result.changed_files)
+    assert result.run_score == {"efficiency": {"tool_call_count": 1}}

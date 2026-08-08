@@ -24,6 +24,9 @@ class ProcessSnapshot:
     reuse_attempted: int = 0
     reuse_found: int = 0
     reuse_adopted: int = 0
+    reuse_ratio: float = 0.0
+    write_without_lookup: int = 0
+    process_score: float = 0.0
 
     root_cause_accuracy: float = 0.0
 
@@ -70,6 +73,7 @@ class ProcessMetrics:
         "plan_created",
         "merge_result",
         "thrashing_detected",
+        "process_quality_scored",
     })
 
     # Tools whose names suggest a reuse operation
@@ -103,6 +107,9 @@ class ProcessMetrics:
         self._reuse_attempted = 0
         self._reuse_found = 0
         self._reuse_adopted = 0
+        self._reuse_ratio = 0.0
+        self._write_without_lookup = 0
+        self._process_score = 0.0
 
         self._agent_successes = 0
         self._agent_completions = 0
@@ -140,6 +147,9 @@ class ProcessMetrics:
             reuse_attempted=self._reuse_attempted,
             reuse_found=self._reuse_found,
             reuse_adopted=self._reuse_adopted,
+            reuse_ratio=round(self._reuse_ratio, 4),
+            write_without_lookup=self._write_without_lookup,
+            process_score=round(self._process_score, 4),
 
             root_cause_accuracy=round(root_cause_accuracy, 4),
 
@@ -182,6 +192,8 @@ class ProcessMetrics:
             self._handle_merge_result(event)
         elif etype_key == "thrashing_detected":
             self._handle_thrashing_detected(event)
+        elif etype_key == "process_quality_scored":
+            self._handle_process_quality_scored(event)
 
     # ------------------------------------------------------------------
     # Per-event-type handlers
@@ -256,3 +268,9 @@ class ProcessMetrics:
         modification_count = getattr(event, "modification_count", 0)
         if modification_count >= self._REGEX_ABUSE_THRESHOLD:
             self._regex_abuse_events += 1
+
+    def _handle_process_quality_scored(self, event: BaseEvent) -> None:
+        """Copy the real process verifier result into the run snapshot."""
+        self._reuse_ratio = float(getattr(event, "reuse_ratio", 0.0) or 0.0)
+        self._write_without_lookup = int(getattr(event, "write_without_lookup", 0) or 0)
+        self._process_score = float(getattr(event, "score", 0.0) or 0.0)

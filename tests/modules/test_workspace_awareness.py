@@ -32,6 +32,8 @@ def test_system_prompt_includes_working_directory():
     ctx = SimpleNamespace(system=[], core=[], reference=[])
     prompt = planner._build_system_prompt(ctx, task="do something")
     assert "Your working directory is /my/work/dir" in prompt
+    assert "run the narrowest relevant tests" in prompt
+    assert "do not claim success from intent alone" in prompt
 
 
 # --- WriteTool relative-path resolution --------------------------------------

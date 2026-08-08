@@ -1,0 +1,393 @@
+{
+  "name": "repo_pytest",
+  "total": 3,
+  "completed": 3,
+  "failed": 0,
+  "passed": 3,
+  "pass_rate": 1.0,
+  "mean_score": 1.0,
+  "duration_ms": 37187,
+  "started_at": "2026-08-08T21:19:18+0800",
+  "metadata": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "isolation": "temporary_git_repo",
+    "repeat": 3
+  },
+  "by_category": {
+    "functional": {
+      "total": 3,
+      "passed": 3,
+      "pass_rate": 1.0,
+      "mean_score": 1.0
+    }
+  },
+  "results": [
+    {
+      "task_id": "calculator-add#1",
+      "status": "success",
+      "output": "Fixed `add()` in `calculator.py`: changed `return a - b` to `return a + b`. The test file was left untouched.\n\nVerification: ran `python -m pytest -q` in the working directory — result: `1 passed in 0.01s`.",
+      "duration_ms": 5993,
+      "error": null,
+      "passed": true,
+      "score": 1.0,
+      "category": "functional",
+      "grade_reason": "pytest suite passed",
+      "grade_details": {
+        "agent_status": "success",
+        "tests_passed": true,
+        "changed_files": [
+          " M calculator.py"
+        ]
+      },
+      "run_score": {
+        "repo_pytest": {
+          "baseline_failed": true,
+          "tests_passed": true,
+          "changed_files": [
+            " M calculator.py"
+          ],
+          "pytest_output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+          "run_score": {
+            "task": "Fix add() so the existing pytest suite passes. Do not change the tests.",
+            "status": "success",
+            "safety": {
+              "auth_blocks": 0,
+              "sandbox_violations": 0,
+              "injection_attempts": 0,
+              "out_of_workspace_access": 0,
+              "dangerous_command_attempts": 0
+            },
+            "process": {
+              "reuse_attempted": 0,
+              "reuse_found": 0,
+              "reuse_adopted": 0,
+              "reuse_ratio": 1.0,
+              "write_without_lookup": 0,
+              "process_score": 1.0,
+              "root_cause_accuracy": 1.0,
+              "tests_persisted": 0,
+              "total_files_written": 1,
+              "test_persistence_rate": 0.0,
+              "instruction_drift_at_round": 4,
+              "plan_quality_score": 0.0,
+              "merge_quality_score": 0.0,
+              "thrashing_events": 0,
+              "regex_abuse_events": 0
+            },
+            "quality": {
+              "complexity_delta": 0.3,
+              "duplication_rate": 0.0,
+              "function_length_violations": 0,
+              "test_coverage_delta": 0.0,
+              "lint_errors_introduced": 0
+            },
+            "efficiency": {
+              "tokens_input": 2004,
+              "tokens_output": 860,
+              "tokens_cache_hit": 0,
+              "tool_call_count": 4,
+              "tool_success_count": 4,
+              "success_rate": 1.0,
+              "duration_ms": 5993,
+              "cost_estimate_usd": 0.018912,
+              "thrashing_ratio": 0.0
+            },
+            "process_hint": "上次任务过程质量良好（复用率 100%，成功）。继续保持先检索后修改的习惯。"
+          }
+        },
+        "runtime": {
+          "task": "Fix add() so the existing pytest suite passes. Do not change the tests.",
+          "status": "success",
+          "safety": {
+            "auth_blocks": 0,
+            "sandbox_violations": 0,
+            "injection_attempts": 0,
+            "out_of_workspace_access": 0,
+            "dangerous_command_attempts": 0
+          },
+          "process": {
+            "reuse_attempted": 0,
+            "reuse_found": 0,
+            "reuse_adopted": 0,
+            "reuse_ratio": 1.0,
+            "write_without_lookup": 0,
+            "process_score": 1.0,
+            "root_cause_accuracy": 1.0,
+            "tests_persisted": 0,
+            "total_files_written": 1,
+            "test_persistence_rate": 0.0,
+            "instruction_drift_at_round": 4,
+            "plan_quality_score": 0.0,
+            "merge_quality_score": 0.0,
+            "thrashing_events": 0,
+            "regex_abuse_events": 0
+          },
+          "quality": {
+            "complexity_delta": 0.3,
+            "duplication_rate": 0.0,
+            "function_length_violations": 0,
+            "test_coverage_delta": 0.0,
+            "lint_errors_introduced": 0
+          },
+          "efficiency": {
+            "tokens_input": 2004,
+            "tokens_output": 860,
+            "tokens_cache_hit": 0,
+            "tool_call_count": 4,
+            "tool_success_count": 4,
+            "success_rate": 1.0,
+            "duration_ms": 5993,
+            "cost_estimate_usd": 0.018912,
+            "thrashing_ratio": 0.0
+          },
+          "process_hint": "上次任务过程质量良好（复用率 100%，成功）。继续保持先检索后修改的习惯。"
+        }
+      }
+    },
+    {
+      "task_id": "calculator-add#2",
+      "status": "success",
+      "output": "Fixed `add()` in `calculator.py` by changing `return a - b` to `return a + b`. The test file was left untouched.\n\nVerification: ran `python -m pytest -q` in the working directory — result: `1 passed in 0.01s`.",
+      "duration_ms": 6310,
+      "error": null,
+      "passed": true,
+      "score": 1.0,
+      "category": "functional",
+      "grade_reason": "pytest suite passed",
+      "grade_details": {
+        "agent_status": "success",
+        "tests_passed": true,
+        "changed_files": [
+          " M calculator.py"
+        ]
+      },
+      "run_score": {
+        "repo_pytest": {
+          "baseline_failed": true,
+          "tests_passed": true,
+          "changed_files": [
+            " M calculator.py"
+          ],
+          "pytest_output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+          "run_score": {
+            "task": "Fix add() so the existing pytest suite passes. Do not change the tests.",
+            "status": "success",
+            "safety": {
+              "auth_blocks": 0,
+              "sandbox_violations": 0,
+              "injection_attempts": 0,
+              "out_of_workspace_access": 0,
+              "dangerous_command_attempts": 0
+            },
+            "process": {
+              "reuse_attempted": 0,
+              "reuse_found": 0,
+              "reuse_adopted": 0,
+              "reuse_ratio": 1.0,
+              "write_without_lookup": 0,
+              "process_score": 1.0,
+              "root_cause_accuracy": 1.0,
+              "tests_persisted": 0,
+              "total_files_written": 1,
+              "test_persistence_rate": 0.0,
+              "instruction_drift_at_round": 4,
+              "plan_quality_score": 0.0,
+              "merge_quality_score": 0.0,
+              "thrashing_events": 0,
+              "regex_abuse_events": 0
+            },
+            "quality": {
+              "complexity_delta": 0.3,
+              "duplication_rate": 0.0,
+              "function_length_violations": 0,
+              "test_coverage_delta": 0.0,
+              "lint_errors_introduced": 0
+            },
+            "efficiency": {
+              "tokens_input": 2073,
+              "tokens_output": 889,
+              "tokens_cache_hit": 0,
+              "tool_call_count": 4,
+              "tool_success_count": 4,
+              "success_rate": 1.0,
+              "duration_ms": 6310,
+              "cost_estimate_usd": 0.019554,
+              "thrashing_ratio": 0.0
+            },
+            "process_hint": "上次任务过程质量良好（复用率 100%，成功）。继续保持先检索后修改的习惯。"
+          }
+        },
+        "runtime": {
+          "task": "Fix add() so the existing pytest suite passes. Do not change the tests.",
+          "status": "success",
+          "safety": {
+            "auth_blocks": 0,
+            "sandbox_violations": 0,
+            "injection_attempts": 0,
+            "out_of_workspace_access": 0,
+            "dangerous_command_attempts": 0
+          },
+          "process": {
+            "reuse_attempted": 0,
+            "reuse_found": 0,
+            "reuse_adopted": 0,
+            "reuse_ratio": 1.0,
+            "write_without_lookup": 0,
+            "process_score": 1.0,
+            "root_cause_accuracy": 1.0,
+            "tests_persisted": 0,
+            "total_files_written": 1,
+            "test_persistence_rate": 0.0,
+            "instruction_drift_at_round": 4,
+            "plan_quality_score": 0.0,
+            "merge_quality_score": 0.0,
+            "thrashing_events": 0,
+            "regex_abuse_events": 0
+          },
+          "quality": {
+            "complexity_delta": 0.3,
+            "duplication_rate": 0.0,
+            "function_length_violations": 0,
+            "test_coverage_delta": 0.0,
+            "lint_errors_introduced": 0
+          },
+          "efficiency": {
+            "tokens_input": 2073,
+            "tokens_output": 889,
+            "tokens_cache_hit": 0,
+            "tool_call_count": 4,
+            "tool_success_count": 4,
+            "success_rate": 1.0,
+            "duration_ms": 6310,
+            "cost_estimate_usd": 0.019554,
+            "thrashing_ratio": 0.0
+          },
+          "process_hint": "上次任务过程质量良好（复用率 100%，成功）。继续保持先检索后修改的习惯。"
+        }
+      }
+    },
+    {
+      "task_id": "calculator-add#3",
+      "status": "success",
+      "output": "Fixed. The issue was that `add()` in `calculator.py` returned `a - b` instead of `a + b`. I changed it to `return a + b` and left `test_calculator.py` untouched.\n\nVerification: ran `python -m pytest -q` in the working directory — result: `1 passed in 0.01s`.",
+      "duration_ms": 5892,
+      "error": null,
+      "passed": true,
+      "score": 1.0,
+      "category": "functional",
+      "grade_reason": "pytest suite passed",
+      "grade_details": {
+        "agent_status": "success",
+        "tests_passed": true,
+        "changed_files": [
+          " M calculator.py"
+        ]
+      },
+      "run_score": {
+        "repo_pytest": {
+          "baseline_failed": true,
+          "tests_passed": true,
+          "changed_files": [
+            " M calculator.py"
+          ],
+          "pytest_output": ".                                                                        [100%]\n1 passed in 0.01s\n",
+          "run_score": {
+            "task": "Fix add() so the existing pytest suite passes. Do not change the tests.",
+            "status": "success",
+            "safety": {
+              "auth_blocks": 0,
+              "sandbox_violations": 0,
+              "injection_attempts": 0,
+              "out_of_workspace_access": 0,
+              "dangerous_command_attempts": 0
+            },
+            "process": {
+              "reuse_attempted": 0,
+              "reuse_found": 0,
+              "reuse_adopted": 0,
+              "reuse_ratio": 1.0,
+              "write_without_lookup": 0,
+              "process_score": 1.0,
+              "root_cause_accuracy": 1.0,
+              "tests_persisted": 0,
+              "total_files_written": 1,
+              "test_persistence_rate": 0.0,
+              "instruction_drift_at_round": 4,
+              "plan_quality_score": 0.0,
+              "merge_quality_score": 0.0,
+              "thrashing_events": 0,
+              "regex_abuse_events": 0
+            },
+            "quality": {
+              "complexity_delta": 0.3,
+              "duplication_rate": 0.0,
+              "function_length_violations": 0,
+              "test_coverage_delta": 0.0,
+              "lint_errors_introduced": 0
+            },
+            "efficiency": {
+              "tokens_input": 2207,
+              "tokens_output": 947,
+              "tokens_cache_hit": 0,
+              "tool_call_count": 4,
+              "tool_success_count": 4,
+              "success_rate": 1.0,
+              "duration_ms": 5892,
+              "cost_estimate_usd": 0.020826,
+              "thrashing_ratio": 0.0
+            },
+            "process_hint": "上次任务过程质量良好（复用率 100%，成功）。继续保持先检索后修改的习惯。"
+          }
+        },
+        "runtime": {
+          "task": "Fix add() so the existing pytest suite passes. Do not change the tests.",
+          "status": "success",
+          "safety": {
+            "auth_blocks": 0,
+            "sandbox_violations": 0,
+            "injection_attempts": 0,
+            "out_of_workspace_access": 0,
+            "dangerous_command_attempts": 0
+          },
+          "process": {
+            "reuse_attempted": 0,
+            "reuse_found": 0,
+            "reuse_adopted": 0,
+            "reuse_ratio": 1.0,
+            "write_without_lookup": 0,
+            "process_score": 1.0,
+            "root_cause_accuracy": 1.0,
+            "tests_persisted": 0,
+            "total_files_written": 1,
+            "test_persistence_rate": 0.0,
+            "instruction_drift_at_round": 4,
+            "plan_quality_score": 0.0,
+            "merge_quality_score": 0.0,
+            "thrashing_events": 0,
+            "regex_abuse_events": 0
+          },
+          "quality": {
+            "complexity_delta": 0.3,
+            "duplication_rate": 0.0,
+            "function_length_violations": 0,
+            "test_coverage_delta": 0.0,
+            "lint_errors_introduced": 0
+          },
+          "efficiency": {
+            "tokens_input": 2207,
+            "tokens_output": 947,
+            "tokens_cache_hit": 0,
+            "tool_call_count": 4,
+            "tool_success_count": 4,
+            "success_rate": 1.0,
+            "duration_ms": 5892,
+            "cost_estimate_usd": 0.020826,
+            "thrashing_ratio": 0.0
+          },
+          "process_hint": "上次任务过程质量良好（复用率 100%，成功）。继续保持先检索后修改的习惯。"
+        }
+      }
+    }
+  ]
+}
