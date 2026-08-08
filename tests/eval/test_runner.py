@@ -122,3 +122,23 @@ async def test_runner_grades_tasks_and_writes_bounded_report(tmp_path) -> None:
     payload = report.read_text(encoding="utf-8")
     assert len(payload) < 10_000
     assert '"run_score"' in payload
+
+
+@pytest.mark.asyncio
+async def test_runner_task_runner_receives_metadata():
+    benchmark = Benchmark(name="task-aware", tasks=[
+        BenchmarkTask(id="x", description="ignored", metadata={"workspace": "isolated"}),
+    ])
+    seen = []
+
+    async def task_runner(task):
+        seen.append(task.metadata["workspace"])
+        return AgentResult(status=ResultStatus.SUCCESS, output="ok")
+
+    result = await BenchmarkRunner().run(
+        benchmark,
+        lambda _description: AgentResult(status=ResultStatus.FAILED, output="wrong callback"),
+        task_runner=task_runner,
+    )
+    assert seen == ["isolated"]
+    assert result.passed == 1

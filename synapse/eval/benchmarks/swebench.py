@@ -30,7 +30,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
-from synapse.eval.runner import BenchmarkTask
+from synapse.eval.runner import Benchmark, BenchmarkTask, TaskGrade
+from synapse.protocols.planner import AgentResult, ResultStatus
 
 
 @dataclass
@@ -40,6 +41,7 @@ class SWEBenchExecution:
     returncode: int = -1
     output: str = ""
     changed_files: list[str] = field(default_factory=list)
+    private_tests_applied: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +130,62 @@ class SWEBenchAdapter:
                 if limit is not None and len(tasks) >= max(0, limit):
                     break
         return tasks
+
+    @classmethod
+    def benchmark(
+        cls,
+        dataset_path: str | Path,
+        limit: int | None = None,
+    ) -> Benchmark:
+        """Build a scored benchmark from a local SWE-bench JSONL export."""
+        tasks = cls.tasks(dataset_path, limit)
+        return Benchmark(
+            name="swebench",
+            tasks=tasks,
+            grader=cls.grade,
+            metadata={
+                "dataset": str(Path(dataset_path).expanduser()),
+                "functional_grader": "isolated_patch_private_tests",
+            },
+        )
+
+    @staticmethod
+    def grade(task, agent_result: AgentResult, run_score: dict | None) -> TaskGrade:
+        """Grade an isolated patch using apply/test evidence, not status alone."""
+        facts = (run_score or {}).get("swebench", {})
+        applied = bool(facts.get("applied"))
+        tested = bool(facts.get("tests_passed"))
+        status_ok = agent_result.status == ResultStatus.SUCCESS
+        score = (0.4 if applied else 0.0) + (0.6 if tested else 0.0)
+        passed = applied and tested and status_ok
+        reason = "private tests passed" if passed else (
+            "patch applied but private tests failed" if applied else "patch could not be applied"
+        )
+        return TaskGrade(
+            passed=passed,
+            score=score,
+            reason=reason,
+            details={
+                "agent_status": agent_result.status.value,
+                "patch_applied": applied,
+                "tests_passed": tested,
+                "changed_files": facts.get("changed_files", []),
+            },
+        )
+
+    @staticmethod
+    def extract_patch(repo_root: str | Path) -> str:
+        """Return a binary-safe Git patch, including newly-created files."""
+        root = Path(repo_root).expanduser().resolve()
+        subprocess.run(
+            ["git", "add", "--intent-to-add", "--all"],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
+        result = subprocess.run(
+            ["git", "diff", "--binary", "HEAD", "--"],
+            cwd=root, capture_output=True, text=True, check=False,
+        )
+        return result.stdout
 
     # ------------------------------------------------------------------
     # mutate_task
@@ -281,9 +339,10 @@ class SWEBenchAdapter:
         private_tests: dict[str, str],
         test_command: list[str] | None = None,
         timeout: int = 900,
+        private_test_patch: str = "",
     ) -> SWEBenchExecution:
         """Clone, checkout, apply a patch, inject private tests, and execute them."""
-        if not patch.strip() or not private_tests:
+        if not patch.strip() or (not private_tests and not private_test_patch.strip()):
             return SWEBenchExecution(applied=False, passed=False, output="empty patch or tests")
         with tempfile.TemporaryDirectory(prefix="synapse-swebench-") as tmp:
             root = Path(tmp) / "repo"
@@ -305,12 +364,25 @@ class SWEBenchAdapter:
                         applied=False, passed=False,
                         returncode=applied.returncode, output=applied.stderr,
                     )
+                private_tests_applied = False
+                if private_test_patch.strip():
+                    test_patch = subprocess.run(
+                        ["git", "apply", "--whitespace=nowarn", "-"], cwd=root,
+                        input=private_test_patch, capture_output=True, text=True, timeout=60,
+                    )
+                    if test_patch.returncode != 0:
+                        return SWEBenchExecution(
+                            applied=True, passed=False,
+                            output=f"private test patch failed: {test_patch.stderr}",
+                        )
+                    private_tests_applied = True
                 for relative, content in private_tests.items():
                     target = (root / relative).resolve()
                     if not target.is_relative_to(root.resolve()):
                         raise ValueError(f"Private test path escapes repo: {relative}")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(content, encoding="utf-8")
+                    private_tests_applied = True
                 command = test_command or [sys.executable, "-m", "pytest", "-q"]
                 tested = subprocess.run(
                     command, cwd=root, capture_output=True, text=True, timeout=timeout,
@@ -325,8 +397,9 @@ class SWEBenchAdapter:
                     returncode=tested.returncode,
                     output=(tested.stdout + tested.stderr)[-8000:],
                     changed_files=changed,
+                    private_tests_applied=private_tests_applied,
                 )
-            except (OSError, subprocess.SubprocessError) as exc:
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 return SWEBenchExecution(applied=False, passed=False, output=str(exc))
 
 

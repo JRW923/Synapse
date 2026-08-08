@@ -951,7 +951,7 @@ def main():
     eval_parser = sub.add_parser("eval", help="Run a benchmark evaluation")
     eval_parser.add_argument(
         "benchmark",
-        choices=["process_quality", "repo_pytest", "swebench"],
+        choices=["process_quality", "repo_pytest", "swebench", "terminal_smoke", "terminal_bench"],
         help="Benchmark to run",
     )
     eval_parser.add_argument(
@@ -968,7 +968,7 @@ def main():
     eval_parser.add_argument(
         "--dataset",
         default=None,
-        help="Local SWE-bench JSONL dataset (required for swebench)",
+        help="Local benchmark JSON/JSONL dataset (required for swebench/terminal_bench)",
     )
     eval_parser.add_argument(
         "--max-tasks",
@@ -2745,6 +2745,168 @@ async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Pa
     _print_eval_result(result, report_path)
 
 
+async def _run_swebench_eval(args, provider: str, model: str, report_path: Path) -> None:
+    """Run SWE-bench tasks with a fresh checkout and private-test grader."""
+    import shlex
+    import subprocess
+    import tempfile
+
+    from synapse.adapters.library import Synapse
+    from synapse.eval.benchmarks.swebench import SWEBenchAdapter
+    from synapse.eval.runner import BenchmarkRunner
+
+    if not args.dataset:
+        print("swebench requires a local JSONL dataset; pass --dataset PATH")
+        return
+    benchmark = SWEBenchAdapter.benchmark(args.dataset, args.max_tasks)
+    if not benchmark.tasks:
+        print("swebench requires a local JSONL dataset; pass --dataset PATH")
+        return
+
+    async def approve(_request) -> bool:
+        return True
+
+    async def run_task(task):
+        metadata = task.metadata
+        repo_url = str(metadata.get("repo_url") or metadata.get("repo") or "").strip()
+        if repo_url and "://" not in repo_url and not Path(repo_url).exists():
+            repo_url = f"https://github.com/{repo_url}.git"
+        if not repo_url:
+            raise ValueError(f"SWE-bench task {task.id} is missing repo/repo_url")
+        base_commit = str(metadata.get("base_commit") or metadata.get("environment_setup_commit") or "")
+        if not base_commit:
+            raise ValueError(f"SWE-bench task {task.id} is missing base_commit")
+        with tempfile.TemporaryDirectory(prefix="synapse-swebench-agent-") as tmp:
+            root = Path(tmp) / "repo"
+            subprocess.run(
+                ["git", "clone", "--quiet", repo_url, str(root)],
+                capture_output=True, text=True, check=True, timeout=900,
+            )
+            subprocess.run(
+                ["git", "checkout", "--quiet", base_commit],
+                cwd=root, capture_output=True, text=True, check=True, timeout=120,
+            )
+            synapse = Synapse(
+                enable_eval=True,
+                provider=provider,
+                model=model,
+                workspace_root=str(root),
+                confirm_callback=approve,
+            )
+            agent_result = await synapse.run(task.description, confirm_callback=approve)
+            patch = SWEBenchAdapter.extract_patch(root)
+            private_tests = metadata.get("private_tests") or {}
+            if not isinstance(private_tests, dict):
+                private_tests = {}
+            test_command = metadata.get("test_command")
+            if isinstance(test_command, str):
+                test_command = shlex.split(test_command)
+            execution = SWEBenchAdapter.execute(
+                str(root), base_commit, patch, private_tests,
+                test_command=test_command,
+                timeout=int(metadata.get("timeout", 900)),
+                private_test_patch=str(metadata.get("test_patch") or ""),
+            )
+            facts = {
+                "applied": execution.applied,
+                "tests_passed": execution.passed,
+                "private_tests_applied": execution.private_tests_applied,
+                "changed_files": execution.changed_files,
+                "output": execution.output,
+                "patch_chars": len(patch),
+                "runtime": synapse.get_run_score(),
+            }
+            return agent_result, {"swebench": facts}
+
+    print(f"Tasks:     {len(benchmark.tasks)}")
+    result = await BenchmarkRunner().run(
+        benchmark,
+        lambda _description: run_task(benchmark.tasks[0]),
+        task_runner=run_task,
+        report_path=report_path,
+        metadata={"provider": provider, "model": model, "isolation": "temporary_git_checkout"},
+    )
+    _print_eval_result(result, report_path)
+
+
+async def _run_terminal_eval(args, provider: str, model: str, report_path: Path) -> None:
+    """Run Terminal-Bench-compatible tasks in isolated temporary workspaces."""
+    import tempfile
+
+    from synapse.adapters.library import Synapse
+    from synapse.eval.benchmarks.terminal import TerminalBenchAdapter, TerminalSmokeBenchmark
+    from synapse.eval.runner import BenchmarkRunner
+
+    if args.benchmark == "terminal_smoke":
+        benchmark = TerminalSmokeBenchmark.benchmark()
+    else:
+        tasks = TerminalBenchAdapter.tasks(args.dataset, args.max_tasks)
+        if not tasks:
+            print("terminal_bench requires a local JSON/JSONL dataset; pass --dataset PATH")
+            return
+        benchmark = TerminalBenchAdapter.benchmark(tasks)
+
+    async def approve(_request) -> bool:
+        return True
+
+    async def run_task(task):
+        with tempfile.TemporaryDirectory(prefix="synapse-terminal-eval-") as tmp:
+            root = Path(tmp)
+            for relative, content in (task.metadata.get("setup_files") or {}).items():
+                target = (root / str(relative)).resolve()
+                if not target.is_relative_to(root.resolve()):
+                    raise ValueError(f"setup path escapes workspace: {relative}")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(str(content), encoding="utf-8")
+            synapse = Synapse(
+                enable_eval=True,
+                provider=provider,
+                model=model,
+                workspace_root=str(root),
+                confirm_callback=approve,
+            )
+            from synapse.core.events import EventBus
+            event_bus = synapse._container.resolve(EventBus)
+            trajectory: list[dict] = []
+            event_types = (
+                "agent_progress", "llm_token", "tool_call_started",
+                "tool_call_completed", "agent_completed",
+            )
+            handlers = {}
+            for event_type in event_types:
+                async def _record(event, event_type=event_type):
+                    trajectory.append({
+                        "type": event_type,
+                        "payload": dict(getattr(event, "__dict__", {})),
+                    })
+                handlers[event_type] = _record
+                event_bus.subscribe(event_type, _record)
+            try:
+                agent_result = await synapse.run(task.description, confirm_callback=approve)
+            finally:
+                for event_type, handler in handlers.items():
+                    event_bus.unsubscribe(event_type, handler)
+            facts = TerminalBenchAdapter.grade_workspace(task, root)
+            facts["runtime"] = synapse.get_run_score()
+            facts["trajectory"] = trajectory[-200:]
+            return agent_result, {"terminal": facts}
+
+    print(f"Tasks:     {len(benchmark.tasks)}")
+    result = await BenchmarkRunner().run(
+        benchmark,
+        lambda _description: run_task(benchmark.tasks[0]),
+        task_runner=run_task,
+        report_path=report_path,
+        metadata={
+            "provider": provider,
+            "model": model,
+            "isolation": "temporary_workspace",
+            "official_runner": benchmark.metadata.get("official_runner"),
+        },
+    )
+    _print_eval_result(result, report_path)
+
+
 async def _run_eval(args) -> None:
     """Execute a named benchmark via the Synapse facade."""
     from synapse.adapters.library import Synapse
@@ -2764,23 +2926,26 @@ async def _run_eval(args) -> None:
             print(f"Evaluation unavailable: {exc}")
         return
 
+    if args.benchmark == "swebench":
+        try:
+            await _run_swebench_eval(args, provider, model, report_path)
+        except Exception as exc:
+            print(f"Evaluation unavailable: {exc}")
+        return
+
+    if args.benchmark in {"terminal_smoke", "terminal_bench"}:
+        try:
+            await _run_terminal_eval(args, provider, model, report_path)
+        except Exception as exc:
+            print(f"Evaluation unavailable: {exc}")
+        return
+
     if args.benchmark == "process_quality":
         from synapse.eval.benchmarks.process_bench import ProcessQualityBenchmark
         tasks = ProcessQualityBenchmark.tasks()
         if args.max_tasks is not None:
             tasks = tasks[:max(0, args.max_tasks)]
         benchmark = ProcessQualityBenchmark.benchmark(tasks)
-    elif args.benchmark == "swebench":
-        from synapse.eval.benchmarks.swebench import SWEBenchAdapter
-        tasks = SWEBenchAdapter.tasks(args.dataset, args.max_tasks)
-        if not tasks:
-            print("swebench requires a local JSONL dataset; pass --dataset PATH")
-            return
-        benchmark = Benchmark(
-            name="swebench",
-            tasks=tasks,
-            metadata={"functional_grader": "not_configured"},
-        )
     else:
         print(f"Unknown benchmark: {args.benchmark}")
         return

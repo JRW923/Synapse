@@ -10,6 +10,7 @@ from synapse.eval.runner import (
 )
 from synapse.eval.benchmarks import (
     SWEBenchAdapter, ProcessQualityBenchmark, RepoPytestBenchmark,
+    TerminalBenchAdapter, TerminalSmokeBenchmark,
 )
 
 __all__ = [
@@ -22,4 +23,6 @@ __all__ = [
     "SWEBenchAdapter",
     "RepoPytestBenchmark",
     "ProcessQualityBenchmark",
+    "TerminalBenchAdapter",
+    "TerminalSmokeBenchmark",
 ]

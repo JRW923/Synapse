@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -86,6 +87,43 @@ def _error_tool_result(tool_name: str, reason: str):
         success=False, output="", error=reason,
         metadata=ToolCallMetadata(tool_name=tool_name),
     )
+
+
+_CODE_ACTION_MARKERS = re.compile(
+    r"\b(fix|implement|add|create|modify|change|refactor|patch|update|remove|delete)\b",
+    re.IGNORECASE,
+)
+_CODE_CONTEXT_MARKERS = re.compile(
+    r"(\bcode\b|\bfile\b|\brepo(?:sitory)?\b|\bpytest\b|\btest suite\b|"
+    r"\bunit test\b|\blint\b|\btypecheck\b|\.(?:py|ts|tsx|js|go|rs|java)\b)",
+    re.IGNORECASE,
+)
+_VERIFICATION_MARKERS = re.compile(
+    r"(pytest|unittest|tox|npm\s+(?:run\s+)?test|yarn\s+(?:run\s+)?test|"
+    r"pnpm\s+(?:run\s+)?test|cargo\s+test|go\s+test|mypy|pyright|ruff|"
+    r"eslint|tsc\b|lint|typecheck|test suite)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_code_task(task: str) -> bool:
+    """Recognize mutation/verification tasks that require executable evidence."""
+    return bool(_CODE_ACTION_MARKERS.search(task) and _CODE_CONTEXT_MARKERS.search(task))
+
+
+def _select_tool_schemas(tool_schemas: list[dict], task: str) -> list[dict]:
+    """Keep high-cost external schemas out of ordinary code-task prompts.
+
+    The registry remains unchanged, so an explicitly requested tool still
+    executes; this only reduces schema selection/token pressure for the model.
+    """
+    if not _looks_like_code_task(task):
+        return tool_schemas
+    allowed = {
+        "read", "write", "edit", "glob", "grep", "shell", "git",
+        "load_skill", "todo_write", "todo_read",
+    }
+    return [schema for schema in tool_schemas if schema.get("name") in allowed or not schema.get("name")]
 
 
 def _is_non_retryable_llm_error(exc: BaseException) -> bool:
@@ -361,9 +399,15 @@ class ReActPlanner:
 
         tool_schemas_raw = tools.get_schemas() if hasattr(tools, 'get_schemas') else []
         tool_schemas = await self._maybe_await(tool_schemas_raw)
+        if not isinstance(tool_schemas, list):
+            tool_schemas = []
+        tool_schemas = _select_tool_schemas(tool_schemas, task)
 
         final_output = ""
         result_status = ResultStatus.SUCCESS
+        code_task = _looks_like_code_task(task)
+        verification_seen = False
+        verification_passed = False
 
         self._log(f"Task: {task[:100]}{'...' if len(task) > 100 else ''}")
         self._log(f"Available tools: {[t['name'] for t in tool_schemas]}")
@@ -632,6 +676,12 @@ class ReActPlanner:
                                 bytes_written=len(tool_input.get("content", "") or ""),
                             ))
 
+                    if tool_name == "shell":
+                        command = str(tool_input.get("command", ""))
+                        if _VERIFICATION_MARKERS.search(command):
+                            verification_seen = True
+                            verification_passed = result.success
+
                     # Track file modifications for thrashing detection
                     for f in result.metadata.files_touched:
                         file_touch_counts[f] = file_touch_counts.get(f, 0) + 1
@@ -703,6 +753,21 @@ class ReActPlanner:
             result_status = ResultStatus.PARTIAL
 
         metrics.duration_ms = int((time.time() - start_time) * 1000)
+
+        # Runtime completion gate: code changes need executable evidence. Keep
+        # natural-language tasks permissive, while preventing a model from
+        # claiming a repository fix without running a relevant check.
+        if code_task and result_status == ResultStatus.SUCCESS:
+            if not verification_seen:
+                result_status = ResultStatus.PARTIAL
+                final_output = ((final_output + "\n\n") if final_output else "") + (
+                    "代码任务未提供测试或验证命令的成功证据。"
+                )
+            elif not verification_passed:
+                result_status = ResultStatus.PARTIAL
+                final_output = ((final_output + "\n\n") if final_output else "") + (
+                    "最近一次测试或验证命令失败，任务暂记为 PARTIAL。"
+                )
 
         # Repair before persisting — prevents broken tool chains from being saved.
         session.messages = self._repair_session(messages)

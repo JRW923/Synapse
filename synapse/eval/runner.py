@@ -243,6 +243,7 @@ class BenchmarkRunner:
         ] | None = None,
         report_path: str | Path | None = None,
         metadata: dict[str, Any] | None = None,
+        task_runner: Callable[[BenchmarkTask], Awaitable[Any]] | None = None,
     ) -> BenchmarkResult:
         """Execute every task in *benchmark* and aggregate results.
 
@@ -254,6 +255,10 @@ class BenchmarkRunner:
             An async callable ``(task: str) -> AgentResult`` that executes a
             single task description. It may also return ``(AgentResult,
             run_score_dict)`` so runtime metrics can be attached to reports.
+        task_runner:
+            Optional task-aware callback. When supplied it receives the full
+            ``BenchmarkTask`` and is useful for isolated checkout/container
+            benchmarks that need task metadata.
         grade_task:
             Optional deterministic grader. If omitted, the benchmark's grader
             is used, then a successful AgentResult is treated as score ``1``.
@@ -275,7 +280,9 @@ class BenchmarkRunner:
         for task in benchmark.tasks:
             t_start = time.monotonic()
             try:
-                execution = await run_task(task.description)
+                execution = await (
+                    task_runner(task) if task_runner is not None else run_task(task.description)
+                )
                 run_score = None
                 if (
                     isinstance(execution, tuple)

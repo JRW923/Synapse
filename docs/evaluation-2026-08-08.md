@@ -144,3 +144,13 @@ agent patch、private tests、失败原因和超时统一落到任务报告。
 | P1 | SWE-bench patch extractor + isolated checkout/private tests | 得到真正可比的功能分 |
 | P1 | 3-run repeat、seed、成本和置信区间 | 从演示分数变成可复现实验 |
 | P1 | root-cause grader 使用测试/变更证据，而不是 status 成功率 | 让过程分数有解释力 |
+
+## 本轮已执行的 P0/P1 与外部 Harness 调研
+
+- **代码任务 completion gate** 已进入 `ReActPlanner`：可识别的代码修改任务若没有成功的 pytest/test/lint/typecheck 等验证证据，最终状态不会保持 `SUCCESS`。
+- **Task-specific tool subset** 已在 schema 发送前裁剪：代码任务默认只暴露文件、搜索、shell、git、todo、skill，完整 registry 和安全授权仍保持不变。
+- **DeepSeek v4 provider smoke** 已覆盖 Anthropic-compatible 路由、`/anthropic` endpoint、关闭 prompt caching，以及既有 streaming/tool-use/401 retry regression tests。
+- **SWE-bench** 已从“仅加载 JSONL”升级为 clone → checkout → Agent patch → 新 checkout apply → private tests/test command → `TaskGrade` 的闭环，CLI 命令仍要求用户提供本地数据集。
+- **Terminal-Bench 风格适配** 已加入 `terminal_smoke` 和 `terminal_bench`：前者离线可复现，后者支持常见 JSON/JSONL 任务字段和隔离 workspace grader。完整调研、边界和 τ-bench/GAIA/ToolBench/AgentBench/Aider/OpenHands 对比见 `docs/evaluation-harness-research-2026-08-08.md`。
+
+本轮实现是适配层，不是官方 benchmark runner 的替代品：没有把外部数据集、Docker 镜像或 API 环境硬编码进 Synapse，因此报告中的 `official_runner=external` 必须保留，避免把本地 smoke 分数误报为榜单分数。

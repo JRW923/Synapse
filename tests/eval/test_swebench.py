@@ -1,6 +1,7 @@
 """Tests for SWEBenchAdapter and ProcessQualityBenchmark."""
 
 import pytest
+import subprocess
 
 from synapse.eval.runner import BenchmarkTask
 from synapse.protocols.planner import AgentResult, ResultStatus
@@ -87,3 +88,35 @@ async def test_repo_pytest_benchmark_is_reproducible_and_filters_cache_files() -
     assert result.tests_passed is True
     assert all("__pycache__" not in path for path in result.changed_files)
     assert result.run_score == {"efficiency": {"tool_call_count": 1}}
+
+
+def test_swebench_private_test_patch_is_applied(tmp_path):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    (repo / "calculator.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@synapse.local"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Synapse Test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    agent_patch = (
+        "diff --git a/calculator.py b/calculator.py\n"
+        "--- a/calculator.py\n+++ b/calculator.py\n"
+        "@@ -1,2 +1,2 @@\n def add(a, b):\n-    return a + b\n+    return a + b\n"
+    )
+    private_patch = (
+        "diff --git a/test_private.py b/test_private.py\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n+++ b/test_private.py\n"
+        "@@ -0,0 +1,2 @@\n+from calculator import add\n+def test_add(): assert add(2, 3) == 5\n"
+    )
+    result = SWEBenchAdapter.execute(
+        str(repo), commit, agent_patch, {}, private_test_patch=private_patch, timeout=60,
+    )
+    assert result.private_tests_applied is True
+    assert result.passed is True, result.output

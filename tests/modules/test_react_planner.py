@@ -1,13 +1,20 @@
 """Tests for ReAct Planner."""
 import pytest
 from unittest.mock import AsyncMock, patch
-from synapse.modules.planning.react import ReActPlanner
+from synapse.modules.planning.react import ReActPlanner, _looks_like_code_task, _select_tool_schemas
 from synapse.core.session import Session
 from synapse.core.events import EventBus
 from synapse.protocols.llm import LLMResponse, Message
 from synapse.protocols.tool import ToolResult, ToolCallMetadata
 from synapse.protocols.retriever import Context
 from synapse.core.exceptions import ProviderError
+
+
+def test_code_task_detection_and_tool_schema_trim():
+    assert _looks_like_code_task("Fix the bug in calculator.py and run pytest")
+    assert not _looks_like_code_task("Say hello")
+    schemas = [{"name": name} for name in ("read", "shell", "web_search", "browser")]
+    assert [item["name"] for item in _select_tool_schemas(schemas, "Fix calculator.py")] == ["read", "shell"]
 
 
 @pytest.mark.asyncio
@@ -42,6 +49,24 @@ async def test_react_completes_without_tool_calls():
     assert result.status.value == "success"
     assert "I have completed" in result.output
     assert result.metrics.tool_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_code_task_without_verification_is_partial():
+    mock_llm = AsyncMock()
+    mock_llm.chat.return_value = LLMResponse(
+        content="I changed calculator.py.", tool_calls=[], stop_reason="end_turn",
+        usage={"input": 10, "output": 5},
+    )
+    mock_tools = AsyncMock()
+    mock_tools.get_schemas.return_value = [{"name": "shell", "description": "", "input_schema": {}}]
+    result = await ReActPlanner().execute(
+        task="Fix the bug in calculator.py",
+        context=Context(), tools=mock_tools, llm=mock_llm, sandbox=AsyncMock(),
+        session=Session(), event_bus=EventBus(),
+    )
+    assert result.status.value == "partial"
+    assert "验证命令" in result.output
 
 
 @pytest.mark.asyncio
