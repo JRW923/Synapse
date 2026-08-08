@@ -1193,6 +1193,7 @@ def _make_prompt_session():
         from prompt_toolkit.history import FileHistory
         from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
         from prompt_toolkit.key_binding.defaults import load_key_bindings
+        from prompt_toolkit.styles import Style
     except ImportError:
         return None
 
@@ -1248,6 +1249,11 @@ def _make_prompt_session():
             key_bindings=merge_key_bindings([load_key_bindings(), kb]),
             complete_while_typing=True,
             bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 ",
+            show_frame=True,
+            style=Style.from_dict({
+                "frame": "fg:ansibrightcyan",
+                "prompt": "fg:ansibrightcyan bold",
+            }),
         )
     except Exception:
         # No console (e.g. stdin piped, or a non-console host) — degrade to
@@ -1453,10 +1459,10 @@ def _show_welcome(console, config, config_path: str = "", session=None):
 
     def _boxed_line(content="") -> Text:
         value = _fit_text(content, inner)
-        line = Text("│ ")
+        line = Text("│ ", style=_BORDER)
         line.append(value)
         line.append(" " * max(0, inner - value.cell_len))
-        line.append(" │")
+        line.append(" │", style=_BORDER)
         return line
 
     def _plain_line(content: str) -> Text:
@@ -2307,14 +2313,10 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         try:
             if prompt_session is not None:
                 from prompt_toolkit.formatted_text import HTML
-                console.print(_input_frame(console.width, top=True))
-                input_frame_open = True
                 user_input = await prompt_session.prompt_async(
-                    HTML('<ansicyan><b>│ ◆ synapse › </b></ansicyan>'),
-                    prompt_continuation=HTML('<ansicyan>│ </ansicyan>'),
+                    HTML('<ansicyan><b>◆ synapse › </b></ansicyan>'),
+                    prompt_continuation=HTML('<ansicyan> </ansicyan>'),
                 )
-                console.print(_input_frame(console.width, top=False))
-                input_frame_open = False
             elif use_rich:
                 console.print(_input_frame(console.width, top=True))
                 input_frame_open = True

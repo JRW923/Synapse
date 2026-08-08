@@ -246,6 +246,18 @@ def test_welcome_fields_share_a_stable_value_column():
     assert len(set(positions)) == 1
 
 
+def test_welcome_frame_colors_left_and_right_edges():
+    import io
+    from rich.console import Console
+    from synapse.adapters.cli import _show_welcome
+    from synapse.config.schema import SynapseConfig
+
+    console = Console(width=60, file=io.StringIO(), force_terminal=True, record=True)
+    _show_welcome(console, SynapseConfig(), "models.json")
+    html = console.export_html()
+    assert "│</span>" in html
+
+
 def test_input_frame_is_full_width_and_labeled():
     from rich.cells import cell_len
     from synapse.adapters.cli import _input_frame
@@ -255,6 +267,19 @@ def test_input_frame_is_full_width_and_labeled():
     assert "INPUT" in top
     assert cell_len(top) == 80
     assert cell_len(bottom) == 80
+
+
+def test_prompt_toolkit_input_uses_a_real_frame():
+    from unittest.mock import patch
+    import prompt_toolkit
+    from synapse.adapters.cli import _make_prompt_session
+
+    with patch.object(prompt_toolkit, "PromptSession", return_value="session") as factory:
+        assert _make_prompt_session() == "session"
+
+    kwargs = factory.call_args.kwargs
+    assert kwargs["show_frame"] is True
+    assert any(name == "frame" for name, _ in kwargs["style"].style_rules)
 
 
 def test_live_display_renders_token_breakdown_and_iteration():
