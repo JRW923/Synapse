@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icons/synapse_icon_1_black.png" width="160" alt="Synapse logo">
+</p>
+
 # Synapse
 
 > 连接想法与代码 —— 智能模块化 Code Agent
