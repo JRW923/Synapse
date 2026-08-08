@@ -1258,34 +1258,47 @@ def _make_prompt_session():
 # ---- Main interface -------------------------------------------------------
 
 
-#: Synapse block logo. Each glyph is a full terminal cell, so the logo stays
-#: aligned in PowerShell and CJK workspaces without external image assets.
+#: Terminal-native mascot. Each token becomes one full cell, so the image
+#: stays aligned in PowerShell without requiring sixel/kitty image protocols.
 _WELCOME_ART = (
-    "  ███████  ",
-    " █████████ ",
-    "███        ",
-    " ████████   ",
-    "      ███  ",
-    "██    ███  ",
-    " ███████   ",
+    "    KKYYY       YYYKK    ",
+    "   KYYYYY     YYYYYYK   ",
+    "  KYYYYYYK   KYYYYYYK  ",
+    " KYYYYYYYYK KYYYYYYYYK ",
+    "KYYYYYYYYYYYYYYYYYYYYYK",
+    "KYYYRRYYYYYYYYYYYRRYYYK",
+    "KYYYYYYYYYYYYYYYYYYYYYK",
+    " KYYYYYYYYYYYYYYYYYYYK ",
+    "  KYYYYYYYYYYYYYYYYYK  ",
+    "   KYYYYYYYYYYYYYYK   ",
+    "    KYYYYYYYYYYK      ",
+    "     KYYYYYYYK     BB ",
+    "      KYYYYK     BBBBB",
 )
 
 _WELCOME_COMPACT_ART = (
-    " ██████ ",
-    "██     ",
-    " █████  ",
-    "     ██ ",
-    "██████  ",
+    " KYYY   YYYK ",
+    "KYYYYYYYYYYYK",
+    "KYYRYYYYYRYYK",
+    " KYYYYYYYYYK ",
+    "  KYYYYYYK  ",
+    "   KYYYK    ",
+    "    K K  BB ",
 )
 
 _WELCOME_NAME = "Synapse"
 
 #: Brand palette — single place to tweak the CLI look.
-_BRAND = "bright_cyan"          # logo, prompt and current activity
-_INFO = "bright_blue"            # stable workspace/model metadata
-_LABEL = "bold bright_blue"      # metadata labels
-_BORDER = "grey35"               # quiet frame; semantic colors carry attention
-_HINT = "grey70"                 # secondary text / hints
+_BRAND = "bright_cyan"          # prompt, field icons and current activity
+_INFO = "white"                 # stable values and live-panel metadata
+_LABEL = "bold bright_blue"     # all field labels
+_BORDER = "bright_cyan"         # colored outer frame and separators
+_HINT = "grey70"                # secondary text / hints
+_ICON = "bright_cyan"           # one consistent icon family
+_MASCOT_YELLOW = "bright_yellow"
+_MASCOT_RED = "bright_red"
+_MASCOT_DARK = "bright_black"
+_MASCOT_TAIL = "yellow3"
 _SUCCESS = "green"
 _WARNING = "yellow"
 
@@ -1450,20 +1463,34 @@ def _show_welcome(console, config, config_path: str = "", session=None):
         value = _middle(content, width)
         return Text(value + " " * max(0, width - _cell_len(value)))
 
-    def _field(label: str, value: str, limit: int, icon: str = "◆", style: str = _INFO) -> Text:
+    def _field(label: str, value: str, limit: int, style: str = _INFO) -> Text:
         text = Text()
-        text.append(f"{icon} ", style=_BRAND)
+        text.append("◆ ", style=_ICON)
         text.append(f"{label:<10}", style=_LABEL)
         text.append(_middle(value, max(0, limit - text.cell_len)), style=style)
         if text.cell_len < limit:
             text.append(" " * (limit - text.cell_len))
         return text
 
+    def _mascot_line(art_line: str, limit: int) -> Text:
+        styles = {
+            "Y": _MASCOT_YELLOW,
+            "R": _MASCOT_RED,
+            "K": _MASCOT_DARK,
+            "B": _MASCOT_TAIL,
+        }
+        text = Text()
+        for token in art_line:
+            if token in styles:
+                text.append("█", style=styles[token])
+            else:
+                text.append(" ")
+        return _clamp_text_by_cell(text, limit) if text.cell_len > limit else Text.assemble(
+            text, " " * (limit - text.cell_len)
+        )
+
     def _art_line(art_line: str, limit: int, row: int) -> Text:
-        text = Text(_middle(art_line, limit), style=_BRAND if row % 2 == 0 else _INFO)
-        if text.cell_len < limit:
-            text.append(" " * (limit - text.cell_len))
-        return text
+        return _mascot_line(art_line, limit)
 
     if width < 52:
         console.print(_plain_line(f"◆ {_WELCOME_NAME}  {status}"))
@@ -1479,31 +1506,31 @@ def _show_welcome(console, config, config_path: str = "", session=None):
         rows = (
             Text.assemble(
                 _art_line(_WELCOME_ART[0], logo_width, 0), " " * gap,
-                _field("SYNAPSE", f"v{__version__}  ·  {status}", right_width, "◆", status_style),
+                _field("SYNAPSE", f"v{__version__}  ·  {status}", right_width, status_style),
             ),
             Text.assemble(
                 _art_line(_WELCOME_ART[1], logo_width, 1), " " * gap,
-                _field("WORKSPACE", cwd, right_width, "⌂"),
+                _field("WORKSPACE", cwd, right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_ART[2], logo_width, 2), " " * gap,
-                _field("MODEL", f"{provider}/{model}", right_width, "◈"),
+                _field("MODEL", f"{provider}/{model}", right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_ART[3], logo_width, 3), " " * gap,
-                _field("PLANNING", config.planning.mode, right_width, "◇"),
+                _field("PLANNING", config.planning.mode, right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_ART[4], logo_width, 4), " " * gap,
-                _field("SESSION", session_label, right_width, "◎"),
+                _field("SESSION", session_label, right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_ART[5], logo_width, 5), " " * gap,
-                _field("CONFIG", config_label, right_width, "▣", _HINT),
+                _field("CONFIG", config_label, right_width, _HINT),
             ),
             Text.assemble(
                 _art_line(_WELCOME_ART[6], logo_width, 6), " " * gap,
-                _field("TOOLS", f"{tools_count} enabled", right_width, "⚙", _HINT),
+                _field("TOOLS", f"{tools_count} enabled", right_width, _HINT),
             ),
         )
         for row in rows:
@@ -1515,35 +1542,50 @@ def _show_welcome(console, config, config_path: str = "", session=None):
         rows = (
             Text.assemble(
                 _art_line(_WELCOME_COMPACT_ART[0], logo_width, 0), " " * gap,
-                _field("SYNAPSE", f"v{__version__}  ·  {status}", right_width, "◆", status_style),
+                _field("SYNAPSE", f"v{__version__}  ·  {status}", right_width, status_style),
             ),
             Text.assemble(
                 _art_line(_WELCOME_COMPACT_ART[1], logo_width, 1), " " * gap,
-                _field("WORKSPACE", cwd, right_width, "⌂"),
+                _field("WORKSPACE", cwd, right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_COMPACT_ART[2], logo_width, 2), " " * gap,
-                _field("MODEL", f"{provider}/{model}", right_width, "◈"),
+                _field("MODEL", f"{provider}/{model}", right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_COMPACT_ART[3], logo_width, 3), " " * gap,
-                _field("PLANNING", config.planning.mode, right_width, "◇"),
+                _field("PLANNING", config.planning.mode, right_width),
             ),
             Text.assemble(
                 _art_line(_WELCOME_COMPACT_ART[4], logo_width, 4), " " * gap,
-                _field("SESSION", session_label, right_width, "◎"),
+                _field("SESSION", session_label, right_width),
             ),
         )
         for row in rows:
             console.print(_boxed_line(row))
         tail_prefix = " " * (logo_width + gap)
         console.print(_boxed_line(Text.assemble(
-            tail_prefix, _field("CONFIG", config_label, right_width, "▣", _HINT),
+            tail_prefix, _field("CONFIG", config_label, right_width, _HINT),
         )))
         console.print(_boxed_line(Text.assemble(
-            tail_prefix, _field("TOOLS", f"{tools_count} enabled", right_width, "⚙", _HINT),
+            tail_prefix, _field("TOOLS", f"{tools_count} enabled", right_width, _HINT),
         )))
     console.print(Text("╰" + "─" * (width - 2) + "╯", style=_BORDER))
+
+
+def _input_frame(width: int, *, top: bool, rich: bool = True):
+    """Build the input boundary so typed task text has an obvious home."""
+    width = max(int(width or 80), 40)
+    if top:
+        label = " INPUT "
+        remaining = max(0, width - 2 - len(label))
+        raw = "╭" + "─" * (remaining // 2) + label + "─" * (remaining - remaining // 2) + "╮"
+    else:
+        raw = "╰" + "─" * (width - 2) + "╯"
+    if not rich:
+        return raw
+    from rich.text import Text
+    return Text(raw, style=_BORDER)
 
 
 def _show_help(console):
@@ -2261,17 +2303,34 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             console.print()
             _show_welcome(console, config, config_source, session)
 
+        input_frame_open = False
         try:
             if prompt_session is not None:
                 from prompt_toolkit.formatted_text import HTML
+                console.print(_input_frame(console.width, top=True))
+                input_frame_open = True
                 user_input = await prompt_session.prompt_async(
-                    HTML('<ansicyan><b>◆ synapse › </b></ansicyan>')
+                    HTML('<ansicyan><b>│ ◆ synapse › </b></ansicyan>'),
+                    prompt_continuation=HTML('<ansicyan>│ </ansicyan>'),
                 )
+                console.print(_input_frame(console.width, top=False))
+                input_frame_open = False
             elif use_rich:
-                user_input = console.input(f"  [bold {_BRAND}]◆ synapse › [/bold {_BRAND}]")
+                console.print(_input_frame(console.width, top=True))
+                input_frame_open = True
+                user_input = console.input(f"│ [bold {_BRAND}]◆ synapse › [/bold {_BRAND}]")
+                console.print(_input_frame(console.width, top=False))
+                input_frame_open = False
             else:
-                user_input = input("◆ synapse › ")
+                print(_input_frame(80, top=True, rich=False))
+                input_frame_open = True
+                user_input = input("│ ◆ synapse › ")
+                print(_input_frame(80, top=False, rich=False))
+                input_frame_open = False
         except EOFError:
+            if input_frame_open:
+                (console.print(_input_frame(console.width, top=False)) if use_rich
+                 else print(_input_frame(80, top=False, rich=False)))
             # Ctrl+C may cause a spurious EOF on some console hosts.
             if _ctrl_c_pressed:
                 _ctrl_c_pressed = False
@@ -2279,6 +2338,9 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             exiting[0] = True
             break
         except KeyboardInterrupt:
+            if input_frame_open:
+                (console.print(_input_frame(console.width, top=False)) if use_rich
+                 else print(_input_frame(80, top=False, rich=False)))
             # KeyboardInterrupt may still fire if Python's own handler runs
             # despite our SetConsoleCtrlHandler returning TRUE.
             if _ctrl_c_pressed:

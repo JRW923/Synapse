@@ -223,6 +223,8 @@ EventBus 或 assistant 文本追加。
 本轮已按上述边界完成实现：
 
 - `synapse/adapters/cli.py`：首页改为 7 行实心色块 logo（中屏使用 5 行 compact mark），按 92/52 列分档；图标、标签和值使用固定轨道，元数据、readiness、session 和 tools 数量不再动态挤压。
+- 首页字段统一使用 `◆` 图标族；labels 使用 bright blue、values 使用 white、brand/prompt 使用 cyan、状态使用 green/yellow/red，外框统一使用 cyan，避免同一信息类别出现多种颜色。
+- 输入区增加全宽 `INPUT` 框和多行 continuation 边界，Rich 与 prompt-toolkit 两条路径都能明确显示可输入范围。
 - `_LiveDisplay` / `_LiveRun`：任务过程改为圆角 Panel，新增 phase、iteration/max、input/output/total token、elapsed、进度条和最近工具固定列时间线；保留既有 `EventBus`、刷新线程和 token baseline reconciliation。
 - `_print_result`：统一为 `TASK COMPLETE/PARTIAL/FAILED` 收束面板，plain fallback 仍保持无 ANSI 的可读顺序。
 - prompt 更新为 `◆ synapse ›`，未引入 Textual、新依赖或新的事件协议。

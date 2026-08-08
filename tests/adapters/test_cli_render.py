@@ -246,6 +246,17 @@ def test_welcome_fields_share_a_stable_value_column():
     assert len(set(positions)) == 1
 
 
+def test_input_frame_is_full_width_and_labeled():
+    from rich.cells import cell_len
+    from synapse.adapters.cli import _input_frame
+
+    top = _input_frame(80, top=True, rich=False)
+    bottom = _input_frame(80, top=False, rich=False)
+    assert "INPUT" in top
+    assert cell_len(top) == 80
+    assert cell_len(bottom) == 80
+
+
 def test_live_display_renders_token_breakdown_and_iteration():
     import io
     from rich.console import Console
