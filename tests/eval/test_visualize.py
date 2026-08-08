@@ -1,5 +1,6 @@
 """Tests for offline benchmark visualization artifacts."""
 
+import csv
 import json
 
 from synapse.eval.visualize import render_html, render_report_file, write_csv
@@ -48,7 +49,18 @@ def test_visualize_writes_self_contained_html_and_csv(tmp_path):
     html_text = html_path.read_text(encoding="utf-8")
     csv_text = csv_path.read_text(encoding="utf-8-sig")
     assert "<svg" in html_text
-    assert "Category pass rate" in html_text
+    assert "分类通过率 / Category pass rate" in html_text
+    assert "任务结果 / Task results" in html_text
+    assert "工具成功率 / Tool success" in html_text
+    assert "评测报告 / Evaluation Report" in html_text
+    assert "task_id,任务ID" in csv_text
+    assert "cost_estimate_usd,预估成本USD" in csv_text
+    assert "task_id,任务ID" in csv_text.splitlines()[0]
+    assert "成功" in csv_text
+    rows = list(csv.DictReader(csv_text.splitlines()))
+    assert rows[0]["task_id"] == "ok"
+    assert rows[0]["任务ID"] == "ok"
+    assert rows[0]["状态"] == "成功"
     assert "ok" in csv_text and "bad" in csv_text
 
 
