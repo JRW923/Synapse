@@ -14,19 +14,21 @@
 
 ---
 
-## A 30-second summary for recruiters and interviewers
+## What it is
 
 Synapse is an end-to-end Code Agent Harness implemented in Python. It is not a thin LLM API wrapper: **Agent Loop, planning, context, memory, tools, authorization, sandboxing, event streaming, and evaluation** are organized as replaceable runtime components.
 
-The project demonstrates a graduate-level understanding of the full Agent system surface. It can complete coding tasks from a CLI, while protocol boundaries make Providers, Tools, Memory backends, and Planners replaceable. It also includes real tests, Red Team checks, Git fixtures, SWE-bench/Terminal-Bench adapters, and HTML/CSV evaluation evidence.
+You can hand a coding task to it straight from the CLI, or swap Providers, Tools, Memory backends, and Planners along the protocol boundaries and use it as the base layer for your own agent. Every run leaves behind an event stream and a four-dimensional score, so "what did this run actually do, and why does it count as done" is an answerable question.
 
-| Interview concern | Evidence in the repository |
+| Capability | Where it lives |
 | --- | --- |
-| Does it understand an Agent Harness, not only prompting? | `protocols/` contracts, `core/` lifecycle, and replaceable `modules/` |
-| Can model integration become a usable product? | First-run wizard, `~/.synapse/models.json`, multiple providers, fallback/routing |
-| Is security treated as a runtime concern? | Action-time authorization, path/command checks, process containment, HMAC Audit |
-| Can it measure outcomes? | `repo_pytest`, `terminal_smoke`, `terminal_bench`, SWE-bench adapter, Red Team, repeated runs |
-| Is there engineering discipline? | Event observability, four-dimensional run scores, atomic sessions, 434 passed / 1 skipped snapshot |
+| Protocol-first harness structure | `protocols/` contracts, `core/` lifecycle, replaceable `modules/` |
+| Multi-provider integration and hot swapping | First-run wizard, `~/.synapse/models.json`, fallback / routing |
+| Action-time security boundary | Per-call authorization, sensitive path and command-chain checks, process-tree reclamation, HMAC audit |
+| Reproducible evaluation | `repo_pytest`, `terminal_smoke`, `terminal_bench`, SWE-bench adapter, Red Team, repeated runs |
+| Observability | EventBus events, four-dimensional run scores, atomic session persistence |
+
+Size: ~18.6k lines of Python under `synapse/`, 73 test files / 431 test functions (435 collected cases after parametrization), snapshot `434 passed, 1 skipped`.
 
 ## What makes it interesting
 
@@ -162,7 +164,7 @@ synapse/
 
 ## Boundaries and future work
 
-The project deliberately keeps a few honest boundaries, which are also useful interview topics:
+These boundaries are deliberate and explicitly labelled. Check that they fit your use case before relying on the harness:
 
 - The default `process` sandbox primarily contains process trees; it is not default Docker filesystem isolation.
 - SWE-bench / Terminal-Bench are local dataset adapters; official images, dataset versions, and complete runners remain external.
@@ -172,26 +174,31 @@ The project deliberately keeps a few honest boundaries, which are also useful in
 
 Priority follow-ups are Git checkpoint/rollback, a typed retry classifier, HTTP SSRF policy, cross-platform strong-sandbox CI, reproducible SWE-bench samples, and EventBus-based timeline/DAG visualization. There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
 
-## Interview prompts
+## Design trade-offs
 
-1. **Why authorize at action time?** A tool schema describes capability, not the side effects of these arguments; risk must be evaluated with paths, commands, and external-service configuration on every call.
-2. **Why is Swarm not the default?** Decomposition, duplicated context, merge conflicts, and review tokens can cost more than parallelism; one Agent is often more reliable for small tasks.
-3. **What is the difference between process containment and a filesystem sandbox?** Windows Job Objects and Unix process groups reclaim child processes but do not automatically restrict files or network; strong isolation needs an explicit backend.
-4. **How do you prove completion?** Combine a functional grader, test evidence, and runtime scores instead of trusting the Agent's final text.
+**Why authorize at action time instead of tool-registration time?** A tool schema describes capability, not whether these particular arguments are safe. The same shell tool running `ls` and `curl x | bash` carries entirely different risk, so risk is recomputed on every call from the actual arguments, paths, command chain, and external-service configuration.
 
-## Documentation and checks
+**Why is Swarm not the default?** Decomposition, duplicated context, merge conflicts, and review tokens frequently cost more than parallelism buys on small tasks, and a single Agent is more stable. ReAct is the default; Swarm requires an explicit `--mode swarm`.
+
+**What is the difference between process containment and a filesystem sandbox?** Windows Job Objects and Unix process groups guarantee child processes are reclaimed, but do not restrict file or network access. Strong isolation requires explicitly selecting the Docker, bubblewrap, or Seatbelt backend.
+
+**How do you know a task is actually complete?** The runtime gate reads tool exit codes, not the phrase "done" in model output. The evaluation grader runs independently after the Agent finishes, and first confirms the baseline fails so a passing-anyway test cannot produce a false positive.
+
+## Documentation
 
 - Documentation index: [docs/文档索引.md](docs/文档索引.md)
 - Harness review: [docs/架构审查/harness-review-2026-08-08.md](docs/架构审查/harness-review-2026-08-08.md)
 - Evaluation research: [docs/评测/evaluation-harness-research-2026-08-08.md](docs/评测/evaluation-harness-research-2026-08-08.md)
 - UX review: [docs/产品体验/ux-review-and-plan-2026-08-08.md](docs/产品体验/ux-review-and-plan-2026-08-08.md)
 
+## Local verification
+
 ```bash
 pytest -q
 python -m compileall -q synapse
 ```
 
-Current verification snapshot: `434 passed, 1 skipped`. Optional providers, vector stores, browser support, and strong sandboxes are installed on demand; the core evaluation loop can start with offline fixtures.
+Optional providers, vector stores, browser support, and strong sandboxes are installed on demand. Without an external dataset you can start with the offline fixture (`terminal_smoke`) to verify the harness path end to end.
 
 ## License
 

@@ -125,13 +125,15 @@ class Agent:
             try:
                 report = self._citation_tracker.report(context)
                 await self._budget_history.record(self._last_task_type, report)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Adaptive budget tuning is best-effort, but a silent failure
+                # means budgets stop adapting with no visible symptom.
+                await self._emit_warning(session, "budget_history_failed", exc)
 
         # 4. Persist session memory
         await self._persist_memory(session, task, result)
 
-        # TODO B — verify process quality; the hint is stored to PROJECT memory
+        # 5. Verify process quality; the hint is stored to PROJECT memory
         # and re-injected into the next task's prompt by the retriever.
         if self._quality_verifier is not None:
             try:
@@ -139,10 +141,26 @@ class Agent:
                     task, result.status == ResultStatus.SUCCESS,
                     session_id=session.id if session else "",
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                await self._emit_warning(session, "quality_verify_failed", exc)
 
         return result
+
+    async def _emit_warning(self, session: Session, phase: str, exc: BaseException) -> None:
+        """Surface a best-effort failure as an event instead of swallowing it.
+
+        These paths must not fail the task, but they must not be invisible
+        either — the EventBus is the one place CLI, audit and eval all read.
+        """
+        from synapse.protocols.events import AgentProgress
+        try:
+            await self.event_bus.emit(AgentProgress(
+                session_id=session.id if session else "",
+                phase=phase,
+                message=f"{type(exc).__name__}: {exc}",
+            ))
+        except Exception:
+            pass  # emitting a warning must never mask the original result
 
     async def _build_budget(self, task: str = "") -> "ContextBudget":
         """Construct a ContextBudget from config + task classification.
@@ -155,10 +173,11 @@ class Agent:
         from synapse.modules.context.budget import select_budget
 
         if self._context_cfg is None:
-            # No config — use the classifier against default total.
+            # No config — classify against the protocol's own default total so
+            # there is exactly one place defining "default budget".
             task_type = classify_task(task) if task else TaskType.UNKNOWN
             self._last_task_type = task_type
-            return select_budget(task_type, total_tokens=100_000)
+            return select_budget(task_type, total_tokens=ContextBudget().total_tokens)
 
         cfg = self._context_cfg.context
         total = cfg.total_tokens
@@ -171,6 +190,13 @@ class Agent:
 
         # Apply historical adjustments (no-op until enough samples).
         return await self._budget_history.suggest_adjustment(task_type, base)
+
+    def _retrieval_timeout(self) -> float:
+        """Wall-clock cap for retrieval, from config or the schema default."""
+        from synapse.config.schema import ContextConfig
+        if self._context_cfg is None:
+            return ContextConfig().retrieval_timeout_seconds
+        return self._context_cfg.context.retrieval_timeout_seconds
 
     def _resolve_compactor(self, overflow_chars: int):
         """Pick the compactor based on config strategy and overflow size."""
@@ -206,7 +232,7 @@ class Agent:
                     memory=self.memory,
                     budget=budget,
                 ),
-                timeout=10,
+                timeout=self._retrieval_timeout(),
             )
         except asyncio.TimeoutError:
             # Fallback: minimal SYSTEM-only context (read README/AGENTS.md).

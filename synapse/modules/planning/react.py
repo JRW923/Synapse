@@ -58,7 +58,7 @@ def _working_directory(auth) -> str:
     return str(Path.cwd())
 
 
-def _summarize_params(params: dict) -> str:
+def summarize_params(params: dict) -> str:
     """Summarize tool params for logging (truncate long values)."""
     parts = []
     for k, v in params.items():
@@ -587,7 +587,7 @@ class ReActPlanner:
                 ))
 
                 t0 = time.time()
-                self._log(f"  → {tool_name}({_summarize_params(tool_input)})")
+                self._log(f"  → {tool_name}({summarize_params(tool_input)})")
                 try:
                     denied_result = None
                     tool = await self._maybe_await(tools.get(tool_name))

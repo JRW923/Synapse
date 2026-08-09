@@ -162,7 +162,7 @@ async def test_run_task_streamed_shows_phase_and_tool_timeline():
 @pytest.mark.asyncio
 async def test_swarm_tracker_renders_lifecycle():
     """_SwarmTracker turns swarm events into compact panel lines and cleans up."""
-    from synapse.adapters.cli import _SwarmTracker
+    from synapse.adapters.cli_render import _SwarmTracker
     from synapse.protocols.events import (
         WorkerSpawned, WorkerCompleted, ReviewSubmitted, SwarmVerified,
     )

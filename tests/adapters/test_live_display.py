@@ -10,7 +10,7 @@ import io
 
 from rich.console import Console
 
-from synapse.adapters.cli import _LiveDisplay
+from synapse.adapters.cli_render import _LiveDisplay
 
 
 def _make_display():

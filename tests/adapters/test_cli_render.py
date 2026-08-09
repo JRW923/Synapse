@@ -1,6 +1,7 @@
 """Tests for CLI result rendering helpers (status color + _print_result)."""
 
-from synapse.adapters.cli import _status_style_for, _print_result
+from synapse.adapters.cli import _print_result
+from synapse.adapters.cli_render import _status_style_for
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
 
 
@@ -44,7 +45,7 @@ def test_live_display_is_transient():
     """A stopped panel must erase itself so panels never stack up."""
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     live = _LiveDisplay(Console(file=io.StringIO(), width=80),
                         lambda: "1.2k", lambda: "12s")
@@ -56,7 +57,7 @@ def test_live_display_restartable():
     thread is recreated each start, so a Thread isn't started twice."""
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     live = _LiveDisplay(Console(file=io.StringIO(), width=80),
                         lambda: "1.2k", lambda: "12s")
@@ -69,7 +70,7 @@ def test_live_display_restartable():
 def test_spinner_advances_for_in_progress():
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     live = _LiveDisplay(Console(file=io.StringIO(), width=80),
                         lambda: "1.2k", lambda: "12s")
@@ -84,7 +85,7 @@ def test_spinner_advances_for_in_progress():
 def test_final_state_uses_static_dot():
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay, _SPINNER
+    from synapse.adapters.cli_render import _LiveDisplay, _SPINNER
 
     live = _LiveDisplay(Console(file=io.StringIO(), width=80),
                         lambda: "1.2k", lambda: "12s")
@@ -122,7 +123,7 @@ def test_live_display_bounds_single_large_chunk():
     (previously a >4000-char token block grew the buffer without limit)."""
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     cap = _LiveDisplay._MAX_BUF_CHARS
     live = _LiveDisplay(Console(file=io.StringIO(), width=80), lambda: "", lambda: "")
@@ -134,7 +135,7 @@ def test_live_display_bounds_single_large_chunk():
 def test_live_display_bounds_and_renders_timeline():
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     live = _LiveDisplay(Console(file=io.StringIO(), width=80), lambda: "", lambda: "")
     for i in range(10):
@@ -151,7 +152,7 @@ def test_live_display_coalesces_token_refreshes():
     import io
     from unittest.mock import Mock
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     live = _LiveDisplay(Console(file=io.StringIO(), width=80), lambda: "", lambda: "")
     live._live.update = Mock()
@@ -285,7 +286,7 @@ def test_prompt_toolkit_input_uses_a_real_frame():
 def test_live_display_renders_token_breakdown_and_iteration():
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay
+    from synapse.adapters.cli_render import _LiveDisplay
 
     display = _LiveDisplay(
         Console(file=io.StringIO(), width=80),
@@ -308,7 +309,7 @@ def test_live_display_renders_token_breakdown_and_iteration():
 def test_live_system_metadata_uses_a_distinct_neutral_style():
     import io
     from rich.console import Console
-    from synapse.adapters.cli import _LiveDisplay, _SYSTEM
+    from synapse.adapters.cli_render import _LiveDisplay, _SYSTEM
 
     display = _LiveDisplay(
         Console(file=io.StringIO(), width=80),
@@ -336,7 +337,7 @@ def test_result_summary_uses_system_style():
 
 
 def test_token_count_format_is_compact_and_stable():
-    from synapse.adapters.cli import _format_token_count
+    from synapse.adapters.cli_render import _format_token_count
 
     assert _format_token_count(42) == "42"
     assert _format_token_count(1_200) == "1.2k"

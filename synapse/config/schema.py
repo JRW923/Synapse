@@ -128,6 +128,9 @@ class ContextConfig(BaseModel):
     compaction_strategy: str = "truncation"
     # Only invoke LLM compactor when overflow total chars exceed this threshold.
     llm_compact_threshold_chars: int = 1000
+    # Wall-clock cap on retrieval. On timeout the Agent degrades to a minimal
+    # SYSTEM-only context rather than blocking the task.
+    retrieval_timeout_seconds: float = 10.0
 
 
 class SecurityConfig(BaseModel):

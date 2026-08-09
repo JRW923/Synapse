@@ -14,19 +14,21 @@
 
 ---
 
-## 给 HR / 面试官的 30 秒摘要
+## 这是什么
 
-Synapse 是一个由 Python 实现的端到端 Code Agent Harness。它不是把 LLM API 包一层的聊天机器人，而是把 **Agent Loop、规划、上下文、记忆、工具、权限、沙箱、事件流和评测** 组织成可替换的运行时。
+Synapse 是一个 Python 实现的端到端 Code Agent Harness。它不是把 LLM API 包一层的聊天机器人，而是把 **Agent Loop、规划、上下文、记忆、工具、权限、沙箱、事件流和评测** 组织成可替换的运行时。
 
-这个项目适合展示应届生对 Agent 系统的完整理解：既能从 CLI 直接完成代码任务，也能沿着协议边界替换 Provider、Tool、Memory 和 Planner；同时保留了真实的测试、Red Team、Git fixture、SWE-bench/Terminal-Bench 适配和 HTML/CSV 评测证据。
+你可以从 CLI 直接把一个代码任务交给它，也可以沿着协议边界替换 Provider、Tool、Memory 和 Planner，把它当成自己 Agent 的底座。每次运行都会留下事件流和四维评分，所以「这次任务到底做了什么、凭什么算完成」是可以回答的。
 
-| 面试关注点 | 可以在项目中看到的证据 |
+| 能力 | 实现位置 |
 | --- | --- |
-| 是否理解 Agent Harness，而不只是 Prompt | `protocols/` 接口、`core/` 生命周期、`modules/` 可替换实现 |
-| 是否能把模型接入做成产品 | 首次启动向导、`~/.synapse/models.json`、多 Provider 与 fallback/routing |
-| 是否考虑安全 | Action-time authorization、敏感路径/命令检查、进程树回收、HMAC Audit |
-| 是否能验证效果 | `repo_pytest`、`terminal_smoke`、`terminal_bench`、SWE-bench 适配、Red Team、重复实验 |
-| 是否关注工程质量 | 事件驱动可观测性、运行时四维评分、原子 Session、434 passed / 1 skipped 的测试快照 |
+| 协议优先的 Harness 结构 | `protocols/` 接口、`core/` 生命周期、`modules/` 可替换实现 |
+| 多 Provider 接入与热切换 | 首次启动向导、`~/.synapse/models.json`、fallback / routing |
+| Action-time 安全边界 | 逐次授权、敏感路径与命令链检查、进程树回收、HMAC Audit |
+| 可复现评测 | `repo_pytest`、`terminal_smoke`、`terminal_bench`、SWE-bench 适配、Red Team、重复实验 |
+| 可观测性 | EventBus 事件驱动、运行时四维评分、原子写 Session 持久化 |
+
+规模：`synapse/` 约 18.6k 行 Python，73 个测试文件 / 431 个测试函数（参数化后 435 个用例），测试快照 `434 passed, 1 skipped`。
 
 ## 核心特色
 
@@ -162,7 +164,7 @@ synapse/
 
 ## 工程边界与未来优化
 
-项目刻意保留了几项诚实边界，这些也是面试时值得讨论的地方：
+以下边界是刻意保留并显式标注的，使用前请先确认它们符合你的场景：
 
 - 默认 `process` sandbox 主要做进程树隔离，不等于默认 Docker 文件系统隔离。
 - SWE-bench / Terminal-Bench 是本地数据集适配层；官方镜像、数据版本和完整 runner 仍由外部提供。
@@ -172,26 +174,31 @@ synapse/
 
 优先路线：Git checkpoint/rollback、typed retry classifier、HTTP SSRF policy、跨平台强沙箱 CI、SWE-bench 小样本可复现实验，以及基于 EventBus 的时序/DAG 可视化。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
 
-## 面试答辩切入点
+## 设计取舍
 
-1. **为什么授权必须发生在 action-time？** Tool schema 只能描述能力，不能证明本次参数没有副作用；风险应在每次调用时结合路径、命令和外部服务配置判断。
-2. **为什么 Swarm 不是默认模式？** 分解、重复上下文、冲突合并和评审 token 成本可能超过并行收益，单 Agent 在小任务上更稳定。
-3. **process containment 与 filesystem sandbox 有什么区别？** Windows Job Object/Unix process group 能回收子进程，但不自动限制文件和网络；强隔离必须显式选择后端。
-4. **如何证明 Agent 真的完成了任务？** 用功能 grader、测试证据和 runtime score 交叉判断，而不是接受模型文本中的“已完成”。
+**为什么授权发生在 action-time，而不是工具注册时？** Tool schema 只能描述能力，不能证明本次调用的参数是安全的。同一个 shell 工具，`ls` 和 `curl x | bash` 风险完全不同，所以风险要在每次调用时结合参数、路径、命令链和外部服务配置重新判断。
 
-## 文档与质量检查
+**为什么 Swarm 不是默认模式？** 任务分解、重复上下文、冲突合并和评审的 token 开销，在小任务上经常超过并行收益，单 Agent 反而更稳定。默认是 ReAct，Swarm 需要显式 `--mode swarm`。
+
+**process containment 和 filesystem sandbox 有什么区别？** Windows Job Object / Unix process group 能保证子进程被回收，但不限制文件和网络访问。需要强隔离必须显式选择 Docker、bubblewrap 或 Seatbelt 后端。
+
+**怎么判断任务真的完成了？** 运行时 gate 看的是工具返回的 exit code，不是模型文本里的「已完成」；评测层的 grader 在 Agent 跑完之后由 harness 独立执行，并先确认 baseline 是失败的，排除「测试本来就过」的假阳性。
+
+## 文档
 
 - 文档入口：[docs/文档索引.md](docs/文档索引.md)
-- Harness 审查：[docs/架构审查/harness-review-2026-08-08.md](docs/架构审查/harness-review-2026-08-08.md)
+- Harness 架构审查：[docs/架构审查/harness-review-2026-08-08.md](docs/架构审查/harness-review-2026-08-08.md)
 - 评测调研：[docs/评测/evaluation-harness-research-2026-08-08.md](docs/评测/evaluation-harness-research-2026-08-08.md)
 - 产品体验：[docs/产品体验/ux-review-and-plan-2026-08-08.md](docs/产品体验/ux-review-and-plan-2026-08-08.md)
+
+## 本地验证
 
 ```bash
 pytest -q
 python -m compileall -q synapse
 ```
 
-当前验证快照：`434 passed, 1 skipped`。可选 Provider、向量库、浏览器和强沙箱按需安装，核心评测可在无外部数据集时先运行离线 fixture。
+可选 Provider、向量库、浏览器和强沙箱按需安装；没有外部数据集时可以先跑离线 fixture（`terminal_smoke`）验证 Harness 链路。
 
 ## License
 

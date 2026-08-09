@@ -42,7 +42,7 @@ def _parse_field(field: str, lo: int, hi: int) -> list[int]:
 def _match(expr: str, dt: datetime) -> bool:
     fields = expr.split()
     if len(fields) != 5:
-        raise ValueError(f"cron 表达式需 5 字段，得到 {len(fields)}: {expr!r}")
+        raise ValueError(f"cron expression needs 5 fields, got {len(fields)}: {expr!r}")
     minutes = _parse_field(fields[0], 0, 59)
     hours = _parse_field(fields[1], 0, 23)
     days = _parse_field(fields[2], 1, 31)
@@ -78,7 +78,7 @@ def next_trigger(after: datetime, expr: str) -> datetime:
         if _match(expr, cand):
             return cand
         cand += timedelta(minutes=1)
-    raise ValueError(f"cron 表达式一年内无匹配: {expr!r}")
+    raise ValueError(f"cron expression has no match within one year: {expr!r}")
 
 
 class CronScheduler:
