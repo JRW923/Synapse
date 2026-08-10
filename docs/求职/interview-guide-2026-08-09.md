@@ -278,32 +278,32 @@
 
 ---
 
-## 七、简历素材优化稿（追加版，不替换上文）
+## 七、简历素材优化稿
 
-以下内容用于直接追加到简历或项目经历中；前面的原始素材完整保留。项目描述压缩为更容易被 HR 快速读完的版本，核心贡献改为带有背景、行动和结果的 STAR 完整句子。
+### 7.1 项目名称与技术栈
 
-### 7.1 项目描述（精简版）
+**Synapse：本地可观测 Code Agent Harness**
 
-> **Synapse｜可观测、可扩展、可评测的 Code Agent Harness（个人项目）**
-> 独立设计并实现 Python Code Agent 运行时，通过 Protocol 接口解耦 LLM、Tool、Memory、Planner 与 Sandbox，支持 6 家 Provider、4 种规划模式和 MCP 扩展。
-> 围绕代码任务补齐 action-time 授权、完成度验证、上下文治理、事件流与四维运行时评分，避免仅凭模型文本判断任务成功。
-> 搭建临时 Git 仓库、pytest、SWE-bench / Terminal-Bench 适配的评测闭环，支持重复实验并输出 Pass@k、95% 置信区间、Token/cost 及双语 HTML/CSV 报告；当前测试结果为 `434 passed, 1 skipped`。
+**核心技术**：Python 3.11+、Agent Harness、Tool Calling、Context Management、Session Resume、Layered Memory、EventBus、Run Score、MCP、pytest。
 
-### 7.2 核心贡献（STAR 完整句，建议挑 3 条）
+### 7.2 项目描述（精简版）
 
-1. **完成度验证 Gate**：当模型经常返回“已完成”但没有实际测试证据时，我在 ReAct Planner 中加入代码任务完成度 Gate，并要求工具返回可验证的 pytest、lint 或 typecheck 结果；因此成功判定不再依赖模型自述，评测层还能用独立 grader 二次复核。
-2. **Action-time 授权**：当静态 Tool 风险等级无法覆盖 `ls` 与 `curl | bash` 这类不同参数风险时，我在每次调用时解析命令链、重定向目标和工作区路径并重新授权；因此危险操作能够被阻断，正常测试命令仍可通过显式确认继续执行。
-3. **可复现评测**：当一次成功运行无法说明 Agent 是否稳定时，我搭建临时 Git 仓库和 pytest grader，并加入 `--repeat N`、Pass@k 与 Wilson 95% 置信区间统计；因此模型表现、工具调用、Token/cost 和失败原因可以被重复实验和可视化报告复核。
-4. **协议化架构**：当项目需要在不同模型、规划策略和工具之间切换时，我用 Protocol 与轻量 IoC Container 划分运行时边界，并让 EventBus 统一连接 CLI、HTTP、Audit 和 Metrics；因此新增 Provider 或 Planner 时无需改动 Agent 主流程，运行过程也能被统一追踪。
-5. **上下文治理**：当仓库规模和对话历史导致上下文接近预算上限时，我组合 Git-aware 检索、AST symbol、预算分区和 compaction，并在检索超时时降级到最小 SYSTEM 上下文；因此长任务不会因单次检索阻塞而直接失败，同时保留了可解释的降级事件。
+面向代码仓库长链路任务开发本地 Code Agent Harness，围绕模型接入、工具调用、上下文管理、会话恢复、分层记忆、运行审计和评测闭环进行系统化设计，重点解决多轮任务中的 prompt 膨胀、重复读文件、状态丢失、工具副作用不可控和结果难复盘问题。
 
-### 7.3 更短的一句话版本
+### 7.3 核心职责与贡献（STAR 完整句，建议挑 3-4 条）
 
-> 独立实现可观测、可评测的 Code Agent Harness，重点解决 Agent 的工具授权、完成度验证和评测复现问题，并以 Protocol、EventBus 和多层上下文治理支撑 Provider、Planner 与 Tool 的可替换扩展。
+1. **Agent Harness 架构设计**：面对模型、规划和工具实现彼此耦合的问题，我用 Protocol、IoC Container 和 EventBus 划分边界；因此系统可切换 6 家 Provider、4 种规划模式并接入 MCP，扩展时无需修改 Agent 主流程。
+2. **长上下文治理**：面对长任务中 prompt 膨胀和重复读取仓库的问题，我实现 Git-aware 检索、AST symbol、预算分区和 compaction；因此上下文能在预算内运行，检索超时也可降级并留下事件记录。
+3. **状态与记忆管理**：面对多轮任务状态丢失和重复确认已知事实的问题，我实现四层 Memory、原子持久化和 `/resume` 恢复；因此会话可以安全续接，项目规则与过程反馈也能跨任务复用。
+4. **工具安全与运行治理**：面对越界读写和高副作用命令风险，我在 action-time 校验命令链、重定向、敏感路径和工作区范围，并接入进程树隔离与 HMAC Audit；因此高风险操作可被拦截或要求确认，执行过程也可追溯。
+5. **评测与审计闭环**：面对一次跑通无法说明 Agent 稳定性的问题，我搭建 Git + pytest grader、SWE-bench / Terminal-Bench 适配和重复实验；因此可分别复核模型、Harness 与 grader，并输出 Pass@k、95% CI、Token/cost 及 HTML/CSV 报告。
 
-### 7.4 使用建议
+### 7.4 一句话版本
 
-- **简历空间紧张**：使用 7.1 的标题和前两条正文，再从 7.2 选择 3 条贡献。
-- **偏后端 / 基础架构岗位**：优先保留 7.2 的 1、2、4 条，突出运行时控制和边界设计。
-- **偏 AI 应用 / Agent 岗位**：优先保留 7.2 的 1、3、5 条，突出完成判定、评测和上下文工程。
-- **不要把所有数字都塞进简历**：`6 家 Provider`、`434 passed` 和 `Pass@k` 选最能证明岗位匹配度的 1-2 个，剩余数字留到面试追问时展开。
+独立实现本地可观测 Code Agent Harness，重点解决长链路任务中的上下文膨胀、状态恢复、工具安全和结果复盘问题，并通过 Protocol、EventBus 和可复现评测闭环支撑多 Provider 与多 Planner 扩展。
+
+### 7.5 投递时的取舍
+
+- **后端 / 基础架构岗位**：保留 7.3 的 1、3、4 条，突出运行时边界、状态持久化和安全治理。
+- **AI 应用 / Agent 岗位**：保留 7.3 的 1、2、5 条，突出 Harness、Context Engineering 和评测方法。
+- **简历空间有限**：保留项目描述、技术栈和 3 条贡献；`434 passed, 1 skipped`、Pass@k 及成本数据留作面试中的可核验补充。
