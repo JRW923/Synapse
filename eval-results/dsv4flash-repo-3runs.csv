@@ -1,4 +1,0 @@
-﻿task_id,任务ID,category,分类,status,状态,passed,通过,score,得分,duration_ms,耗时毫秒,tokens_input,输入Token,tokens_output,输出Token,tool_call_count,工具调用数,tool_success_count,工具成功数,cost_estimate_usd,预估成本USD,process_score,过程得分,safety_violations,安全事件数
-calculator-add#1,calculator-add#1,functional,functional,success,成功,True,是,1.0,1.0,5993,5993,2004,2004,860,860,4,4,4,4,0.018912,0.018912,1.0,1.0,0,0
-calculator-add#2,calculator-add#2,functional,functional,success,成功,True,是,1.0,1.0,6310,6310,2073,2073,889,889,4,4,4,4,0.019554,0.019554,1.0,1.0,0,0
-calculator-add#3,calculator-add#3,functional,functional,success,成功,True,是,1.0,1.0,5892,5892,2207,2207,947,947,4,4,4,4,0.020826,0.020826,1.0,1.0,0,0
