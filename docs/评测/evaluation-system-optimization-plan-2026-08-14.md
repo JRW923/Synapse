@@ -10,11 +10,11 @@
 | P0 统计语义 | 核心基础设施已实现 | task/attempt 分层、Pass@k/Pass^k、两级 95% CI、误报验证状态 |
 | P1 配对 A/B | 核心基础设施已实现 | 多指标、随机交错、任务级配对统计、可比性 gate、workspace baseline |
 | P2 报告与治理 | 核心基础设施已实现 | dataset manifest、复合 grader 指纹、报告脱敏、Token/成本来源、Benchmark HTML/CSV |
-| P3 消融与外部 Harness | 基础设施已完成 | 显式模块开关、可信命令 opt-in、进程树回收、任务切片、baseline preflight、HTML 报告与红队指标 |
-| P4 正式 Benchmark | 仓库内运行契约已实现 | 冻结 manifest、预注册、grader 校准、artifact store、repository-cluster；正式外部运行待执行 |
+| P3 消融与外部 Harness | 链路 pilot 已完成 | 显式模块开关、可信命令 opt-in、进程树回收、Windows Python 兼容回归、任务切片、baseline preflight、HTML 报告与红队指标 |
+| P4 正式 Benchmark | 单题冻结 fixture pilot 已执行 | 冻结 manifest、预注册、grader 校准、artifact store、repository-cluster；多任务官方 runner 仍待执行 |
 | P5 持续治理 | 基础设施已实现 | append-only run registry、完整性校验、series 趋势/漂移、基线审批字段与分层 CI |
 
-当前完成的是评测基础设施和确定性回归，尚未运行冻结数据集上的正式模型或跨 Harness 实验，因此不能声称通过率、Token、耗时或安全性已提升某个百分比。
+已在冻结的单题 `repo_pytest` fixture 上完成真实模型 smoke 和 Aider 跨 Harness pilot，均由外部 pytest grader 验证；样本量为 1、每模型每 Harness 仅 1 次，且 Aider 未返回 Token/成本，不能据此比较 Harness 优劣或声称任何百分比提升。正式多任务、固定镜像的官方 benchmark 仍待执行。
 
 ## 一、目标与边界
 
@@ -337,4 +337,4 @@ P3 仓库内遗留已收口：已冻结 Memory follow-up fixture 和 manifest，
 - `python -m compileall -q synapse`、冻结 Memory manifest 完整性校验和 `git diff --check` 通过；后者仅报告现有 LF/CRLF 转换提示。
 - 测试仍有 FastAPI `on_event`、Starlette TestClient 弃用警告，以及 Windows 下 Qdrant 临时 `.lock` 文件在解释器回收阶段的清理警告；均未导致测试失败。官方数据集 runner 和真实 MCP/外部模型环境仍需在目标环境单独验证。
 - 当前环境未安装 `ruff`，因此不能声称静态检查通过。
-- 当前完成的是 P0-P5 的仓库内评测、治理和 CI 基础设施，尚未运行冻结正式数据集上的模型/跨 Harness 实验，因此不能声称通过率、Token、耗时或安全性已提升某个百分比。
+- 已验证 Windows 命令适配器可启动导入 `asyncio` 的 Python Harness，并完成 DeepSeek Flash/Pro 在 `repo_pytest` 单题 fixture 上的 Synapse 与 Aider pilot；该链路证据不替代正式多任务 benchmark，不能产生 Harness 排名或百分比效果结论。

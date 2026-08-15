@@ -8,7 +8,7 @@
 > 验证状态、延迟 median/P95、Token/成本 provenance、dataset manifest 和可复现指纹。A/B 已改为随机交错的配对
 > 多指标实验，不再使用独立样本 t-test。
 
-> 2026-08-15 更新：补齐评测治理闭环。新增冻结 dataset manifest、实验预注册与保守样本量估算、grader golden-case 校准、失败产物内容寻址存储、append-only run registry、series 趋势/漂移分析和 repository-cluster bootstrap；CI 已按 PR/Nightly/Weekly/Release 分层。上述能力是运行与审计基础设施，尚未产生新的正式模型或跨 Harness 成绩。
+> 2026-08-15 更新：补齐评测治理闭环。新增冻结 dataset manifest、实验预注册与保守样本量估算、grader golden-case 校准、失败产物内容寻址存储、append-only run registry、series 趋势/漂移分析和 repository-cluster bootstrap；CI 已按 PR/Nightly/Weekly/Release 分层。随后在冻结单题 `repo_pytest` fixture 上完成 DeepSeek Flash/Pro 的 Synapse smoke 与 Aider pilot，均由独立 pytest grader 验证。该结果只验证真实调用与跨 Harness 链路，不能外推正式模型成绩或 Harness 优劣。
 
 ## 结论先行
 

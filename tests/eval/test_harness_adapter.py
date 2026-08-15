@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -145,6 +146,30 @@ async def test_command_adapter_sends_request_and_normalizes_result(tmp_path: Pat
     assert "test_patch" not in request["metadata"]
     assert "grader_command" not in request["metadata"]
     assert str(tmp_path.resolve()) not in json.dumps(adapter.to_config())
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object regression")
+async def test_command_adapter_starts_python_asyncio_on_windows(tmp_path: Path) -> None:
+    response = json.dumps(_response())
+    adapter = _trusted_adapter([
+        sys.executable,
+        "-c",
+        "import asyncio,json,sys; json.load(sys.stdin); print(sys.argv[1])",
+        response,
+    ])
+
+    result, _run_score = await adapter.run(
+        task_id="asyncio",
+        task="start asyncio",
+        workspace=tmp_path,
+        seed=1,
+        budgets={},
+        permissions={},
+        agent_input={},
+    )
+
+    assert result.status == ResultStatus.SUCCESS
 
 
 @pytest.mark.asyncio

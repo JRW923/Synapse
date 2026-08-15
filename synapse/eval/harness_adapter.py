@@ -57,7 +57,7 @@ class HarnessProtocolError(HarnessAdapterError):
 
 
 class _WindowsJob:
-    """Start a process suspended, then contain it in a kill-on-close Job."""
+    """Contain an external process tree in a kill-on-close Job."""
 
     def __init__(self) -> None:
         import ctypes
@@ -100,7 +100,6 @@ class _WindowsJob:
         self._wintypes = wintypes
         self._lock = threading.Lock()
         self._kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self._ntdll = ctypes.WinDLL("ntdll")
         self._kernel32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
         self._kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         self._kernel32.SetInformationJobObject.argtypes = (
@@ -115,9 +114,6 @@ class _WindowsJob:
         self._kernel32.TerminateJobObject.restype = wintypes.BOOL
         self._kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         self._kernel32.CloseHandle.restype = wintypes.BOOL
-        self._ntdll.NtResumeProcess.argtypes = (wintypes.HANDLE,)
-        self._ntdll.NtResumeProcess.restype = wintypes.LONG
-
         handle = self._kernel32.CreateJobObjectW(None, None)
         if not handle:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -131,13 +127,10 @@ class _WindowsJob:
             raise ctypes.WinError(error)
         self._handle = handle
 
-    def assign_and_resume(self, process: subprocess.Popen) -> None:
+    def assign(self, process: subprocess.Popen) -> None:
         process_handle = self._wintypes.HANDLE(int(process._handle))  # type: ignore[attr-defined]
         if not self._kernel32.AssignProcessToJobObject(self._handle, process_handle):
             raise self._ctypes.WinError(self._ctypes.get_last_error())
-        status = int(self._ntdll.NtResumeProcess(process_handle))
-        if status != 0:
-            raise OSError(f"NtResumeProcess failed with status 0x{status & 0xffffffff:08x}")
 
     def terminate(self) -> None:
         with self._lock:
@@ -366,10 +359,9 @@ class CommandHarnessAdapter:
             creationflags = 0
             if os.name == "nt":
                 windows_job = _WindowsJob()
-                creationflags = (
-                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                    | getattr(subprocess, "CREATE_SUSPENDED", 0x00000004)
-                )
+                # ponytail: normal launch avoids Python _overlapped initialization
+                # failures; the short pre-assignment window is the known tradeoff.
+                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             process = subprocess.Popen(
                 list(self._argv),
                 stdin=subprocess.PIPE,
@@ -382,7 +374,7 @@ class CommandHarnessAdapter:
                 creationflags=creationflags,
             )
             if windows_job is not None:
-                windows_job.assign_and_resume(process)
+                windows_job.assign(process)
         except Exception as exc:
             if process is not None and process.poll() is None:
                 process.kill()

@@ -10,6 +10,8 @@
 - `[test]` 冻结 Memory follow-up fixture、grader mutation golden cases、预注册模板和 failure taxonomy 复核格式；新增治理、不可变性、完整性、artifact 泄露边界与 repository cluster 检查。
 - `[chore]` CI 分为 PR unit、PR offline smoke、Nightly representative、Weekly ablation/red-team 和手动 Release；定时任务不调用收费模型，外部评测必须由受保护环境、secrets 和显式开关启动。
 - `[docs]` 正式模型和跨 Harness 实验仍待官方/可信固定 runner、冻结镜像与真实模型执行；仓库内回归只证明治理和执行合同，不作为能力提升百分比。
+- `[fix]` Windows `CommandHarnessAdapter` 改为正常启动后立即加入 kill-on-close Job Object，规避 Python/Aider 的 `_overlapped` 初始化失败；回归覆盖导入 `asyncio` 的外部 Python Harness。
+- `[eval]` 在冻结单题 `repo_pytest` fixture 上运行 DeepSeek Flash/Pro 的 Synapse smoke 与 Aider pilot，四次运行均通过独立 pytest grader。Aider 未提供 Token/成本，样本量和重复次数均不足，结果仅验证真实调用和跨 Harness 接线，不用于能力排序。
 
 ### 变更类型说明
 
