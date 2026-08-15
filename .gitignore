@@ -38,3 +38,11 @@ htmlcov/
 
 # Synapse runtime state
 .synapse/
+.aider*
+
+# Local evaluation artifacts
+eval-results/
+logs/
+tmp/
+gold.synapse-verified-*.json
+synapse-grader-smoke.*.json

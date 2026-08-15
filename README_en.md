@@ -187,9 +187,9 @@ Priority follow-ups are Git checkpoint/rollback, a typed retry classifier, HTTP 
 ## Documentation
 
 - Documentation index: [docs/文档索引.md](docs/文档索引.md)
-- Harness review: [docs/架构审查/harness-review-2026-08-08.md](docs/架构审查/harness-review-2026-08-08.md)
-- Evaluation research: [docs/评测/evaluation-harness-research-2026-08-08.md](docs/评测/evaluation-harness-research-2026-08-08.md)
-- UX review: [docs/产品体验/ux-review-and-plan-2026-08-08.md](docs/产品体验/ux-review-and-plan-2026-08-08.md)
+- Harness review: [docs/架构审查/架构审查与改造记录.md](docs/架构审查/架构审查与改造记录.md)
+- Evaluation guide: [docs/评测/评测基线与接入.md](docs/评测/评测基线与接入.md)
+- UX guide: [docs/产品体验/交互体验评审与改造.md](docs/产品体验/交互体验评审与改造.md)
 
 ## Local verification
 

@@ -28,7 +28,7 @@ Synapse 是一个 Python 实现的端到端 Code Agent Harness。它不是把 LL
 | 可复现评测 | `repo_pytest`、`terminal_smoke`、`terminal_bench`、SWE-bench 适配、Red Team、重复实验 |
 | 可观测性 | EventBus 事件驱动、运行时四维评分、原子写 Session 持久化 |
 
-评测实现、验证快照和结论边界统一记录在[评测系统优化计划](docs/评测/evaluation-system-optimization-plan-2026-08-14.md)；工程回归只证明评测链路行为，不代表模型或 Harness 能力提升。
+评测实现、验证快照和结论边界统一记录在[评测体系方案](docs/评测/评测体系方案.md)；工程回归只证明评测链路行为，不代表模型或 Harness 能力提升。
 
 ## 核心特色
 
@@ -231,9 +231,9 @@ synapse/
 ## 文档
 
 - 文档入口：[docs/文档索引.md](docs/文档索引.md)
-- Harness 架构审查：[docs/架构审查/harness-review-2026-08-08.md](docs/架构审查/harness-review-2026-08-08.md)
-- 评测调研：[docs/评测/evaluation-harness-research-2026-08-08.md](docs/评测/evaluation-harness-research-2026-08-08.md)
-- 产品体验：[docs/产品体验/ux-review-and-plan-2026-08-08.md](docs/产品体验/ux-review-and-plan-2026-08-08.md)
+- 架构审查：[docs/架构审查/架构审查与改造记录.md](docs/架构审查/架构审查与改造记录.md)
+- 评测说明：[docs/评测/评测基线与接入.md](docs/评测/评测基线与接入.md)
+- 产品体验：[docs/产品体验/交互体验评审与改造.md](docs/产品体验/交互体验评审与改造.md)
 
 ## 本地验证
 
