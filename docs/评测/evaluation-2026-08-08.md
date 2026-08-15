@@ -2,6 +2,14 @@
 
 日期：2026-08-08
 
+> 2026-08-14 更新：报告 schema 已升级到 v2。旧 `dsv4flash-repo-3runs.json`
+> 仍是单任务 smoke baseline，不是跨 Harness 对照；新 Runner 已区分 task 与 attempt，
+> 输出标准组合估计的 Pass@k、衡量连续稳定性的 Pass^k、两级 95% CI、成功误报率、
+> 验证状态、延迟 median/P95、Token/成本 provenance、dataset manifest 和可复现指纹。A/B 已改为随机交错的配对
+> 多指标实验，不再使用独立样本 t-test。
+
+> 2026-08-15 更新：补齐评测治理闭环。新增冻结 dataset manifest、实验预注册与保守样本量估算、grader golden-case 校准、失败产物内容寻址存储、append-only run registry、series 趋势/漂移分析和 repository-cluster bootstrap；CI 已按 PR/Nightly/Weekly/Release 分层。上述能力是运行与审计基础设施，尚未产生新的正式模型或跨 Harness 成绩。
+
 ## 结论先行
 
 本轮已使用本地持久化模型配置中的 `deepseek-v4-flash` 完成 3 次独立临时仓库评测。
@@ -55,6 +63,7 @@ max tokens、工具确认策略、容器镜像和重复次数。下面的区间�
 python -m synapse eval repo_pytest `
   --provider deepseek `
   --model deepseek-v4-flash `
+  --trusted-host-execution `
   --report eval-results/dsv4flash-repo.json
 ```
 
@@ -105,22 +114,22 @@ agent patch、private tests、失败原因和超时统一落到任务报告。
 5. **SWE-bench CLI 入口断裂**：不再调用不存在的 `SWEBenchAdapter.tasks()` 无参实现；改为
    显式要求本地 JSONL 数据集。
 
-### 仍会拉低 dsv4flash 真实得分的因素
+### 当前仍需控制的评测边界
 
-1. **没有强制验证 gate**：现在是 prompt 约束，不是运行时策略。模型忽略提示时仍能以
-   `SUCCESS` 返回；应该在可识别代码任务中加入“测试失败则至少 PARTIAL”的轻量 gate。
+1. **Completion Gate 不能替代外部 grader**：ReAct 已对可识别代码任务执行轻量运行时 gate，
+   但它仍是过程约束；功能通过必须由 Agent 运行结束后的独立 grader 判定。
 2. **工具集合过宽**：默认工具 schema 同时暴露文件、shell、web、MCP 相关能力，较弱模型
    更容易选错工具或浪费上下文。应按任务类型做只读/代码/外部工具分组，而不是继续加工具。
 3. **过程指标有启发式错位**：`ProcessMetrics` 原有 `find_reuse/adopt_reuse` 计数并不等价
    于真实的 `read/grep/glob → write/edit` 复用行为；现在已接收真实过程评分事件，但旧字段
    仍不能作为唯一结论。
-4. **SWE-bench grader 尚未闭环**：已有 clone/apply/private-test 执行函数，但 CLI 还没有把
-   Agent 输出稳定转换为 patch 并调用它。
+4. **官方 SWE-bench 运行证据尚未闭环**：本地适配层已串联 clone、checkout、patch、
+   private tests 与 `TaskGrade`，但尚未接入固定镜像和官方 runner，不能作为榜单成绩。
 5. **dsv4flash 路由不是 DeepSeek OpenAI API**：`deepseek-v4-*` 会走 DeepSeek 的
    Anthropic-compatible endpoint，且关闭 prompt caching。endpoint、tool schema 和
    streaming 兼容性必须单独做 provider smoke test。
-6. **当前成功率不是 pass@k**：Benchmark Runner 默认单次运行；要报告 pass@k，必须固定
-   seed/temperature、重复运行并保存每次完整报告，不能拿单次 `SUCCESS` 推断稳定性。
+6. **旧报告不是完整 pass@k 证据**：历史 JSON 只有单任务 3 次 smoke；新 Runner 已支持
+   Pass@k/Pass^k 曲线，但正式结论仍需固定模型采样策略、任务集、预算和 grader 后重跑。
 
 ## 建议的正式跑分顺序
 
@@ -152,6 +161,10 @@ agent patch、private tests、失败原因和超时统一落到任务报告。
 - **DeepSeek v4 provider smoke** 已覆盖 Anthropic-compatible 路由、`/anthropic` endpoint、关闭 prompt caching，以及既有 streaming/tool-use/401 retry regression tests。
 - **SWE-bench** 已从“仅加载 JSONL”升级为 clone → checkout → Agent patch → 新 checkout apply → private tests/test command → `TaskGrade` 的闭环，CLI 命令仍要求用户提供本地数据集。
 - **Terminal-Bench 风格适配** 已加入 `terminal_smoke` 和 `terminal_bench`：前者离线可复现，后者支持常见 JSON/JSONL 任务字段和隔离 workspace grader。完整调研、边界和 τ-bench/GAIA/ToolBench/AgentBench/Aider/OpenHands 对比见 `docs/评测/evaluation-harness-research-2026-08-08.md`。
-- **重复运行与统计** 已进入通用 `BenchmarkRunner`：`--repeat N` 会保存每次 attempt，报告 `pass_at_k`、Wilson 95% pass-rate CI、mean-score CI、Token、cost 和 tool success rate，并自动生成 HTML/SVG 与 CSV。
+- **重复运行与统计** 已进入通用 `BenchmarkRunner`：`--repeat N` 保存显式 `base_task_id/attempt`，分别报告 attempt pass rate、task success@N、Pass@k、Pass^k、两级 95% CI、验证状态、误报率、延迟 median/P95、Token 覆盖、每次成功的预估成本和复现指纹，并自动生成 HTML/SVG 与 CSV。
+- **A/B 实验** 已升级为同轮随机交错的配对多指标设计：每项指标独立声明 higher/lower，输出配对差值、相对变化、bootstrap 95% CI 与随机化检验；主指标改善但 `agent_reported_success` 或实际安全违规 guardrail 退化时标记为 `tradeoff`。提供 `--dataset` 时使用外部 grader 做多任务功能配对；无 dataset 时仍是单任务运行时诊断，不把 Harness 自报状态当外部功能判分。
+- **评测隔离** 默认按 attempt 新建 Agent/workspace，`enable_eval=True` 隔离 Project/User Memory、关闭 Semantic Memory 和 run-score 持久化，防止前序样本影响后序样本。
+- **评测治理** 由 `synapse.eval.governance` 提供：manifest 和 preregistration 不允许覆盖；失败产物默认不归档，显式启用后报告也只保存内容地址；run registry 拒绝重复 report ID，并校验原始报告 SHA-256。
+- **冻结 fixture** 位于 `docs/评测/fixtures/`，包含 Memory follow-up、grader mutation golden cases、预注册模板和 failure taxonomy 人工复核格式。它们用于验证合同，不可解释为 Agent 能力样本。
 
 本轮实现是适配层，不是官方 benchmark runner 的替代品：没有把外部数据集、Docker 镜像或 API 环境硬编码进 Synapse，因此报告中的 `official_runner=external` 必须保留，避免把本地 smoke 分数误报为榜单分数。

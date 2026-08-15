@@ -15,6 +15,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -96,6 +97,7 @@ class AttackResult:
     actual: DefenseOutcome
     passed: bool
     notes: str = ""
+    severity: int = 1
 
 
 @dataclass
@@ -116,11 +118,115 @@ class RedTeamReport:
             return 0.0
         return self.passed / self.total
 
+    @property
+    def attack_total(self) -> int:
+        return sum(result.expected == DefenseOutcome.BLOCKED for result in self.results)
+
+    @property
+    def attack_successes(self) -> int:
+        return sum(
+            result.expected == DefenseOutcome.BLOCKED
+            and result.actual == DefenseOutcome.ALLOWED
+            for result in self.results
+        )
+
+    @property
+    def attack_success_rate(self) -> float | None:
+        return self.attack_successes / self.attack_total if self.attack_total else None
+
+    @property
+    def benign_control_total(self) -> int:
+        return sum(result.expected == DefenseOutcome.ALLOWED for result in self.results)
+
+    @property
+    def false_blocks(self) -> int:
+        return sum(
+            result.expected == DefenseOutcome.ALLOWED
+            and result.actual == DefenseOutcome.BLOCKED
+            for result in self.results
+        )
+
+    @property
+    def false_block_rate(self) -> float | None:
+        return self.false_blocks / self.benign_control_total if self.benign_control_total else None
+
+    @property
+    def severity_weighted_risk(self) -> float | None:
+        attacks = [
+            result for result in self.results
+            if result.expected == DefenseOutcome.BLOCKED
+        ]
+        total = sum(max(0, result.severity) for result in attacks)
+        if total == 0:
+            return None
+        escaped = sum(
+            max(0, result.severity)
+            for result in attacks if result.actual == DefenseOutcome.ALLOWED
+        )
+        return escaped / total
+
+    @property
+    def by_category(self) -> dict[str, dict[str, int | float | None]]:
+        buckets: dict[str, list[AttackResult]] = {}
+        for result in self.results:
+            buckets.setdefault(result.category.value, []).append(result)
+        summary: dict[str, dict[str, int | float | None]] = {}
+        for category, results in buckets.items():
+            attacks = [item for item in results if item.expected == DefenseOutcome.BLOCKED]
+            successes = sum(item.actual == DefenseOutcome.ALLOWED for item in attacks)
+            controls = [item for item in results if item.expected == DefenseOutcome.ALLOWED]
+            false_blocks = sum(item.actual == DefenseOutcome.BLOCKED for item in controls)
+            summary[category] = {
+                "total": len(results),
+                "attack_total": len(attacks),
+                "attack_successes": successes,
+                "attack_success_rate": successes / len(attacks) if attacks else None,
+                "benign_control_total": len(controls),
+                "false_blocks": false_blocks,
+                "false_block_rate": false_blocks / len(controls) if controls else None,
+            }
+        return summary
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "total": self.total,
+            "passed": self.passed,
+            "failed": self.failed,
+            "pass_rate": self.pass_rate,
+            "attack_total": self.attack_total,
+            "attack_successes": self.attack_successes,
+            "attack_success_rate": self.attack_success_rate,
+            "benign_control_total": self.benign_control_total,
+            "false_blocks": self.false_blocks,
+            "false_block_rate": self.false_block_rate,
+            "severity_weighted_risk": self.severity_weighted_risk,
+            "by_category": self.by_category,
+            "results": [
+                {
+                    "id": result.id,
+                    "category": result.category.value,
+                    "name": result.name,
+                    "expected": result.expected.value,
+                    "actual": result.actual.value,
+                    "passed": result.passed,
+                    "notes": result.notes,
+                    "severity": result.severity,
+                }
+                for result in self.results
+            ],
+        }
+
     def to_text(self) -> str:
         lines = [
             f"Red-team report: {self.name}",
             f"  attacks : {self.total}",
-            f"  blocked : {self.passed}/{self.total} ({self.pass_rate:.0%})",
+            f"  contract: {self.passed}/{self.total} ({self.pass_rate:.0%})",
+            f"  ASR     : {self.attack_successes}/{self.attack_total} "
+            f"({self.attack_success_rate or 0.0:.0%})",
+            f"  FBR     : {self.false_blocks}/{self.benign_control_total} "
+            f"({self.false_block_rate or 0.0:.0%})",
+            f"  risk    : {(self.severity_weighted_risk or 0.0):.0%} severity-weighted",
             f"  findings: {len(self.findings)}",
         ]
         if self.safety_snapshot is not None:
@@ -156,6 +262,7 @@ class RedTeamRunner:
     def __init__(self, bus: EventBus) -> None:
         self._bus = bus
         self._decisions: list[tuple[bool, str]] = []
+        self._run_lock = asyncio.Lock()
 
     async def run(
         self,
@@ -179,33 +286,36 @@ class RedTeamRunner:
         safety_snapshot:
             Optional pre-built ``SafetyMetrics`` snapshot to embed in the report.
         """
-        self._bus.subscribe(EventType.AUTH_DECISION, self._on_auth_decision)
-        # (Re)subscribe is idempotent-ish; clear any stale capture from a prior run.
-        self._decisions = []
-
-        results: list[AttackResult] = []
-        for attack in attacks:
+        async with self._run_lock:
+            self._bus.subscribe(EventType.AUTH_DECISION, self._on_auth_decision)
             self._decisions = []
-            await run_attack(attack)
+            try:
+                results: list[AttackResult] = []
+                for attack in attacks:
+                    self._decisions = []
+                    await run_attack(attack)
 
-            denied = any(not allowed for allowed, _ in self._decisions)
-            actual = DefenseOutcome.BLOCKED if denied else DefenseOutcome.ALLOWED
-            passed = actual == attack.expected_defense
-            notes = ""
-            if not passed:
-                if attack.known_gap:
-                    notes = "known gap (expected block, defender allowed)"
-                else:
-                    notes = f"expected {attack.expected_defense.value}, got {actual.value}"
-            results.append(AttackResult(
-                id=attack.id,
-                category=attack.category,
-                name=attack.name,
-                expected=attack.expected_defense,
-                actual=actual,
-                passed=passed,
-                notes=notes,
-            ))
+                    denied = any(not allowed for allowed, _ in self._decisions)
+                    actual = DefenseOutcome.BLOCKED if denied else DefenseOutcome.ALLOWED
+                    passed = actual == attack.expected_defense
+                    notes = ""
+                    if not passed:
+                        if attack.known_gap:
+                            notes = "known gap (expected block, defender allowed)"
+                        else:
+                            notes = f"expected {attack.expected_defense.value}, got {actual.value}"
+                    results.append(AttackResult(
+                        id=attack.id,
+                        category=attack.category,
+                        name=attack.name,
+                        expected=attack.expected_defense,
+                        actual=actual,
+                        passed=passed,
+                        notes=notes,
+                        severity=attack.severity,
+                    ))
+            finally:
+                self._bus.unsubscribe(EventType.AUTH_DECISION, self._on_auth_decision)
 
         passed = sum(1 for r in results if r.passed)
         failed = len(results) - passed

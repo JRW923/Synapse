@@ -189,12 +189,18 @@ class _LiveDisplay:
         self._thread = threading.Thread(target=self._refresh_loop, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, *, persist: bool = False):
         self._stop.set()
         with _swallow("_LiveDisplay.stop: thread join"):
             self._thread.join(timeout=0.5)
         with _swallow("_LiveDisplay.stop: live stop"):
             self._live.stop()
+        # Rich clears transient output on stop.  One-shot commands need a
+        # durable final snapshot for piping/capture; interactive callers keep
+        # the historical transient behaviour unless they opt in explicitly.
+        if persist:
+            with _swallow("_LiveDisplay.stop: persist final snapshot"):
+                self._console.print(self._render())
 
     def _refresh_loop(self):
         """Force a screen write every ~0.2s on a thread independent of the
@@ -327,9 +333,10 @@ class _LiveRun:
     or leaking handlers into the next request.
     """
 
-    def __init__(self, synapse, console, status_holder=None):
+    def __init__(self, synapse, console, status_holder=None, *, persist_final=False):
         self.synapse = synapse
         self.status_holder = status_holder
+        self.persist_final = persist_final
         self.tokens = {"input": 0, "output": 0}
         self.baseline = {"in": 0, "out": 0}
         self.elapsed = {"start": _time.monotonic()}
@@ -460,7 +467,7 @@ class _LiveRun:
 
     def stop(self) -> None:
         try:
-            self.live.stop()
+            self.live.stop(persist=self.persist_final)
         finally:
             if self.status_holder is not None:
                 self.status_holder[:] = []

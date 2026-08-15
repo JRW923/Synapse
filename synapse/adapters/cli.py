@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import os as _os
 import signal as _signal
 import sys
@@ -322,7 +323,7 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     """
     if not use_rich or console is None:
         return await synapse.run(task, session=session)
-    live_run = _LiveRun(synapse, console, status_holder)
+    live_run = _LiveRun(synapse, console, status_holder, persist_final=True)
     try:
         live_run.start()
         return await synapse.run(task, session=session)
@@ -522,6 +523,9 @@ def main():
         default=None,
         help="Local benchmark JSON/JSONL dataset (required for swebench/terminal_bench)",
     )
+    eval_parser.add_argument("--dataset-version", default=None, help="Dataset release/version")
+    eval_parser.add_argument("--dataset-source", default=None, help="Dataset source URL or name")
+    eval_parser.add_argument("--dataset-license", default=None, help="Dataset license identifier")
     eval_parser.add_argument(
         "--max-tasks",
         type=int,
@@ -544,6 +548,11 @@ def main():
         default=None,
         help="Explicit evaluation workspace (default: isolated temporary directory)",
     )
+    eval_parser.add_argument(
+        "--trusted-host-execution",
+        action="store_true",
+        help="允许可信评测数据在宿主机执行 grader 命令",
+    )
 
     experiment_parser = sub.add_parser("experiment", help="Run an A/B experiment")
     experiment_parser.add_argument(
@@ -564,13 +573,67 @@ def main():
     experiment_parser.add_argument(
         "--task", "-t",
         default="Say hello.",
-        help="Benchmark task description (default: 'Say hello.')",
+        help="Single diagnostic task (default: 'Say hello.')",
+    )
+    experiment_parser.add_argument(
+        "--dataset",
+        default=None,
+        help="Terminal-Bench-compatible JSON/JSONL dataset for paired multi-task grading",
+    )
+    experiment_parser.add_argument(
+        "--max-tasks",
+        type=int,
+        default=None,
+        help="Maximum dataset tasks to run",
+    )
+    experiment_parser.add_argument(
+        "--trusted-host-execution",
+        action="store_true",
+        help="允许可信数据集在宿主机执行 grader 命令",
     )
     experiment_parser.add_argument(
         "--runs",
         type=int,
-        default=5,
-        help="Number of runs per config (default: 5)",
+        default=6,
+        help="Number of paired runs per config (default: 6)",
+    )
+    experiment_parser.add_argument(
+        "--primary-metric",
+        default=None,
+        choices=[
+            "functional_success", "grader_score", "agent_reported_success",
+            "duration_ms", "tokens", "tool_calls",
+            "tool_success_rate", "safety_risk_attempts", "safety_policy_blocks",
+            "safety_violations",
+        ],
+        help="Primary metric (default: functional_success for datasets, duration_ms otherwise)",
+    )
+    experiment_parser.add_argument(
+        "--direction",
+        choices=["higher", "lower"],
+        default=None,
+        help="Whether higher/lower is better (default: inferred from metric)",
+    )
+    experiment_parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed for paired run ordering and statistical resampling",
+    )
+    experiment_parser.add_argument(
+        "--allowed-config-diff",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Allowed effective config difference path; repeat as needed "
+            "(e.g. runtime.eval_ablation.memory)"
+        ),
+    )
+    experiment_parser.add_argument(
+        "--report",
+        default=None,
+        help="JSON report path (default: eval-results/experiment-<name>-<timestamp>.json)",
     )
 
     setup_parser = sub.add_parser("setup", help="Install launcher scripts for clean Ctrl+C")
@@ -946,7 +1009,12 @@ def _show_welcome(console, config, config_path: str = "", session=None):
     if session is not None:
         session_label = f"{session.id[:8]} · {len(session.messages)} msgs"
 
-    width = max(getattr(console, "width", None) or 80, 40)
+    # Rich ignores an explicit width on legacy Windows in ``console.width``;
+    # ``_width`` is the constructor override and is otherwise None.
+    width = max(
+        getattr(console, "_width", None) or getattr(console, "width", None) or 80,
+        40,
+    )
     inner = width - 4
     tools_count = len(getattr(config.tools, "enabled", []) or [])
     config_label = str(config_path).replace(" + ", " · ") if config_path else "defaults"
@@ -2116,21 +2184,184 @@ def _eval_report_path(args) -> Path:
     return Path("eval-results") / f"{args.benchmark}-{stamp}.json"
 
 
+def _workspace_identity(workspace: str | Path) -> dict:
+    """Return a path-free fingerprint for an explicit evaluation workspace."""
+    import subprocess
+
+    root = Path(workspace).expanduser().resolve()
+    if not root.is_dir():
+        raise ValueError(f"evaluation workspace is not a directory: {workspace}")
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", check=True, timeout=10,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "status", "--porcelain=v1", "-z"], cwd=root,
+            capture_output=True, check=True, timeout=30,
+        ).stdout
+        diff = subprocess.run(
+            ["git", "diff", "--binary", "HEAD"], cwd=root,
+            capture_output=True, check=True, timeout=60,
+        ).stdout
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root,
+            capture_output=True, check=True, timeout=30,
+        ).stdout.split(b"\0")
+        digest = hashlib.sha256(commit.encode("utf-8") + b"\0" + status + diff)
+        for raw_relative in sorted(item for item in untracked if item):
+            relative = raw_relative.decode("utf-8", errors="surrogateescape")
+            target = (root / relative).resolve()
+            if not target.is_relative_to(root) or not target.is_file():
+                continue
+            digest.update(raw_relative + b"\0")
+            with target.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        return {
+            "kind": "git",
+            "commit": commit,
+            "dirty": bool(status),
+            "state_sha256": digest.hexdigest(),
+        }
+    except (OSError, subprocess.SubprocessError):
+        digest = hashlib.sha256()
+        file_count = 0
+        excluded = {".git", ".synapse", ".venv", "venv", "node_modules", "__pycache__"}
+        # ponytail: generated dependency/state trees are excluded; formal runs
+        # should identify those through the container image rather than hash them.
+        for target in sorted(root.rglob("*")):
+            if not target.is_file() or any(
+                part in excluded for part in target.relative_to(root).parts
+            ):
+                continue
+            relative = target.relative_to(root).as_posix()
+            digest.update(relative.encode("utf-8") + b"\0")
+            try:
+                with target.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+            except OSError:
+                continue
+            file_count += 1
+        return {
+            "kind": "directory",
+            "file_count": file_count,
+            "state_sha256": digest.hexdigest(),
+        }
+
+
+def _build_eval_config(args, provider: str, model: str, isolation: str) -> dict:
+    """Return the effective, fingerprintable config for one evaluation run."""
+    config, _ = load_config()
+    payload = config.model_dump(mode="json")
+    payload.setdefault("provider", {})["provider"] = provider
+    payload["provider"]["model"] = model
+    payload.setdefault("tools", {})["workspace_root"] = "<evaluation-workspace>"
+    for section_name, key in (("security", "allowed_paths"), ("plugins", "paths")):
+        values = payload.get(section_name, {}).get(key, [])
+        if isinstance(values, list):
+            payload[section_name][key] = [
+                f"<absolute>/{Path(value).name}"
+                if Path(str(value)).expanduser().is_absolute() else str(value)
+                for value in values
+            ]
+    evaluation = {
+        "benchmark": args.benchmark,
+        "repeat": args.repeat,
+        "max_tasks": getattr(args, "max_tasks", None),
+        "isolation": isolation,
+        "auto_approve": True,
+    }
+    dataset = getattr(args, "dataset", None)
+    if dataset:
+        source = Path(dataset).expanduser().resolve()
+        evaluation["dataset"] = {
+            "name": source.name,
+            "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        }
+    for key in ("dataset_version", "dataset_source", "dataset_license"):
+        value = getattr(args, key, None)
+        if value:
+            evaluation[key] = value
+    workspace = getattr(args, "workspace", None)
+    if workspace:
+        evaluation["workspace"] = _workspace_identity(workspace)
+    payload["evaluation"] = evaluation
+    return payload
+
+
 def _print_eval_result(result, report_path: Path) -> None:
     dashboard_path = result.write_html(report_path.with_suffix(".html"))
     csv_path = result.write_csv(report_path.with_suffix(".csv"))
     print("\n--- Results ---")
-    print(f"Total:      {result.total}")
+    task_rate = (
+        f"{result.task_success_rate:.1%}"
+        if result.scored_task_total else "n/a"
+    )
+    attempt_rate = (
+        f"{result.attempt_pass_rate:.1%}"
+        if result.scored_attempt_total else "n/a"
+    )
+    print(f"Tasks:      {result.task_succeeded}/{result.scored_task_total} "
+          f"success@{result.task_success_k} ({task_rate}); "
+          f"{result.task_total} scheduled")
+    print(f"Attempts:   {result.attempt_passed}/{result.scored_attempt_total} "
+          f"({attempt_rate}); {result.attempt_total} scheduled, "
+          f"{result.excluded_attempts} excluded")
     print(f"Completed:  {result.completed}")
     print(f"Failed:     {result.failed}")
-    print(f"Passed:     {result.passed}/{result.total} ({result.pass_rate:.1%})")
-    print(f"Pass@k:     {result.pass_at_k:.1%}")
-    print(f"95% CI:     [{result.pass_rate_ci95[0]:.1%}, {result.pass_rate_ci95[1]:.1%}]")
+    attempt_ci = (
+        f"[{result.attempt_pass_rate_ci95[0]:.1%}, "
+        f"{result.attempt_pass_rate_ci95[1]:.1%}]"
+        if result.scored_attempt_total else "n/a"
+    )
+    task_ci = (
+        f"[{result.task_success_rate_ci95[0]:.1%}, "
+        f"{result.task_success_rate_ci95[1]:.1%}]"
+        if result.scored_task_total else "n/a"
+    )
+    print(f"Attempt CI: {attempt_ci}")
+    print(f"Task CI:    {task_ci}")
+    print("Pass@k:     " + ", ".join(
+        f"{k}={value:.1%}" for k, value in result.pass_at_k_by_k.items()
+    ))
+    print("Pass^k:     " + ", ".join(
+        f"{k}={value:.1%}" for k, value in result.pass_power_k_by_k.items()
+    ))
+    false_success_rate = (
+        f"{result.false_success_rate:.1%}"
+        if result.false_success_rate is not None else "n/a"
+    )
+    print(f"False success: {result.false_successes}/{result.verified_agent_reported_successes} "
+          f"verified successes ({false_success_rate})")
+    print(f"Verification: {result.unverified_attempts} unverified, "
+          f"{result.grader_error_attempts} grader errors")
     print(f"Mean score: {result.mean_score:.3f}")
     print(f"Tokens:     {result.tokens_input + result.tokens_output}")
-    print(f"Cost:       ${result.total_cost_usd:.6f}")
+    token_per_pass = (
+        f"{result.tokens_per_passed_attempt:.2f}"
+        if result.tokens_per_passed_attempt is not None else "n/a"
+    )
+    cost_per_pass = (
+        f"${result.cost_per_passed_attempt_usd:.6f}"
+        if result.cost_per_passed_attempt_usd is not None else "n/a"
+    )
+    token_per_task = (
+        f"{result.tokens_per_succeeded_task:.2f}"
+        if result.tokens_per_succeeded_task is not None else "n/a"
+    )
+    cost_per_task = (
+        f"${result.cost_per_succeeded_task_usd:.6f}"
+        if result.cost_per_succeeded_task_usd is not None else "n/a"
+    )
+    print(f"Tokens/pass:{token_per_pass}")
+    print(f"Est. cost:  ${result.total_cost_usd:.6f} "
+          f"({cost_per_pass}/pass)")
+    print(f"Per task:   {token_per_task} tokens, {cost_per_task} estimated cost")
     print(f"Tool rate:  {result.tool_success_rate:.1%}")
-    print(f"Duration:   {result.duration_ms}ms")
+    print(f"Latency:    median={result.median_duration_ms:.0f}ms "
+          f"p95={result.p95_duration_ms:.0f}ms")
     print(f"Report:     {report_path.resolve()}")
     print(f"Dashboard:  {dashboard_path}")
     print(f"CSV:        {csv_path}")
@@ -2146,13 +2377,8 @@ async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Pa
     """Run the isolated local functional fixture and persist a normal report."""
     from synapse.adapters.library import Synapse
     from synapse.eval.benchmarks.repo_pytest import RepoPytestBenchmark
-    from synapse.eval.runner import (
-        BenchmarkResult,
-        TaskResult,
-        _find_runtime_score,
-        _mean_interval,
-        _wilson_interval,
-    )
+    from synapse.eval.runner import BenchmarkRunner
+    from synapse.protocols.planner import AgentResult, ResultStatus
 
     async def approve(_request) -> bool:
         return True
@@ -2165,83 +2391,44 @@ async def _run_repo_pytest_eval(args, provider: str, model: str, report_path: Pa
             workspace_root=str(root),
             confirm_callback=approve,
         )
-        result = await agent.run(task, confirm_callback=approve)
-        return result, agent.get_run_score()
+        try:
+            result = await agent.run(task, confirm_callback=approve)
+            return result, agent.get_run_score()
+        finally:
+            await agent.aclose()
 
-    started = _time.monotonic()
-    benchmark = RepoPytestBenchmark()
-    task = RepoPytestBenchmark.benchmark().tasks[0]
-    task_results = []
-    repeat = max(1, int(getattr(args, "repeat", 1) or 1))
-    for attempt in range(repeat):
-        outcome = await benchmark.run(run_agent)
+    fixture = RepoPytestBenchmark()
+    benchmark = fixture.benchmark()
+
+    async def run_fixture(_task):
+        outcome = await fixture.run(
+            run_agent,
+            trusted_host_execution=getattr(args, "trusted_host_execution", False),
+        )
         agent_result = outcome.agent_result
         if agent_result is None:
-            from synapse.protocols.planner import AgentResult, ResultStatus
             agent_result = AgentResult(ResultStatus.FAILED, "agent did not return a result")
-        facts = {"repo_pytest": outcome.to_dict(), "runtime": outcome.run_score}
-        grade = RepoPytestBenchmark.grade(task, agent_result, facts)
-        status = agent_result.status.value
-        task_results.append(TaskResult(
-            task_id=f"{task.id}#{attempt + 1}" if repeat > 1 else task.id,
-            status=status,
-            output=agent_result.output,
-            duration_ms=agent_result.metrics.duration_ms,
-            passed=grade.passed,
-            score=grade.score,
-            category="functional",
-            grade_reason=grade.reason,
-            grade_details=grade.details,
-            run_score=facts,
-        ))
-    total = len(task_results)
-    passed = sum(int(item.passed) for item in task_results)
-    completed = sum(int(item.status == "success") for item in task_results)
-    failed = sum(int(item.status in {"failed", "error"}) for item in task_results)
-    mean_score = sum(item.score for item in task_results) / total if total else 0.0
-    scores = [item.score for item in task_results]
-    tokens_input = tokens_output = tool_calls = tool_successes = 0
-    total_cost = 0.0
-    for item in task_results:
-        runtime = _find_runtime_score(item.run_score)
-        efficiency = runtime.get("efficiency", {})
-        tokens_input += int(efficiency.get("tokens_input", 0) or 0)
-        tokens_output += int(efficiency.get("tokens_output", 0) or 0)
-        tool_calls += int(efficiency.get("tool_call_count", 0) or 0)
-        tool_successes += int(efficiency.get("tool_success_count", 0) or 0)
-        total_cost += float(efficiency.get("cost_estimate_usd", 0) or 0)
-    result = BenchmarkResult(
-        name="repo_pytest",
-        total=total,
-        completed=completed,
-        failed=failed,
-        passed=passed,
-        pass_rate=passed / total if total else 0.0,
-        mean_score=mean_score,
-        duration_ms=int((_time.monotonic() - started) * 1000),
-        started_at=_time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        by_category={"functional": {
-            "total": total,
-            "passed": passed,
-            "pass_rate": passed / total if total else 0.0,
-            "mean_score": mean_score,
-        }},
-        results=task_results,
-        pass_rate_ci95=_wilson_interval(passed, total),
-        mean_score_ci95=_mean_interval(scores),
-        pass_at_k=1.0 if passed else 0.0,
-        tokens_input=tokens_input,
-        tokens_output=tokens_output,
-        total_cost_usd=round(total_cost, 6),
-        tool_success_rate=round(tool_successes / tool_calls, 4) if tool_calls else 0.0,
+        return agent_result, {"repo_pytest": outcome.to_dict(), "runtime": outcome.run_score}
+
+    async def unused_run_task(_description):
+        raise RuntimeError("repo_pytest requires the task-aware runner")
+
+    repeat = int(getattr(args, "repeat", 1))
+    result = await BenchmarkRunner().run(
+        benchmark,
+        unused_run_task,
+        task_runner=run_fixture,
+        repeat=repeat,
+        report_path=report_path,
         metadata={
             "provider": provider,
             "model": model,
             "isolation": "temporary_git_repo",
-            "repeat": repeat,
         },
+        evaluation_config=_build_eval_config(
+            args, provider, model, "temporary_git_repo",
+        ),
     )
-    result.write_json(report_path)
     _print_eval_result(result, report_path)
 
 
@@ -2262,6 +2449,8 @@ async def _run_swebench_eval(args, provider: str, model: str, report_path: Path)
     if not benchmark.tasks:
         print("swebench requires a local JSONL dataset; pass --dataset PATH")
         return
+    trusted_host_execution = getattr(args, "trusted_host_execution", False)
+    SWEBenchAdapter.require_trusted_host_execution(trusted_host_execution)
 
     async def approve(_request) -> bool:
         return True
@@ -2293,39 +2482,51 @@ async def _run_swebench_eval(args, provider: str, model: str, report_path: Path)
                 workspace_root=str(root),
                 confirm_callback=approve,
             )
-            agent_result = await synapse.run(task.description, confirm_callback=approve)
-            patch = SWEBenchAdapter.extract_patch(root)
-            private_tests = metadata.get("private_tests") or {}
-            if not isinstance(private_tests, dict):
-                private_tests = {}
-            test_command = metadata.get("test_command")
-            if isinstance(test_command, str):
-                test_command = shlex.split(test_command)
-            execution = SWEBenchAdapter.execute(
-                str(root), base_commit, patch, private_tests,
-                test_command=test_command,
-                timeout=int(metadata.get("timeout", 900)),
-                private_test_patch=str(metadata.get("test_patch") or ""),
-            )
-            facts = {
-                "applied": execution.applied,
-                "tests_passed": execution.passed,
-                "private_tests_applied": execution.private_tests_applied,
-                "changed_files": execution.changed_files,
-                "output": execution.output,
-                "patch_chars": len(patch),
-                "runtime": synapse.get_run_score(),
-            }
-            return agent_result, {"swebench": facts}
+            try:
+                agent_result = await synapse.run(task.description, confirm_callback=approve)
+                patch = SWEBenchAdapter.extract_patch(root)
+                private_tests = metadata.get("private_tests") or {}
+                if not isinstance(private_tests, dict):
+                    private_tests = {}
+                test_command = metadata.get("test_command")
+                if isinstance(test_command, str):
+                    test_command = shlex.split(test_command)
+                execution = SWEBenchAdapter.execute(
+                    str(root), base_commit, patch, private_tests,
+                    test_command=test_command,
+                    timeout=int(metadata.get("timeout", 900)),
+                    private_test_patch=str(metadata.get("test_patch") or ""),
+                    trusted_host_execution=trusted_host_execution,
+                )
+                facts = {
+                    "applied": execution.applied,
+                    "tests_passed": execution.passed,
+                    "private_tests_applied": execution.private_tests_applied,
+                    "changed_files": execution.changed_files,
+                    "output": execution.output,
+                    "patch_chars": len(patch),
+                    "runtime": synapse.get_run_score(),
+                }
+                return agent_result, {"swebench": facts}
+            finally:
+                await synapse.aclose()
 
     print(f"Tasks:     {len(benchmark.tasks)}")
     result = await BenchmarkRunner().run(
         benchmark,
         lambda _description: run_task(benchmark.tasks[0]),
         task_runner=run_task,
-        repeat=max(1, int(getattr(args, "repeat", 1) or 1)),
+        repeat=args.repeat,
         report_path=report_path,
-        metadata={"provider": provider, "model": model, "isolation": "temporary_git_checkout"},
+        metadata={
+            "provider": provider,
+            "model": model,
+            "isolation": "temporary_git_checkout",
+            "trusted_host_execution": trusted_host_execution,
+        },
+        evaluation_config=_build_eval_config(
+            args, provider, model, "temporary_git_checkout",
+        ),
     )
     _print_eval_result(result, report_path)
 
@@ -2346,6 +2547,30 @@ async def _run_terminal_eval(args, provider: str, model: str, report_path: Path)
             print("terminal_bench requires a local JSON/JSONL dataset; pass --dataset PATH")
             return
         benchmark = TerminalBenchAdapter.benchmark(tasks)
+    trusted_host_execution = getattr(args, "trusted_host_execution", False)
+    TerminalBenchAdapter.require_trusted_host_execution(
+        benchmark.tasks, trusted_host_execution,
+    )
+
+    def prepare_workspace(task, root: Path) -> None:
+        for relative, content in (task.metadata.get("setup_files") or {}).items():
+            target = (root / str(relative)).resolve()
+            if not target.is_relative_to(root.resolve()):
+                raise ValueError(f"setup path escapes workspace: {relative}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(content), encoding="utf-8")
+
+    # Validate the entire dataset before spending model budget.  A bad task
+    # must fail the run, not disappear into the excluded-pair denominator.
+    for task in benchmark.tasks:
+        with tempfile.TemporaryDirectory(prefix="synapse-terminal-preflight-") as tmp:
+            root = Path(tmp)
+            prepare_workspace(task, root)
+            TerminalBenchAdapter.preflight(
+                task,
+                root,
+                trusted_host_execution=trusted_host_execution,
+            )
 
     async def approve(_request) -> bool:
         return True
@@ -2353,12 +2578,12 @@ async def _run_terminal_eval(args, provider: str, model: str, report_path: Path)
     async def run_task(task):
         with tempfile.TemporaryDirectory(prefix="synapse-terminal-eval-") as tmp:
             root = Path(tmp)
-            for relative, content in (task.metadata.get("setup_files") or {}).items():
-                target = (root / str(relative)).resolve()
-                if not target.is_relative_to(root.resolve()):
-                    raise ValueError(f"setup path escapes workspace: {relative}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(str(content), encoding="utf-8")
+            prepare_workspace(task, root)
+            TerminalBenchAdapter.preflight(
+                task,
+                root,
+                trusted_host_execution=trusted_host_execution,
+            )
             synapse = Synapse(
                 enable_eval=True,
                 provider=provider,
@@ -2387,17 +2612,24 @@ async def _run_terminal_eval(args, provider: str, model: str, report_path: Path)
             finally:
                 for event_type, handler in handlers.items():
                     event_bus.unsubscribe(event_type, handler)
-            facts = TerminalBenchAdapter.grade_workspace(task, root)
-            facts["runtime"] = synapse.get_run_score()
-            facts["trajectory"] = trajectory[-200:]
-            return agent_result, {"terminal": facts}
+            try:
+                facts = TerminalBenchAdapter.grade_workspace(
+                    task,
+                    root,
+                    trusted_host_execution=trusted_host_execution,
+                )
+                facts["runtime"] = synapse.get_run_score()
+                facts["trajectory"] = trajectory[-200:]
+                return agent_result, {"terminal": facts}
+            finally:
+                await synapse.aclose()
 
     print(f"Tasks:     {len(benchmark.tasks)}")
     result = await BenchmarkRunner().run(
         benchmark,
         lambda _description: run_task(benchmark.tasks[0]),
         task_runner=run_task,
-        repeat=max(1, int(getattr(args, "repeat", 1) or 1)),
+        repeat=args.repeat,
         report_path=report_path,
         metadata={
             "provider": provider,
@@ -2405,6 +2637,9 @@ async def _run_terminal_eval(args, provider: str, model: str, report_path: Path)
             "isolation": "temporary_workspace",
             "official_runner": benchmark.metadata.get("official_runner"),
         },
+        evaluation_config=_build_eval_config(
+            args, provider, model, "temporary_workspace",
+        ),
     )
     _print_eval_result(result, report_path)
 
@@ -2458,43 +2693,55 @@ async def _run_eval(args) -> None:
         return True
 
     import tempfile
-    temporary_workspace = None
-    workspace_root = args.workspace
-    if not workspace_root:
-        temporary_workspace = tempfile.TemporaryDirectory(
-            prefix=f"synapse-eval-{args.benchmark}-"
-        )
-        workspace_root = temporary_workspace.name
-    try:
-        synapse = Synapse(
-            enable_eval=True,
-            provider=provider,
-            model=model,
-            workspace_root=workspace_root,
-            confirm_callback=approve,
-        )
-        runner = BenchmarkRunner()
 
-        async def run_task(task: str):
-            result = await synapse.run(task, confirm_callback=approve)
-            return result, synapse.get_run_score()
+    async def run_task(task):
+        if args.workspace:
+            workspace_root = Path(args.workspace).expanduser().resolve()
+            agent = Synapse(
+                enable_eval=True,
+                provider=provider,
+                model=model,
+                workspace_root=str(workspace_root),
+                confirm_callback=approve,
+            )
+            try:
+                result = await agent.run(task.description, confirm_callback=approve)
+                return result, agent.get_run_score()
+            finally:
+                await agent.aclose()
+        with tempfile.TemporaryDirectory(prefix=f"synapse-eval-{args.benchmark}-") as tmp:
+            agent = Synapse(
+                enable_eval=True,
+                provider=provider,
+                model=model,
+                workspace_root=tmp,
+                confirm_callback=approve,
+            )
+            try:
+                result = await agent.run(task.description, confirm_callback=approve)
+                return result, agent.get_run_score()
+            finally:
+                await agent.aclose()
 
-        result = await runner.run(
-            benchmark,
-            run_task,
-            repeat=max(1, int(getattr(args, "repeat", 1) or 1)),
-            report_path=report_path,
-            metadata={
-                "provider": provider,
-                "model": model,
-                "workspace": str(Path(workspace_root).resolve()),
-                "temporary_workspace": temporary_workspace is not None,
-            },
-        )
-        _print_eval_result(result, report_path)
-    finally:
-        if temporary_workspace is not None:
-            temporary_workspace.cleanup()
+    async def unused_run_task(_description):
+        raise RuntimeError("process_quality requires the task-aware runner")
+
+    isolation = "explicit_shared_workspace" if args.workspace else "temporary_workspace_per_attempt"
+    result = await BenchmarkRunner().run(
+        benchmark,
+        unused_run_task,
+        task_runner=run_task,
+        repeat=args.repeat,
+        report_path=report_path,
+        metadata={
+            "provider": provider,
+            "model": model,
+            "workspace_mode": "explicit" if args.workspace else "temporary_per_attempt",
+            "state_isolated": not bool(args.workspace),
+        },
+        evaluation_config=_build_eval_config(args, provider, model, isolation),
+    )
+    _print_eval_result(result, report_path)
 
 
 # ---- Experiment command handler -------------------------------------------
@@ -2503,45 +2750,304 @@ async def _run_eval(args) -> None:
 async def _run_experiment(args) -> None:
     """Execute an A/B experiment."""
     import json as _json
+    import tempfile
+    from contextlib import ExitStack
 
     from synapse.eval.experiments import Experiment
+    from synapse.eval.runner import (
+        _fingerprint,
+        _runner_comparability_envelope,
+        _sanitize_config,
+    )
 
     config_a = _json.loads(args.config_a)
     config_b = _json.loads(args.config_b)
 
-    print(f"Experiment: {args.name}")
-    print(f"Config A:   {_json.dumps(config_a)}")
-    print(f"Config B:   {_json.dumps(config_b)}")
-    print(f"Task:       {args.task}")
-    print(f"Runs:       {args.runs}")
-    print()
-
     from synapse.adapters.library import Synapse
 
-    async def benchmark(config: dict) -> float:
-        synapse = Synapse(**config)
-        result = await synapse.run(args.task)
-        return float(result.metrics.duration_ms)
+    dataset_path = None
+    task_benchmark = None
+    trusted_host_execution = bool(getattr(args, "trusted_host_execution", False))
+    if getattr(args, "dataset", None):
+        from synapse.eval.benchmarks.terminal import TerminalBenchAdapter
+
+        dataset_path = Path(args.dataset).expanduser().resolve()
+        tasks = TerminalBenchAdapter.tasks(
+            dataset_path, getattr(args, "max_tasks", None),
+        )
+        if not tasks:
+            raise ValueError("experiment dataset contains no runnable tasks")
+        TerminalBenchAdapter.require_trusted_host_execution(
+            tasks, trusted_host_execution,
+        )
+        task_benchmark = TerminalBenchAdapter.benchmark(tasks)
+        task_benchmark.metadata["dataset"] = {
+            "name": dataset_path.name,
+            "sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+        }
+        task_benchmark.metadata["dataset_manifest"].update({
+            "name": dataset_path.stem,
+            "selection_max_tasks": getattr(args, "max_tasks", None),
+        })
+
+    primary_metric = (
+        getattr(args, "primary_metric", None)
+        or ("functional_success" if task_benchmark is not None else "duration_ms")
+    )
+    print(f"Experiment: {args.name}")
+    print(f"Config A:   {_json.dumps(_sanitize_config(config_a))}")
+    print(f"Config B:   {_json.dumps(_sanitize_config(config_b))}")
+    if task_benchmark is None:
+        print(f"Task:       {args.task}")
+        print("Success:    agent_reported_success is Harness status, not an external grader")
+    else:
+        print(f"Dataset:    {dataset_path.name}")
+        print(f"Tasks:      {len(task_benchmark.tasks)}")
+        print("Success:    functional_success comes from the external workspace grader")
+    print(f"Runs:       {args.runs}")
+    print("Seed:       controls pair ordering/statistics; model sampling is provider-defined")
+    print()
+
+    async def resolve_effective_config(config: dict) -> dict:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="synapse-experiment-config-") as tmp:
+            run_config = dict(config)
+            run_config["enable_eval"] = True
+            run_config["workspace_root"] = tmp
+            run_config["strict_overrides"] = True
+            synapse = Synapse(**run_config)
+            try:
+                return synapse.get_effective_config()
+            finally:
+                close = getattr(synapse, "aclose", None)
+                if close is not None:
+                    await close()
+
+    effective_config_a = await resolve_effective_config(config_a)
+    effective_config_b = await resolve_effective_config(config_b)
+
+    async def diagnostic_benchmark(config: dict, _seed: int):
+        run_config = dict(config)
+        run_config["enable_eval"] = True
+        run_config["strict_overrides"] = True
+        synapse = Synapse(**run_config)
+        try:
+            result = await synapse.run(args.task)
+            score = synapse.get_run_score() or {}
+            safety = score.get("safety", {})
+            metrics = result.metrics
+            effective = synapse.get_effective_config()
+            return ({
+                "agent_reported_success": float(result.status.value == "success"),
+                "duration_ms": float(metrics.duration_ms),
+                "tokens": float(metrics.tokens_input + metrics.tokens_output),
+                "tool_calls": float(metrics.tool_call_count),
+                "tool_success_rate": (
+                    metrics.tool_success_count / metrics.tool_call_count
+                    if metrics.tool_call_count else 0.0
+                ),
+                "safety_risk_attempts": float(
+                    safety.get("injection_attempts", 0)
+                    + safety.get("dangerous_command_attempts", 0)
+                ),
+                "safety_policy_blocks": float(safety.get("auth_blocks", 0)),
+                "safety_violations": float(
+                    safety.get("sandbox_violations", 0)
+                    + safety.get("out_of_workspace_access", 0)
+                ),
+            }, _runner_comparability_envelope(effective, score))
+        finally:
+            close = getattr(synapse, "aclose", None)
+            if close is not None:
+                await close()
+
+    workspace_stack = ExitStack()
+    setup_by_group: dict[str, dict[str, object]] = {}
+    if task_benchmark is not None:
+        for task in task_benchmark.tasks:
+            group = str(task.metadata.get("sequence_id") or task.id)
+            setup = setup_by_group.setdefault(group, {})
+            for relative, content in (task.metadata.get("setup_files") or {}).items():
+                key = str(relative)
+                if key in setup and setup[key] != content:
+                    raise ValueError(
+                        f"sequence setup file has conflicting contents: {key}"
+                    )
+                setup[key] = content
+
+    baseline_ids = {
+        group: _fingerprint({
+            "kind": "terminal_dataset_workspace",
+            "group": group,
+            "setup_files": setup,
+        })
+        for group, setup in setup_by_group.items()
+    }
+    baseline_ids.setdefault(
+        "callback", _fingerprint({"kind": "empty_workspace", "task": args.task}),
+    )
+
+    if task_benchmark is not None:
+        from synapse.eval.benchmarks.terminal import TerminalBenchAdapter
+
+        for task in task_benchmark.tasks:
+            group = str(task.metadata.get("sequence_id") or task.id)
+            with tempfile.TemporaryDirectory(
+                prefix="synapse-experiment-preflight-",
+            ) as tmp:
+                root = Path(tmp).resolve()
+                for relative, content in setup_by_group.get(group, {}).items():
+                    target = (root / relative).resolve()
+                    if not target.is_relative_to(root):
+                        raise ValueError(f"setup path escapes workspace: {relative}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(str(content), encoding="utf-8")
+                TerminalBenchAdapter.preflight(
+                    task,
+                    root,
+                    trusted_host_execution=trusted_host_execution,
+                )
+        task_benchmark.metadata["baseline_preflight"] = "passed"
+
+    def workspace_factory(*, label: str, task_id: str, attempt: int) -> dict:
+        path = workspace_stack.enter_context(
+            tempfile.TemporaryDirectory(
+                prefix=f"synapse-experiment-{label.lower()}-{attempt}-",
+            ),
+        )
+        root = Path(path).resolve()
+        for relative, content in setup_by_group.get(task_id, {}).items():
+            target = (root / relative).resolve()
+            if not target.is_relative_to(root):
+                raise ValueError(f"setup path escapes workspace: {relative}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(str(content), encoding="utf-8")
+        return {
+            "path": path,
+            "baseline_id": baseline_ids.get(task_id, baseline_ids["callback"]),
+        }
+
+    async def run_dataset_task(config: dict, task, _seed: int, attempt: int = 1):
+        from synapse.eval.benchmarks.terminal import TerminalBenchAdapter
+
+        async def approve(_request) -> bool:
+            return True
+
+        run_config = dict(config)
+        run_config["enable_eval"] = True
+        run_config["strict_overrides"] = True
+        run_config["confirm_callback"] = approve
+        synapse = Synapse(**run_config)
+        try:
+            TerminalBenchAdapter.preflight(
+                task,
+                run_config["workspace_root"],
+                trusted_host_execution=trusted_host_execution,
+            )
+            agent_result = await synapse.run(task.description, confirm_callback=approve)
+            score = synapse.get_run_score() or {}
+            score.setdefault("efficiency", {})
+            score.setdefault("safety", {})
+            facts = TerminalBenchAdapter.grade_workspace(
+                task,
+                run_config["workspace_root"],
+                trusted_host_execution=trusted_host_execution,
+            )
+            run_score = {"terminal": facts, "runtime": score, "attempt": attempt}
+            run_score.update(
+                _runner_comparability_envelope(synapse.get_effective_config(), score)
+            )
+            return agent_result, run_score
+        finally:
+            close = getattr(synapse, "aclose", None)
+            if close is not None:
+                await close()
 
     import uuid
+    metric_directions = {
+        "functional_success": "higher",
+        "grader_score": "higher",
+        "agent_reported_success": "higher",
+        "duration_ms": "lower",
+        "tokens": "lower",
+        "tool_calls": "lower",
+        "tool_success_rate": "higher",
+        "safety_risk_attempts": "lower",
+        "safety_policy_blocks": "lower",
+        "safety_violations": "lower",
+    }
     experiment = Experiment(
         id=str(uuid.uuid4()),
         name=args.name,
-        variables={"task": args.task},
+        variables=(
+            {
+                "dataset": {
+                    "name": dataset_path.name,
+                    "sha256": hashlib.sha256(dataset_path.read_bytes()).hexdigest(),
+                },
+                "task_count": len(task_benchmark.tasks),
+            }
+            if task_benchmark is not None else {"task": args.task}
+        ),
         agent_config_a=config_a,
         agent_config_b=config_b,
-        benchmark=benchmark,
+        benchmark=task_benchmark or diagnostic_benchmark,
+        effective_config_a=effective_config_a,
+        effective_config_b=effective_config_b,
         runs_per_config=args.runs,
+        primary_metric=primary_metric,
+        direction=args.direction or metric_directions[primary_metric],
+        seed=args.seed,
+        metric_directions=(
+            {
+                name: direction for name, direction in metric_directions.items()
+                if name not in {"functional_success", "grader_score"}
+            }
+            if task_benchmark is None else {}
+        ),
+        guardrail_metrics=tuple(
+            metric for metric in (
+                (("functional_success", "safety_violations")
+                 if task_benchmark is not None else ("safety_violations",))
+            ) if metric != primary_metric
+        ),
+        allowed_config_diff_paths=(
+            tuple(args.allowed_config_diff) if args.allowed_config_diff else None
+        ),
+        workspace_factory=workspace_factory,
+        task_runner=run_dataset_task if task_benchmark is not None else None,
     )
 
     print("Running experiment...")
-    result = await experiment.run()
+    try:
+        result = await experiment.run()
+    finally:
+        workspace_stack.close()
 
     print(f"\n--- Results ---")
-    print(f"Config A metrics: {result.metrics_a}")
-    print(f"Config B metrics: {result.metrics_b}")
-    print(f"p-value:          {result.p_value}")
-    print(f"Winner:           {result.winner or 'none (not significant)'}")
+    print(f"Primary metric:   {result.primary_metric} ({result.direction} is better)")
+    for name, comparison in result.metric_results.items():
+        ci = comparison.bootstrap_ci
+        ci_text = f"[{ci[0]:.4g}, {ci[1]:.4g}]" if ci else "n/a"
+        print(
+            f"{name}: A={comparison.mean_a:.4g} B={comparison.mean_b:.4g} "
+            f"delta={comparison.mean_delta:.4g} CI={ci_text} p={comparison.p_value}"
+        )
+    if result.guardrail_regressions:
+        print(f"Guardrail regressions: {', '.join(result.guardrail_regressions)}")
+    if result.comparability_issues:
+        print(f"Comparability:    {', '.join(result.comparability_issues)}")
+    print(f"Outcome:          {result.outcome}")
+    safe_name = "".join(
+        char if char.isalnum() or char in "-_" else "-" for char in args.name
+    ).strip("-") or "experiment"
+    report_path = Path(args.report).expanduser() if args.report else (
+        Path("eval-results")
+        / f"experiment-{safe_name}-{_time.strftime('%Y%m%d-%H%M%S')}.json"
+    )
+    print(f"Report:           {result.write_json(report_path)}")
+    print(f"HTML:             {result.write_html(report_path.with_suffix('.html'))}")
 
 
 if __name__ == "__main__":

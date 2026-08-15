@@ -5,9 +5,24 @@ on:
     branches: [master]
   pull_request:
     branches: [master]
+  schedule:
+    - cron: "17 18 * * *"
+    - cron: "43 19 * * 0"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Evaluation tier
+        type: choice
+        options: [nightly, weekly, release]
+        default: nightly
+      run_external_models:
+        description: Run the repository-configured official evaluation command
+        type: boolean
+        default: false
 
 jobs:
-  test:
+  pr-unit:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -17,9 +32,73 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install
+      - run: python -m pip install --upgrade pip && pip install -e ".[test]"
+      - run: python -m pytest tests/ -q
+
+  pr-smoke:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip && pip install -e ".[test]"
+      - name: Offline evaluation contracts
+        run: >-
+          python -m pytest
+          tests/eval/test_governance.py
+          tests/eval/test_runner.py
+          tests/eval/test_experiments.py
+          tests/eval/test_harness_adapter.py
+          tests/eval/test_redteam.py -q
+      - run: python -m compileall -q synapse
+
+  nightly-representative:
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '17 18 * * *') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'nightly')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip && pip install -e ".[test]"
+      - run: python -m pytest tests/eval tests/modules/test_harness_hardening.py tests/modules/test_background.py -q
+
+  weekly-ablation-redteam:
+    if: >-
+      (github.event_name == 'schedule' && github.event.schedule == '43 19 * * 0') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'weekly')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip && pip install -e ".[test]"
+      - run: python -m pytest tests/eval/test_ablations.py tests/eval/test_experiments.py tests/eval/test_redteam.py -q
+
+  release-official:
+    if: github.event_name == 'workflow_dispatch' && inputs.tier == 'release'
+    runs-on: ubuntu-latest
+    environment: evaluation-release
+    env:
+      SYNAPSE_API_KEY: ${{ secrets.SYNAPSE_API_KEY }}
+      SYNAPSE_OFFICIAL_EVAL_COMMAND: ${{ vars.SYNAPSE_OFFICIAL_EVAL_COMMAND }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pip && pip install -e ".[test]"
+      - name: Verify deterministic release contracts
+        run: python -m pytest tests/eval tests/modules/test_harness_hardening.py -q
+      - name: Run official external evaluation
+        if: inputs.run_external_models
+        shell: bash
         run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
-      - name: Run tests
-        run: python -m pytest tests/ -q
+          test -n "$SYNAPSE_API_KEY"
+          test -n "$SYNAPSE_OFFICIAL_EVAL_COMMAND"
+          bash -lc "$SYNAPSE_OFFICIAL_EVAL_COMMAND"

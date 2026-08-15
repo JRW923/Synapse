@@ -15,19 +15,54 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field as PydanticField
 
 from synapse.adapters.library import Synapse
 from synapse.core.events import EventBus
 from synapse.core.session import Session
 from synapse.protocols.planner import AgentResult, ExecutionMetrics
 from synapse.eval.experiments import Experiment, ExperimentResult
+from synapse.eval.runner import _runner_comparability_envelope
+
+
+_EXPERIMENT_METRIC_DIRECTIONS: dict[str, Literal["higher", "lower"]] = {
+    "agent_reported_success": "higher",
+    "duration_ms": "lower",
+    "tokens": "lower",
+    "tool_calls": "lower",
+    "tool_success_rate": "higher",
+    "safety_risk_attempts": "lower",
+    "safety_policy_blocks": "lower",
+    "safety_violations": "lower",
+}
+
+_REMOTE_EXPERIMENT_FORBIDDEN_KEYS = {
+    "api_key", "base_url", "config_path", "hooks", "plugins", "mcp_servers",
+    "enable_external_tools", "workspace_root", "allow_external", "allowed_paths",
+    "sandbox_enabled", "sandbox_mode", "sandbox_backend", "sandbox_network",
+    "sandbox_docker_image", "auth_confirmation",
+}
+
+
+def _validate_remote_experiment_config(value: Any, *, _path: str = "config") -> None:
+    """Reject request-controlled host/network escape hatches before Synapse builds."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            name = str(key).strip().lower()
+            if name in _REMOTE_EXPERIMENT_FORBIDDEN_KEYS:
+                raise ValueError(f"{_path}.{key} is not allowed for HTTP experiments")
+            _validate_remote_experiment_config(nested, _path=f"{_path}.{key}")
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            _validate_remote_experiment_config(nested, _path=f"{_path}[{index}]")
 
 
 # L.3: opt-in auto-approve for headless confirmation-required calls.
@@ -84,17 +119,32 @@ class MessageResponse(BaseModel):
 
 class ExperimentRequest(BaseModel):
     name: str
-    variables: dict[str, Any] = {}
+    variables: dict[str, Any] = PydanticField(default_factory=dict)
     agent_config_a: dict[str, Any]
     agent_config_b: dict[str, Any]
     benchmark_task: str = "Say hello."
-    runs_per_config: int = 5
+    runs_per_config: int = PydanticField(default=6, ge=1)
+    primary_metric: Literal[
+        "agent_reported_success", "duration_ms", "tokens", "tool_calls",
+        "tool_success_rate", "safety_risk_attempts", "safety_policy_blocks",
+        "safety_violations",
+    ] = "duration_ms"
+    direction: Literal["higher", "lower"] | None = None
+    seed: int = 0
+    metric_directions: dict[str, Literal["higher", "lower"]] = PydanticField(
+        default_factory=lambda: dict(_EXPERIMENT_METRIC_DIRECTIONS)
+    )
+    guardrail_metrics: list[str] = PydanticField(
+        default_factory=lambda: ["agent_reported_success", "safety_violations"]
+    )
+    allowed_config_diff_paths: list[str] | None = None
 
 
 class ExperimentStatusResponse(BaseModel):
     id: str
-    status: str  # "running" | "completed"
+    status: str  # "running" | "completed" | "failed" | "cancelled"
     result: dict[str, Any] | None = None
+    error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -105,8 +155,9 @@ class ExperimentStatusResponse(BaseModel):
 @dataclass
 class ExperimentRecord:
     id: str
-    status: str  # "running" | "completed"
+    status: str  # "running" | "completed" | "failed" | "cancelled"
     result: ExperimentResult | None = None
+    error: str | None = None
     task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
@@ -118,17 +169,65 @@ class ExperimentRecord:
 def _make_benchmark(task_description: str):
     """Return an async callable suitable for ``Experiment.benchmark``.
 
-    The callable creates a fresh ``Synapse`` instance from *config*,
-    runs *task_description*, and returns ``duration_ms`` as the metric
-    (lower is better).
+    The callable creates a fresh isolated ``Synapse`` instance and returns
+    agent status plus efficiency and safety diagnostics.
     """
 
-    async def _run(config: dict[str, Any]) -> float:
-        synapse = Synapse(**config)
-        result = await synapse.run(task_description)
-        return float(result.metrics.duration_ms)
+    async def _run(
+        config: dict[str, Any], _seed: int,
+    ) -> tuple[dict[str, float], dict[str, Any]]:
+        run_config = dict(config)
+        run_config["enable_eval"] = True
+        run_config["strict_overrides"] = True
+        synapse = Synapse(**run_config)
+        try:
+            result = await synapse.run(task_description)
+            score = synapse.get_run_score() or {}
+            safety = score.get("safety", {})
+            metrics = result.metrics
+            effective = synapse.get_effective_config()
+            return ({
+                "agent_reported_success": float(result.status.value == "success"),
+                "duration_ms": float(metrics.duration_ms),
+                "tokens": float(metrics.tokens_input + metrics.tokens_output),
+                "tool_calls": float(metrics.tool_call_count),
+                "tool_success_rate": (
+                    metrics.tool_success_count / metrics.tool_call_count
+                    if metrics.tool_call_count else 0.0
+                ),
+                "safety_risk_attempts": float(
+                    safety.get("injection_attempts", 0)
+                    + safety.get("dangerous_command_attempts", 0)
+                ),
+                "safety_policy_blocks": float(safety.get("auth_blocks", 0)),
+                "safety_violations": float(
+                    safety.get("sandbox_violations", 0)
+                    + safety.get("out_of_workspace_access", 0)
+                ),
+            }, _runner_comparability_envelope(effective, score))
+        finally:
+            close = getattr(synapse, "aclose", None)
+            if close is not None:
+                await close()
 
     return _run
+
+
+async def _effective_experiment_config(config: dict[str, Any]) -> dict[str, Any]:
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="synapse-server-experiment-config-") as tmp:
+        run_config = dict(config)
+        run_config["enable_eval"] = True
+        run_config["workspace_root"] = tmp
+        run_config["strict_overrides"] = True
+        synapse = Synapse(**run_config)
+        try:
+            return synapse.get_effective_config()
+        finally:
+            close = getattr(synapse, "aclose", None)
+            if close is not None:
+                await close()
 
 
 # ---------------------------------------------------------------------------
@@ -151,8 +250,23 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
     # ---- state -----------------------------------------------------------
     sessions: dict[str, Session] = {}
     experiments: dict[str, ExperimentRecord] = {}
+    experiment_lock = asyncio.Lock()
 
     synapse = synapse_instance if synapse_instance is not None else Synapse()
+
+    @app.on_event("shutdown")
+    async def _shutdown_experiments() -> None:
+        tasks = [
+            record.task for record in experiments.values()
+            if record.task is not None and not record.task.done()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        close = getattr(synapse, "aclose", None)
+        if close is not None:
+            await close()
 
     # ---- /health ---------------------------------------------------------
 
@@ -317,33 +431,98 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
     @app.post("/eval/experiment", response_model=dict)
     async def start_experiment(req: ExperimentRequest):
+        from synapse.eval.runner import _fingerprint
+
+        try:
+            _validate_remote_experiment_config(req.agent_config_a, _path="agent_config_a")
+            _validate_remote_experiment_config(req.agent_config_b, _path="agent_config_b")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid experiment configuration") from exc
+
         experiment_id = str(uuid.uuid4())
         benchmark = _make_benchmark(req.benchmark_task)
+        workspace_stack = ExitStack()
+        baseline_id = _fingerprint({
+            "kind": "empty_workspace",
+            "task": req.benchmark_task,
+        })
 
-        experiment = Experiment(
-            id=experiment_id,
-            name=req.name,
-            variables=req.variables,
-            agent_config_a=req.agent_config_a,
-            agent_config_b=req.agent_config_b,
-            benchmark=benchmark,
-            runs_per_config=req.runs_per_config,
-        )
+        def workspace_factory(*, label: str, task_id: str, attempt: int) -> dict:
+            path = workspace_stack.enter_context(
+                tempfile.TemporaryDirectory(
+                    prefix=f"synapse-server-experiment-{label.lower()}-{attempt}-",
+                ),
+            )
+            return {"path": path, "baseline_id": baseline_id}
+
+        try:
+            metric_directions = {
+                **_EXPERIMENT_METRIC_DIRECTIONS,
+                **req.metric_directions,
+            }
+            experiment = Experiment(
+                id=experiment_id,
+                name=req.name,
+                variables=req.variables,
+                agent_config_a=req.agent_config_a,
+                agent_config_b=req.agent_config_b,
+                benchmark=benchmark,
+                effective_config_a=await _effective_experiment_config(req.agent_config_a),
+                effective_config_b=await _effective_experiment_config(req.agent_config_b),
+                runs_per_config=req.runs_per_config,
+                primary_metric=req.primary_metric,
+                direction=(
+                    req.direction
+                    or metric_directions[req.primary_metric]
+                ),
+                seed=req.seed,
+                metric_directions=metric_directions,
+                guardrail_metrics=tuple(
+                    metric for metric in req.guardrail_metrics
+                    if metric != req.primary_metric
+                ),
+                allowed_config_diff_paths=(
+                    tuple(req.allowed_config_diff_paths)
+                    if req.allowed_config_diff_paths else None
+                ),
+                workspace_factory=workspace_factory,
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            workspace_stack.close()
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid experiment configuration",
+            ) from exc
 
         record = ExperimentRecord(id=experiment_id, status="running")
         experiments[experiment_id] = record
 
         async def _run_experiment():
             try:
-                result = await experiment.run()
+                async with experiment_lock:
+                    result = await experiment.run()
                 record.result = result
                 record.status = "completed"
-            except Exception:
-                record.status = "completed"
-                record.result = ExperimentResult(
-                    experiment_id=experiment_id,
-                    experiment_name=req.name,
-                )
+            except asyncio.CancelledError:
+                record.status = "cancelled"
+                record.error = "Experiment cancelled"
+                raise
+            except Exception as exc:
+                record.status = "failed"
+                record.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                try:
+                    workspace_stack.close()
+                except Exception as exc:
+                    record.status = "failed"
+                    cleanup_error = (
+                        f"Workspace cleanup failed: {type(exc).__name__}"
+                    )
+                    record.error = (
+                        f"{record.error}; {cleanup_error}"
+                        if record.error else cleanup_error
+                    )
+                record.task = None
 
         record.task = asyncio.create_task(_run_experiment())
 
@@ -359,19 +538,14 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
         result_dict: dict[str, Any] | None = None
         if record.result is not None:
-            result_dict = {
-                "experiment_id": record.result.experiment_id,
-                "experiment_name": record.result.experiment_name,
-                "metrics_a": record.result.metrics_a,
-                "metrics_b": record.result.metrics_b,
-                "p_value": record.result.p_value,
-                "winner": record.result.winner,
-            }
+            result_dict = record.result.to_dict()
+            result_dict["model_sampling_seed_controlled"] = False
 
         return ExperimentStatusResponse(
             id=record.id,
             status=record.status,
             result=result_dict,
+            error=record.error,
         )
 
     return app

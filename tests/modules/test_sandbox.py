@@ -1,4 +1,6 @@
 """Tests for process sandbox."""
+import sys
+
 import pytest
 from synapse.modules.security.sandbox import ProcessSandbox
 
@@ -39,8 +41,20 @@ async def test_sandbox_failing_command():
 async def test_sandbox_accepts_string_cwd(tmp_path):
     sandbox = ProcessSandbox()
     result = await sandbox.execute(
-        "python -c \"open('cwd-marker.txt', 'w').write('ok')\"",
+        f"\"{sys.executable}\" -c \"open('cwd-marker.txt', 'w').write('ok')\"",
         cwd=str(tmp_path),
     )
     assert result.exit_code == 0
     assert (tmp_path / "cwd-marker.txt").read_text() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_does_not_forward_untrusted_environment(monkeypatch):
+    monkeypatch.setenv("SYNAPSE_EVAL_SECRET", "must-not-leak")
+    sandbox = ProcessSandbox()
+    result = await sandbox.execute(
+        f"\"{sys.executable}\" -c \"import os; print(os.environ.get('SYNAPSE_EVAL_SECRET', 'missing'))\"",
+    )
+    assert result.exit_code == 0
+    assert "must-not-leak" not in result.stdout
+    assert "missing" in result.stdout

@@ -59,8 +59,6 @@ class SafetyMetrics:
     })
 
     # Shell-like tools that may indicate sandbox violations on failure
-    _SANDBOX_TOOLS = frozenset({"shell", "bash", "exec", "execute", "run"})
-
     # Patterns that suggest injection attempts in tool parameters
     _INJECTION_PATTERNS: list[re.Pattern] = [
         re.compile(r"[;&|`$({]"),
@@ -144,11 +142,8 @@ class SafetyMetrics:
             self._auth_blocks += 1
 
     def _handle_tool_call_completed(self, event: BaseEvent) -> None:
-        """Count sandbox violations (shell-tool failures)."""
-        tool_name = getattr(event, "tool_name", "")
-        success = getattr(event, "success", False)
-
-        if tool_name in self._SANDBOX_TOOLS and not success:
+        """Count only explicitly classified sandbox violations."""
+        if getattr(event, "sandbox_violation", False):
             self._sandbox_violations += 1
 
     def _handle_tool_call_started(self, event: BaseEvent) -> None:

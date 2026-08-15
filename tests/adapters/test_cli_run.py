@@ -1,6 +1,10 @@
 """Tests for the CLI streaming helper (TODO L.1)."""
 
 import io
+import json
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import AsyncMock
@@ -13,6 +17,342 @@ from synapse.protocols.events import (
     ToolCallStarted,
     ToolCallCompleted,
 )
+
+
+def test_eval_config_dataset_identity_is_path_free(tmp_path):
+    from synapse.adapters.cli import _build_eval_config
+
+    left = tmp_path / "left" / "tasks.jsonl"
+    right = tmp_path / "right" / "tasks.jsonl"
+    left.parent.mkdir()
+    right.parent.mkdir()
+    left.write_text('{"id":"one"}\n', encoding="utf-8")
+    right.write_bytes(left.read_bytes())
+
+    def config_for(path):
+        args = SimpleNamespace(
+            benchmark="terminal_bench",
+            repeat=2,
+            max_tasks=1,
+            dataset=str(path),
+            dataset_version="v1",
+            dataset_source="fixture",
+            dataset_license="MIT",
+            workspace=None,
+        )
+        return _build_eval_config(args, "openai", "fixture-model", "temporary")
+
+    first = config_for(left)
+    second = config_for(right)
+    assert first == second
+    assert str(tmp_path) not in json.dumps(first)
+
+
+def test_workspace_identity_changes_with_repo_state_without_leaking_path(tmp_path):
+    from synapse.adapters.cli import _workspace_identity
+
+    try:
+        subprocess.run(["git", "--version"], check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("git is unavailable")
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "eval@example.test"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Eval"], cwd=root, check=True)
+    source = root / "value.txt"
+    source.write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+
+    clean = _workspace_identity(root)
+    source.write_text("two\n", encoding="utf-8")
+    dirty = _workspace_identity(root)
+
+    assert clean["kind"] == "git"
+    assert clean["state_sha256"] != dirty["state_sha256"]
+    assert dirty["dirty"] is True
+    assert str(root) not in json.dumps(dirty)
+
+
+@pytest.mark.asyncio
+async def test_swebench_cli_rejects_host_execution_before_runner(tmp_path, monkeypatch):
+    from synapse.adapters.cli import _run_swebench_eval
+    from synapse.eval.runner import BenchmarkRunner
+
+    dataset = tmp_path / "tasks.jsonl"
+    dataset.write_text(
+        json.dumps({
+            "instance_id": "one",
+            "problem_statement": "Fix it",
+            "repo": "example/repo",
+            "base_commit": "deadbeef",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("benchmark runner must not start")
+
+    monkeypatch.setattr(BenchmarkRunner, "run", must_not_run)
+    args = SimpleNamespace(
+        dataset=str(dataset),
+        max_tasks=None,
+        repeat=1,
+        trusted_host_execution=False,
+    )
+
+    with pytest.raises(RuntimeError, match="trusted_host_execution=True"):
+        await _run_swebench_eval(args, "openai", "fixture-model", tmp_path / "report.json")
+
+
+@pytest.mark.asyncio
+async def test_terminal_cli_rejects_host_grader_before_runner(tmp_path, monkeypatch):
+    from synapse.adapters.cli import _run_terminal_eval
+    from synapse.eval.runner import BenchmarkRunner
+
+    dataset = tmp_path / "tasks.jsonl"
+    dataset.write_text(
+        json.dumps({
+            "task_id": "one",
+            "instruction": "Create marker.txt",
+            "grader_command": ["python", "-c", "raise SystemExit(0)"],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    async def must_not_run(*_args, **_kwargs):
+        raise AssertionError("benchmark runner must not start")
+
+    monkeypatch.setattr(BenchmarkRunner, "run", must_not_run)
+    args = SimpleNamespace(
+        benchmark="terminal_bench",
+        dataset=str(dataset),
+        max_tasks=None,
+        repeat=1,
+        trusted_host_execution=False,
+    )
+
+    with pytest.raises(RuntimeError, match="trusted_host_execution=True"):
+        await _run_terminal_eval(
+            args, "openai", "fixture-model", tmp_path / "report.json",
+        )
+
+
+@pytest.mark.asyncio
+async def test_experiment_cli_supplies_comparability_evidence(tmp_path, monkeypatch):
+    from synapse.adapters.cli import _run_experiment
+    import synapse.adapters.library as library
+
+    class FakeSynapse:
+        def __init__(self, **config):
+            self.config = config
+
+        async def run(self, _task):
+            return AgentResult(
+                status=ResultStatus.SUCCESS,
+                output="done",
+                metrics=ExecutionMetrics(
+                    duration_ms=10,
+                    tokens_input=4,
+                    tokens_output=2,
+                    tool_call_count=1,
+                    tool_success_count=1,
+                ),
+            )
+
+        def get_run_score(self):
+            return {"model_id": "fixture-model", "safety": {}}
+
+        def get_effective_config(self):
+            return {
+                "variant": self.config["variant"],
+                "provider": {"max_tokens": 100, "timeout_seconds": 30},
+                "planning": {
+                    "max_iterations": 5,
+                    "max_tokens_per_task": 1000,
+                    "total_timeout_seconds": 60,
+                },
+                "context": {"total_tokens": 500},
+                "security": {
+                    "sandbox_enabled": True,
+                    "sandbox_mode": "enforce",
+                    "sandbox_backend": "docker",
+                    "sandbox_network": False,
+                    "auth_confirmation": True,
+                    "allowed_paths": [],
+                    "allow_external": False,
+                },
+                "tools": {"enabled": ["read"], "allowlist_commands": []},
+                "runtime": {"enable_external_tools": False, "mcp_servers": []},
+            }
+
+    monkeypatch.setattr(library, "Synapse", FakeSynapse)
+    report = tmp_path / "experiment.json"
+    args = SimpleNamespace(
+        name="contract",
+        config_a='{"variant":"A"}',
+        config_b='{"variant":"B"}',
+        task="diagnostic task",
+        runs=2,
+        primary_metric="duration_ms",
+        direction="lower",
+        seed=7,
+        allowed_config_diff=["variant"],
+        report=str(report),
+    )
+
+    await _run_experiment(args)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["comparability_eligible"] is True
+    assert payload["comparability_issues"] == []
+    assert payload["comparability_evidence"]["workspace_instances"] == 4
+
+
+@pytest.mark.asyncio
+async def test_experiment_cli_runs_multitask_dataset_with_external_grader(
+    tmp_path, monkeypatch,
+):
+    from synapse.adapters.cli import _run_experiment
+    import synapse.adapters.library as library
+
+    class FakeSynapse:
+        def __init__(self, **config):
+            self.config = config
+
+        async def run(self, task, **_kwargs):
+            (Path(self.config["workspace_root"]) / f"{task}.txt").write_text(
+                "ok", encoding="utf-8",
+            )
+            return AgentResult(
+                status=ResultStatus.SUCCESS,
+                output="done",
+                metrics=ExecutionMetrics(
+                    duration_ms=10,
+                    tokens_input=4,
+                    tokens_output=2,
+                    tool_call_count=1,
+                    tool_success_count=1,
+                ),
+            )
+
+        def get_run_score(self):
+            return {"model_id": "fixture-model", "safety": {}}
+
+        def get_effective_config(self):
+            return {
+                "variant": self.config["variant"],
+                "provider": {"max_tokens": 100, "timeout_seconds": 30},
+                "planning": {
+                    "max_iterations": 5,
+                    "max_tokens_per_task": 1000,
+                    "total_timeout_seconds": 60,
+                    "max_tool_result_chars": 1000,
+                },
+                "context": {"total_tokens": 500},
+                "security": {
+                    "sandbox_enabled": True,
+                    "sandbox_mode": "enforce",
+                    "sandbox_backend": "docker",
+                    "sandbox_network": False,
+                    "auth_confirmation": True,
+                    "allowed_paths": [],
+                    "allow_external": False,
+                },
+                "tools": {"enabled": ["read", "write"], "allowlist_commands": []},
+                "runtime": {"enable_external_tools": False, "mcp_servers": []},
+            }
+
+    monkeypatch.setattr(library, "Synapse", FakeSynapse)
+    dataset = tmp_path / "tasks.jsonl"
+    dataset.write_text(
+        "\n".join([
+            json.dumps({
+                "id": "one", "instruction": "one",
+                "expected_files": {"one.txt": "ok"},
+            }),
+            json.dumps({
+                "id": "two", "instruction": "two",
+                "expected_files": {"two.txt": "ok"},
+            }),
+        ]),
+        encoding="utf-8",
+    )
+    report = tmp_path / "multitask.json"
+    args = SimpleNamespace(
+        name="multitask",
+        config_a='{"variant":"A"}',
+        config_b='{"variant":"B"}',
+        task="unused",
+        dataset=str(dataset),
+        max_tasks=None,
+        trusted_host_execution=False,
+        runs=1,
+        primary_metric=None,
+        direction=None,
+        seed=7,
+        allowed_config_diff=["variant"],
+        report=str(report),
+    )
+
+    await _run_experiment(args)
+
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["primary_metric"] == "functional_success"
+    assert payload["task_count"] == 2
+    assert payload["attempt_pairs"] == 2
+    assert payload["metric_coverage"]["functional_success"]["complete_tasks"] == 2
+    assert payload["comparability_eligible"] is True
+    assert report.with_suffix(".html").exists()
+
+
+@pytest.mark.asyncio
+async def test_experiment_cli_rejects_dataset_with_passing_baseline(
+    tmp_path, monkeypatch,
+):
+    from synapse.adapters.cli import _run_experiment
+    import synapse.adapters.library as library
+
+    class FakeSynapse:
+        def __init__(self, **config):
+            self.config = config
+
+        async def run(self, _task, **_kwargs):
+            raise AssertionError("Agent must not run before dataset preflight")
+
+        def get_effective_config(self):
+            return {"variant": self.config["variant"]}
+
+    monkeypatch.setattr(library, "Synapse", FakeSynapse)
+    dataset = tmp_path / "tasks.jsonl"
+    dataset.write_text(
+        json.dumps({
+            "id": "already-green",
+            "instruction": "do nothing",
+            "setup_files": {"marker.txt": "ok"},
+            "expected_files": {"marker.txt": "ok"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        name="invalid-baseline",
+        config_a='{"variant":"A"}',
+        config_b='{"variant":"B"}',
+        task="unused",
+        dataset=str(dataset),
+        max_tasks=None,
+        trusted_host_execution=False,
+        runs=1,
+        primary_metric=None,
+        direction=None,
+        seed=7,
+        allowed_config_diff=["variant"],
+        report=str(tmp_path / "must-not-exist.json"),
+    )
+
+    with pytest.raises(RuntimeError, match="baseline already passes"):
+        await _run_experiment(args)
 
 
 @pytest.mark.asyncio

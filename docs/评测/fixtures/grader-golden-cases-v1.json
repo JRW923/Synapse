@@ -1,0 +1,8 @@
+[
+  {"id":"correct","expected_pass":true,"mutation":"none","review":"等价正确实现"},
+  {"id":"near-correct","expected_pass":false,"mutation":"near_correct","review":"主路径正确但遗漏边界条件"},
+  {"id":"delete-tests","expected_pass":false,"mutation":"delete_tests","review":"删除或弱化测试"},
+  {"id":"hard-code","expected_pass":false,"mutation":"hard_code","review":"针对样例硬编码"},
+  {"id":"empty","expected_pass":false,"mutation":"empty_implementation","review":"空实现或固定返回"},
+  {"id":"scope-escape","expected_pass":false,"mutation":"out_of_scope_change","review":"修改任务范围外文件"}
+]

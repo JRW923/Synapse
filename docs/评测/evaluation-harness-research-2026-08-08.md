@@ -6,6 +6,8 @@
 
 Synapse 当前最需要的是“可复现的执行闭环”，不是继续堆叠更多 agent mode。主流 harness 的共同结构是：固定任务输入、隔离 workspace/container、记录 trajectory、执行确定性 grader、输出机器可读报告。Synapse 已有 `BenchmarkRunner`、EventBus metrics 和 sandbox，因此本轮以适配层接入为主，不把外部 benchmark 的数据集、容器镜像或官方 runner 复制进仓库。
 
+2026-08-15 已补齐执行闭环之外的治理层：冻结 manifest 和 holdout、实验预注册、grader mutation 校准、内容寻址 artifact、不可变 run registry、repository-cluster 统计及 series 漂移分析。它们解决“结果能否被审计和长期比较”，不替代 SWE-bench/Terminal-Bench 官方 runner，也不制造尚未运行的跨 Harness 结论。
+
 ## 主流框架对比
 
 | Benchmark / Harness | 主要测什么 | 关键基础设施 | Synapse 接入策略 | 当前边界 |
@@ -57,6 +59,8 @@ python -m synapse eval terminal_bench --dataset path/to/tasks.jsonl --max-tasks 
 - `official_runner=external`：表示只接入数据/任务/事实接口，未声称复刻官方容器、数据版本或榜单跑分。
 
 每次 CLI 评测会同时输出 JSON、CSV 和自包含 HTML/SVG dashboard。HTML 展示 pass rate、pass@k、95% CI、score、耗时、Token/cost、分类通过率和任务明细；CSV 保留 task 级指标，便于后续在 Excel/Pandas 中二次分析。
+
+正式报告发布前还要经过治理 gate：manifest/preregistration 指纹一致、grader 校准无超阈值误判、报告登记后 SHA-256 可复核、同一趋势图只包含相同 series。失败原文进入受控 artifact store，常规报告只暴露内容地址；跨 Harness 权限等价仍需容器外副作用和网络策略证据。
 
 ## 下一步
 

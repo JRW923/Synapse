@@ -61,6 +61,7 @@ class ToolCallCompleted(BaseEvent):
     success: bool
     duration_ms: int
     files_touched: list[str] = field(default_factory=list)
+    sandbox_violation: bool = False
 
 
 @dataclass(kw_only=True)
@@ -92,6 +93,10 @@ class AgentCompleted(BaseEvent):
     total_tokens: int
     tool_calls: int
     duration_ms: int
+    # Exact split when the planner/provider exposes it. Older producers can
+    # keep sending only total_tokens; metric collectors retain a fallback.
+    tokens_input: int | None = None
+    tokens_output: int | None = None
 
 
 @dataclass(kw_only=True)

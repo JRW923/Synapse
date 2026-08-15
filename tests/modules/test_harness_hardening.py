@@ -130,7 +130,7 @@ async def test_repo_pytest_benchmark_runs_real_git_fixture():
             status=ResultStatus.SUCCESS, output="fixed", metrics=ExecutionMetrics(),
         )
 
-    result = await RepoPytestBenchmark().run(fix)
+    result = await RepoPytestBenchmark().run(fix, trusted_host_execution=True)
     assert result.baseline_failed
     assert result.tests_passed
     assert any("calculator.py" in path for path in result.changed_files)
@@ -198,6 +198,7 @@ def test_swebench_executes_patch_and_private_tests(tmp_path: Path):
         str(repo), commit, patch_text,
         {"test_private.py": "from calculator import add\n\ndef test_add(): assert add(2, 3) == 5\n"},
         timeout=60,
+        trusted_host_execution=True,
     )
     assert result.applied
     assert result.passed, result.output

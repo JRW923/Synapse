@@ -19,6 +19,8 @@ class RunScore:
 
     task: str = ""
     status: str = ""
+    run_id: str = ""
+    model_id: str = ""
     safety: SafetySnapshot = field(default_factory=SafetySnapshot)
     process: ProcessSnapshot = field(default_factory=ProcessSnapshot)
     quality: QualitySnapshot = field(default_factory=QualitySnapshot)
@@ -28,6 +30,8 @@ class RunScore:
         return {
             "task": self.task,
             "status": self.status,
+            "run_id": self.run_id,
+            "model_id": self.model_id,
             "safety": asdict(self.safety),
             "process": asdict(self.process),
             "quality": asdict(self.quality),

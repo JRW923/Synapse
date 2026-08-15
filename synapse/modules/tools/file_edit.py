@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
+from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
 
 
 class EditTool:
@@ -24,8 +25,17 @@ class EditTool:
     risk_level = RiskLevel.WRITE_LOCAL
     category = ToolCategory.FILE
 
+    def __init__(self, workspace_root: str | None = None):
+        self._workspace_root = Path(workspace_root).resolve() if workspace_root else None
+
     async def execute(self, params: dict, sandbox=None) -> ToolResult:
-        path = Path(params["path"])
+        try:
+            path = resolve_workspace_path(params["path"], self._workspace_root)
+        except (WorkspacePathError, ValueError) as e:
+            return ToolResult(
+                success=False, output="", error=str(e),
+                metadata=ToolCallMetadata(tool_name="edit"),
+            )
         old = params["old_string"]
         new = params["new_string"]
         meta = ToolCallMetadata(tool_name="edit")

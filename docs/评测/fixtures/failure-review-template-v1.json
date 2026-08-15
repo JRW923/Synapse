@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "report_id": "replace-with-run-id",
+  "reviewer": "",
+  "reviewed_at": "",
+  "samples": [
+    {
+      "task_id": "",
+      "attempt": 1,
+      "artifact_uri": "artifact://sha256/replace",
+      "primary_category": "model_reasoning",
+      "secondary_factors": [],
+      "agent_claimed_success": false,
+      "external_grader_passed": false,
+      "grader_disputed": false,
+      "security_relevant": false,
+      "scope_side_effect": false,
+      "review_note": "",
+      "adjudication": "accepted"
+    }
+  ],
+  "allowed_primary_categories": [
+    "model_reasoning",
+    "tool_execution",
+    "completion_false_positive",
+    "safety_blocked",
+    "sandbox_escape",
+    "grader_error",
+    "provider_error",
+    "environment_error"
+  ]
+}

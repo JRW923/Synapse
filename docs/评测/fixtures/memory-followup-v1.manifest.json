@@ -1,0 +1,56 @@
+{
+  "created_at": "2026-08-15T06:34:32.462415+00:00",
+  "files": [
+    {
+      "bytes": 1137,
+      "name": "memory-followup-v1.jsonl",
+      "sha256": "1f87db7285dc99de3ab423432119e84a56f865a91446d399ffdd8d77ac08260c"
+    }
+  ],
+  "grader_version": "contract-v1",
+  "image_digest": "local-process:no-container",
+  "license": "MIT",
+  "manifest_sha256": "aacaf0c3030485646891426fa8b3900fe89e5526476c862eb0e15b2c853746af",
+  "name": "memory-followup",
+  "schema_version": 1,
+  "source": "repository-fixture",
+  "split": {
+    "dev": [
+      "memory-sequence-1-step-1",
+      "memory-sequence-1-step-2"
+    ],
+    "formal": [],
+    "holdout": [
+      "memory-sequence-2-step-1",
+      "memory-sequence-2-step-2"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "memory-sequence-1-step-1",
+      "repository_id": "fixture-memory",
+      "sha256": "850cadae851f843a427a6aaae05fa9e6f903c6ed307a804c4f2aa2161b49a8b7",
+      "split": "dev"
+    },
+    {
+      "id": "memory-sequence-1-step-2",
+      "repository_id": "fixture-memory",
+      "sha256": "026f85ea01e4477a0c7b8c568014d48268b70e56fc47c654aa94a7630025fa80",
+      "split": "dev"
+    },
+    {
+      "id": "memory-sequence-2-step-1",
+      "repository_id": "fixture-memory-holdout",
+      "sha256": "f9880eca32a96ba8ce42f55a376eaa41117f663190eecadff4393ccebff33fbf",
+      "split": "holdout"
+    },
+    {
+      "id": "memory-sequence-2-step-2",
+      "repository_id": "fixture-memory-holdout",
+      "sha256": "16cfb46f46b94e9b89d00a9b5ce80f0d71076ee016cc13fde5256b965d23f207",
+      "split": "holdout"
+    }
+  ],
+  "tombstones": [],
+  "version": "1.0.0"
+}

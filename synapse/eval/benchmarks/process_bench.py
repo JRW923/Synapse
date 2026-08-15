@@ -53,7 +53,15 @@ class ProcessQualityBenchmark:
             name=cls.BENCHMARK_NAME,
             tasks=tasks if tasks is not None else cls.tasks(),
             grader=cls.grade,
-            metadata={"grader": "runtime_process_snapshot", "functional": False},
+            metadata={
+                "grader": "runtime_process_snapshot",
+                "functional": False,
+                "dataset_manifest": {
+                    "version": "1",
+                    "source": "bundled process-quality task set",
+                    "license": "not_declared",
+                },
+            },
         )
 
     @staticmethod

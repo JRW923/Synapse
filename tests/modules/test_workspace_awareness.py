@@ -7,7 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from synapse.modules.planning.react import ReActPlanner, _working_directory
+from synapse.modules.tools.file_edit import EditTool
 from synapse.modules.tools.file_write import WriteTool
+from synapse.modules.tools.git_ import GitTool
+from synapse.modules.tools.shell import ShellTool
 
 
 # --- _working_directory helper -------------------------------------------------
@@ -51,15 +54,78 @@ async def test_relative_path_resolves_to_workspace_root(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_absolute_path_is_not_rebased(tmp_path):
+async def test_absolute_path_outside_workspace_is_rejected(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     other = tmp_path / "other" / "x.md"
     tool = WriteTool(workspace_root=str(ws))
     res = await tool.execute({"path": str(other), "content": "y"})
-    assert res.success
-    assert other.exists()
+    assert not res.success
+    assert "outside workspace" in res.error
+    assert not other.exists()
     assert not (ws / "other").exists()
+
+
+@pytest.mark.asyncio
+async def test_edit_and_git_reject_paths_outside_workspace(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("before", encoding="utf-8")
+
+    edited = await EditTool(workspace_root=str(ws)).execute({
+        "path": str(outside),
+        "old_string": "before",
+        "new_string": "after",
+    })
+    git = await GitTool(workspace_root=str(ws)).execute({
+        "command": "status",
+        "cwd": str(tmp_path),
+    })
+
+    assert not edited.success
+    assert not git.success
+    assert outside.read_text(encoding="utf-8") == "before"
+
+
+class _RecordingSandbox:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, command, cwd, timeout):
+        self.calls.append((command, cwd, timeout))
+        return SimpleNamespace(exit_code=0, stdout="ok", stderr="")
+
+
+@pytest.mark.asyncio
+async def test_shell_rejects_cwd_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sandbox = _RecordingSandbox()
+    result = await ShellTool(workspace_root=str(workspace)).execute(
+        {"command": "echo safe", "cwd": str(tmp_path)},
+        sandbox=sandbox,
+    )
+
+    assert not result.success
+    assert "outside workspace" in result.error
+    assert result.metadata.sandbox_violation is True
+    assert sandbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_shell_resolves_cwd_inside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    child = workspace / "child"
+    child.mkdir(parents=True)
+    sandbox = _RecordingSandbox()
+    result = await ShellTool(workspace_root=str(workspace)).execute(
+        {"command": "echo safe", "cwd": "child"},
+        sandbox=sandbox,
+    )
+
+    assert result.success
+    assert sandbox.calls == [("echo safe", str(child.resolve()), 120)]
 
 
 @pytest.mark.asyncio

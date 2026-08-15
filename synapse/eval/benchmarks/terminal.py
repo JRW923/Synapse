@@ -8,11 +8,15 @@ the project stays installable offline and does not vendor external data.
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from synapse.eval.runner import Benchmark, BenchmarkTask, TaskGrade
-from synapse.protocols.planner import AgentResult, ResultStatus
+from synapse.protocols.planner import AgentResult
 
 
 class TerminalBenchAdapter:
@@ -61,17 +65,24 @@ class TerminalBenchAdapter:
                 "harness": "terminal-bench-compatible",
                 "official_runner": "external",
                 "trajectory": "event_bus_and_run_score",
+                "dataset_manifest": {
+                    "source": "user-provided Terminal-Bench-compatible export",
+                    "license": "unknown",
+                    "grader_timeouts_seconds": [120],
+                },
             },
         )
 
     @staticmethod
     def grade(task, agent_result: AgentResult, run_score: dict | None) -> TaskGrade:
         facts = (run_score or {}).get("terminal", {})
+        grader_error = facts.get("grader_error")
+        if grader_error:
+            raise RuntimeError(str(grader_error))
         passed = bool(facts.get("passed"))
-        status_ok = agent_result.status == ResultStatus.SUCCESS
-        score = 1.0 if passed and status_ok else (0.5 if passed else 0.0)
+        score = 1.0 if passed else 0.0
         return TaskGrade(
-            passed=passed and status_ok,
+            passed=passed,
             score=score,
             reason="terminal grader passed" if passed else "terminal grader failed",
             details={
@@ -83,8 +94,83 @@ class TerminalBenchAdapter:
         )
 
     @staticmethod
-    def grade_workspace(task: BenchmarkTask, workspace: str | Path) -> dict:
+    def require_trusted_host_execution(
+        tasks: list[BenchmarkTask], trusted_host_execution: bool = False,
+    ) -> None:
+        """Reject task-declared host commands before an Agent run starts."""
+        requires_host = any(
+            task.metadata.get("grader_command") not in (None, "", [])
+            for task in tasks
+        )
+        if requires_host and trusted_host_execution is not True:
+            raise RuntimeError(
+                "Terminal grader host execution is disabled; pass "
+                "trusted_host_execution=True only for trusted datasets"
+            )
+
+    @staticmethod
+    def preflight(
+        task: BenchmarkTask,
+        workspace: str | Path,
+        *,
+        trusted_host_execution: bool = False,
+    ) -> dict:
+        """Validate the task grader against a clean copy before Agent work.
+
+        The copy prevents a command grader from leaving caches or generated
+        files in the measured workspace.  A task that already passes is
+        rejected instead of being reported as an Agent success; a missing or
+        broken grader is an infrastructure/configuration error, not a model
+        failure.
+        """
+        metadata = task.metadata
+        expected_files = metadata.get("expected_files")
+        raw_command = metadata.get("grader_command")
+        has_expected = isinstance(expected_files, dict) and bool(expected_files)
+        has_command = raw_command not in (None, "", [])
+        if not has_expected and not has_command:
+            raise RuntimeError(
+                f"task {task.id} has no external grader; declare expected_files "
+                "or grader_command"
+            )
+
+        root = Path(workspace).expanduser().resolve()
+        if not root.is_dir():
+            raise RuntimeError(f"workspace does not exist: {root}")
+        with tempfile.TemporaryDirectory(prefix="synapse-terminal-preflight-") as tmp:
+            copy_root = Path(tmp) / "workspace"
+            shutil.copytree(root, copy_root)
+            facts = TerminalBenchAdapter.grade_workspace(
+                task,
+                copy_root,
+                trusted_host_execution=trusted_host_execution,
+            )
+        if facts.get("grader_error"):
+            raise RuntimeError(
+                f"task {task.id} grader preflight failed: {facts['grader_error']}"
+            )
+        if facts.get("passed"):
+            raise RuntimeError(
+                f"task {task.id} baseline already passes; refusing to score it"
+            )
+        return {
+            "passed": False,
+            "grader": facts.get("grader", "unknown"),
+            "missing": facts.get("missing", []),
+            "mismatched": facts.get("mismatched", []),
+        }
+
+    @staticmethod
+    def grade_workspace(
+        task: BenchmarkTask,
+        workspace: str | Path,
+        *,
+        trusted_host_execution: bool = False,
+    ) -> dict:
         """Run a task's declared command or deterministic file assertions."""
+        TerminalBenchAdapter.require_trusted_host_execution(
+            [task], trusted_host_execution,
+        )
         root = Path(workspace).expanduser().resolve()
         expected_files = task.metadata.get("expected_files", {})
         missing = []
@@ -92,21 +178,58 @@ class TerminalBenchAdapter:
         for relative, expected in expected_files.items():
             target = (root / str(relative)).resolve()
             if not target.is_relative_to(root):
-                return {"passed": False, "grader": "filesystem", "output": "path escapes workspace"}
+                return {
+                    "passed": False,
+                    "grader": "filesystem",
+                    "grader_error": "expected file path escapes workspace",
+                    "output": "path escapes workspace",
+                }
             if not target.is_file():
                 missing.append(str(relative))
                 continue
             if expected is not None and target.read_text(encoding="utf-8") != str(expected):
                 mismatched.append(str(relative))
-        command = str(task.metadata.get("grader_command", "")).strip()
+        raw_command = task.metadata.get("grader_command")
+        command: list[str] = []
+        if isinstance(raw_command, str) and raw_command.strip():
+            try:
+                command = shlex.split(raw_command, posix=os.name != "nt")
+            except ValueError:
+                return {
+                    "passed": False, "grader": "command", "output": "invalid grader command",
+                    "grader_error": "invalid grader command",
+                    "missing": missing, "mismatched": mismatched,
+                }
+        elif isinstance(raw_command, (list, tuple)):
+            if any(not isinstance(item, str) or not item for item in raw_command):
+                return {
+                    "passed": False, "grader": "command", "output": "invalid grader argv",
+                    "grader_error": "invalid grader argv",
+                    "missing": missing, "mismatched": mismatched,
+                }
+            command = list(raw_command)
+        elif raw_command not in (None, ""):
+            return {
+                "passed": False, "grader": "command", "output": "invalid grader command",
+                "grader_error": "invalid grader command",
+                "missing": missing, "mismatched": mismatched,
+            }
         if command:
+            safe_env_keys = {
+                "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "PYTHONIOENCODING",
+                "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "WINDIR",
+            }
             completed = subprocess.run(
                 command,
                 cwd=root,
-                shell=True,
+                shell=False,
                 capture_output=True,
                 text=True,
                 timeout=int(task.metadata.get("timeout", 120)),
+                env={
+                    key: value for key, value in os.environ.items()
+                    if key.upper() in safe_env_keys
+                },
             )
             output = (completed.stdout + completed.stderr)[-4000:]
             return {
@@ -158,5 +281,10 @@ class TerminalSmokeBenchmark:
                 "harness": "terminal-bench-compatible",
                 "isolation": "temporary_workspace",
                 "official_runner": "not_required",
+                "dataset_manifest": {
+                    "version": "1",
+                    "source": "bundled deterministic fixture",
+                    "license": "not_declared",
+                },
             },
         )

@@ -28,7 +28,7 @@ Synapse 是一个 Python 实现的端到端 Code Agent Harness。它不是把 LL
 | 可复现评测 | `repo_pytest`、`terminal_smoke`、`terminal_bench`、SWE-bench 适配、Red Team、重复实验 |
 | 可观测性 | EventBus 事件驱动、运行时四维评分、原子写 Session 持久化 |
 
-规模：`synapse/` 约 18.6k 行 Python，73 个测试文件 / 431 个测试函数（参数化后 435 个用例），测试快照 `434 passed, 1 skipped`。
+评测实现、验证快照和结论边界统一记录在[评测系统优化计划](docs/评测/evaluation-system-optimization-plan-2026-08-14.md)；工程回归只证明评测链路行为，不代表模型或 Harness 能力提升。
 
 ## 核心特色
 
@@ -60,8 +60,12 @@ Token、工具、授权、Agent、Swarm、过程质量等事件统一进入 Even
 - `terminal_smoke`：离线终端 fixture，验证文件状态和命令结果。
 - `terminal_bench`：兼容常见 JSON/JSONL 任务字段、隔离 workspace 和命令 grader。
 - `swebench`：本地数据集驱动的 clone、checkout、patch、private tests 执行路径。
-- `--repeat N`：保存每次 attempt，汇总 Pass@k、Wilson 95% CI、Token、cost 和 tool success rate。
-- 每个 JSON 报告自动生成双语 HTML Dashboard 与双语 CSV；CSV 保留原英文 machine key，并在每个字段旁附上中文别名，兼顾脚本兼容性和人工阅读。
+- `--repeat N`：保存每次 attempt，区分 attempt 通过率与 task success@N，并输出 Pass@k、Pass^k 及各自 95% CI。
+- 数据集包含完整 `repository_id` 时，正式区间自动按 repository cluster 重采样，避免同一仓库多题被当成独立证据。
+- 报告同时记录仅基于有效外部 grader 的成功误报率、延迟 median/P95、Token 覆盖率与每次成功的预估成本、dataset manifest、配置/任务集/Git 指纹及成本单价来源；runner 提供证据时再记录实际 model/run ID。
+- `governance`：冻结数据集与 split/tombstone、预注册主指标和样本量、校准 grader golden cases、归档失败产物、登记不可变 run，并分析同一 series 的趋势与漂移。
+- `experiment`：同轮 A/B 随机交错，支持多指标独立方向、配对 bootstrap CI、随机化检验和 `agent_reported_success`/安全 guardrail；提供 `--dataset` 时按任务独立 workspace、同 baseline 和外部 grader 做多任务配对，并持久化脱敏配置、配置指纹和运行顺序。无 dataset 的命令只用于运行时诊断。
+- `synapse eval` 输出 JSON、双语 HTML Dashboard 与 CSV；多任务 `experiment` 输出 JSON 与自包含 HTML。JSON 是事实来源，HTML 不改变统计口径。
 
 ## 快速开始
 
@@ -102,24 +106,62 @@ REPL 常用命令：`/help`、`/model`、`/model add`、`/mode`、`/resume`、`/
 ## 评测与可视化
 
 ```bash
-# 本地功能基准，适合第一次验证 Harness
+# 内置单题 fixture，只验证 Agent -> workspace -> grader -> report 链路
+# 不代表模型或 Harness 的能力成绩
 python -m synapse eval repo_pytest --repeat 3 \
   --provider deepseek --model deepseek-v4-flash \
+  --trusted-host-execution \
   --report eval-results/repo.json
 
 # 离线 Terminal-Bench 风格 smoke
 python -m synapse eval terminal_smoke --repeat 3 \
   --report eval-results/terminal-smoke.json
 
-# 本地 JSON/JSONL 数据集适配
-python -m synapse eval terminal_bench --dataset path/to/tasks.jsonl --max-tasks 10
-python -m synapse eval swebench --dataset path/to/swebench.jsonl --max-tasks 10
+# 本地 JSON/JSONL 数据集适配；只有确认数据与 grader 可信时才允许宿主执行
+python -m synapse eval terminal_bench --dataset path/to/tasks.jsonl --max-tasks 10 \
+  --trusted-host-execution
+python -m synapse eval swebench --dataset path/to/swebench.jsonl --max-tasks 10 \
+  --trusted-host-execution
 
 # 对已有 JSON 重新生成报告
 python -m synapse.eval.visualize eval-results/repo.json
+
+# 冻结数据集；已有 manifest 不允许原地覆盖
+python -m synapse.eval.governance freeze path/to/tasks.jsonl path/to/manifest.json \
+  --name internal-code --version 1.0.0 --source internal --license MIT \
+  --grader-version grader-v1 --image-digest sha256:...
+
+# 预注册、run 登记、完整性校验与趋势分析
+python -m synapse.eval.governance preregister prereg-spec.json prereg-frozen.json
+python -m synapse.eval.governance register eval-registry eval-results/repo.json \
+  --report-id run-2026-001 --series harness-v1 --role baseline \
+  --status complete --approval approved
+python -m synapse.eval.governance verify eval-registry eval-results
+python -m synapse.eval.governance trend eval-registry --series harness-v1
+
+# 同一模型下比较两组 Harness 配置；seed 控制配对顺序与统计重采样
+python -m synapse experiment --name context-ablation \
+  --config-a '{"eval_ablation":{"context":false}}' \
+  --config-b '{"eval_ablation":{"context":true}}' \
+  --allowed-config-diff runtime.eval_ablation.context \
+  --task "Fix the repository bug and verify it" --runs 6 \
+  --primary-metric duration_ms --direction lower --seed 42
+
+# 多任务功能对比；同一数据集、外部 grader、预算和权限，只替换 Harness 配置
+python -m synapse experiment --name harness-functional-ab \
+  --config-a '{"eval_ablation":{"context":false}}' \
+  --config-b '{"eval_ablation":{"context":true}}' \
+  --allowed-config-diff runtime.eval_ablation.context \
+  --dataset path/to/tasks.jsonl --max-tasks 20 --runs 3 \
+  --primary-metric functional_success --seed 42 \
+  --trusted-host-execution --report eval-results/harness-functional-ab.json
 ```
 
-评测完成后会得到：
+`experiment` 中的 `agent_reported_success` 是 Harness 状态，不等同于外部功能判分；跨 Harness 能力对比需固定同一模型、任务、权限与 grader，并使用多任务配对报告。
+
+HTTP `/eval/experiment` 只接受受限的 Harness 配置差异，拒绝请求覆盖 `api_key`、`base_url`、hooks、plugins、MCP、外部工具、workspace 与 sandbox/Auth 边界；需要这些能力的正式实验应由可信 runner 或固定容器编排，不从网络请求注入宿主执行配置。
+
+使用 `synapse eval` 完成 Benchmark 后会得到：
 
 ```text
 eval-results/repo.json   # 机器可读的完整报告
@@ -127,7 +169,9 @@ eval-results/repo.html   # 自包含、离线可打开的中文 / English Dashbo
 eval-results/repo.csv    # 逐任务数据，英文 machine key 与中文别名相邻
 ```
 
-HTML 展示通过率、Pass@k、置信区间、平均得分、耗时、输入/输出 Token、cost、工具成功率、过程得分、安全事件、分类通过率和逐任务 grader 结果。报告中的 `official_runner=external` 表示这是适配层，不冒充官方榜单分数。
+HTML 展示 attempt 通过率、task success@N、Pass@k/Pass^k 曲线、95% CI、验证状态与成功误报率、延迟 median/P95、输入/输出 Token 覆盖、预估成本与单价来源、工具成功率、过程/安全诊断、dataset manifest、复现指纹和逐任务 grader 结果。报告中的 `official_runner=external` 表示这是适配层，不冒充官方榜单分数。
+
+失败 attempt 可显式传入 `ArtifactStore` 写入内容寻址的受控目录，JSON 报告只保留 `artifact://sha256/...`、摘要和字节数。仓库内提供的 Memory follow-up 与 grader golden-case 文件只是冻结的离线契约 fixture，不是正式模型成绩。
 
 ## Harness 架构
 
@@ -182,7 +226,7 @@ synapse/
 
 **process containment 和 filesystem sandbox 有什么区别？** Windows Job Object / Unix process group 能保证子进程被回收，但不限制文件和网络访问。需要强隔离必须显式选择 Docker、bubblewrap 或 Seatbelt 后端。
 
-**怎么判断任务真的完成了？** 运行时 gate 看的是工具返回的 exit code，不是模型文本里的「已完成」；评测层的 grader 在 Agent 跑完之后由 harness 独立执行，并先确认 baseline 是失败的，排除「测试本来就过」的假阳性。
+**怎么判断任务真的完成了？** 运行时 gate 看的是工具返回的 exit code，不是模型文本里的「已完成」；评测层的 grader 在 Agent 跑完之后由 Harness 独立执行。正式数据集还必须在入库 preflight 中确认 baseline 失败、目标状态可通过，避免「测试本来就过」的假阳性。
 
 ## 文档
 

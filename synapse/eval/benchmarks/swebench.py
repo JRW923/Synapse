@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from synapse.eval.runner import Benchmark, BenchmarkTask, TaskGrade
-from synapse.protocols.planner import AgentResult, ResultStatus
+from synapse.protocols.planner import AgentResult
 
 
 @dataclass
@@ -138,14 +138,23 @@ class SWEBenchAdapter:
         limit: int | None = None,
     ) -> Benchmark:
         """Build a scored benchmark from a local SWE-bench JSONL export."""
-        tasks = cls.tasks(dataset_path, limit)
+        dataset = Path(dataset_path).expanduser().resolve()
+        tasks = cls.tasks(dataset, limit)
         return Benchmark(
             name="swebench",
             tasks=tasks,
             grader=cls.grade,
             metadata={
-                "dataset": str(Path(dataset_path).expanduser()),
+                "dataset": {
+                    "name": dataset.name,
+                    "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+                },
                 "functional_grader": "isolated_patch_private_tests",
+                "dataset_manifest": {
+                    "source": "user-provided SWE-bench-compatible export",
+                    "license": "unknown",
+                    "grader_timeouts_seconds": [900],
+                },
             },
         )
 
@@ -155,9 +164,8 @@ class SWEBenchAdapter:
         facts = (run_score or {}).get("swebench", {})
         applied = bool(facts.get("applied"))
         tested = bool(facts.get("tests_passed"))
-        status_ok = agent_result.status == ResultStatus.SUCCESS
         score = (0.4 if applied else 0.0) + (0.6 if tested else 0.0)
-        passed = applied and tested and status_ok
+        passed = applied and tested
         reason = "private tests passed" if passed else (
             "patch applied but private tests failed" if applied else "patch could not be applied"
         )
@@ -332,6 +340,15 @@ class SWEBenchAdapter:
         return bool(patch.strip()) and bool(private_tests.strip())
 
     @staticmethod
+    def require_trusted_host_execution(trusted_host_execution: bool = False) -> None:
+        """Reject host-side checkout and grader commands unless explicitly trusted."""
+        if trusted_host_execution is not True:
+            raise RuntimeError(
+                "SWE-bench host execution is disabled; pass "
+                "trusted_host_execution=True only for trusted datasets"
+            )
+
+    @staticmethod
     def execute(
         repo_url: str,
         base_commit: str,
@@ -340,8 +357,11 @@ class SWEBenchAdapter:
         test_command: list[str] | None = None,
         timeout: int = 900,
         private_test_patch: str = "",
+        *,
+        trusted_host_execution: bool = False,
     ) -> SWEBenchExecution:
         """Clone, checkout, apply a patch, inject private tests, and execute them."""
+        SWEBenchAdapter.require_trusted_host_execution(trusted_host_execution)
         if not patch.strip() or (not private_tests and not private_test_patch.strip()):
             return SWEBenchExecution(applied=False, passed=False, output="empty patch or tests")
         with tempfile.TemporaryDirectory(prefix="synapse-swebench-") as tmp:

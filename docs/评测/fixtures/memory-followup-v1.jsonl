@@ -1,0 +1,4 @@
+{"id":"memory-sequence-1-step-1","sequence_id":"memory-sequence-1","sequence_step":1,"split":"dev","repository_id":"fixture-memory","description":"读取项目约定并记录后续修改必须保留的接口约束","expected_memory_fact":"public API name must remain stable"}
+{"id":"memory-sequence-1-step-2","sequence_id":"memory-sequence-1","sequence_step":2,"split":"dev","repository_id":"fixture-memory","description":"在后续任务中修改实现，同时保持上一步识别出的接口约束","expected_memory_fact":"public API name must remain stable"}
+{"id":"memory-sequence-2-step-1","sequence_id":"memory-sequence-2","sequence_step":1,"split":"holdout","repository_id":"fixture-memory-holdout","description":"定位测试命令和工作区边界，供后续恢复任务使用","expected_memory_fact":"workspace and verification command"}
+{"id":"memory-sequence-2-step-2","sequence_id":"memory-sequence-2","sequence_step":2,"split":"holdout","repository_id":"fixture-memory-holdout","description":"模拟中断后继续任务并执行先前确认的验证命令","expected_memory_fact":"workspace and verification command"}

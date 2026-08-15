@@ -22,6 +22,7 @@ class EfficiencySnapshot:
     tokens_input: int = 0
     tokens_output: int = 0
     tokens_cache_hit: int = 0
+    token_count_source: str = "unavailable"
 
     tool_call_count: int = 0
     tool_success_count: int = 0
@@ -30,6 +31,9 @@ class EfficiencySnapshot:
     duration_ms: int = 0
 
     cost_estimate_usd: float = 0.0
+    cost_is_estimate: bool = True
+    input_cost_per_million_usd: float = 0.0
+    output_cost_per_million_usd: float = 0.0
 
     thrashing_ratio: float = 0.0
 
@@ -96,6 +100,7 @@ class EfficiencyMetrics:
         self._tokens_input = 0
         self._tokens_output = 0
         self._tokens_cache_hit = 0
+        self._token_count_source = "unavailable"
 
         self._tool_call_count = 0
         self._tool_success_count = 0
@@ -126,6 +131,7 @@ class EfficiencyMetrics:
             tokens_input=self._tokens_input,
             tokens_output=self._tokens_output,
             tokens_cache_hit=self._tokens_cache_hit,
+            token_count_source=self._token_count_source,
 
             tool_call_count=self._tool_call_count,
             tool_success_count=self._tool_success_count,
@@ -134,6 +140,9 @@ class EfficiencyMetrics:
             duration_ms=self._duration_ms,
 
             cost_estimate_usd=cost_estimate,
+            cost_is_estimate=True,
+            input_cost_per_million_usd=self._cost_per_m_input,
+            output_cost_per_million_usd=self._cost_per_m_output,
 
             thrashing_ratio=thrashing_ratio,
         )
@@ -164,11 +173,24 @@ class EfficiencyMetrics:
         """Track token totals and overall duration from agent_completed."""
         total_tokens = getattr(event, "total_tokens", 0)
         duration_ms = getattr(event, "duration_ms", 0)
+        tokens_input = getattr(event, "tokens_input", None)
+        tokens_output = getattr(event, "tokens_output", None)
 
-        # Split total_tokens into input/output using the default ratio when
-        # the event does not provide separate counts.
-        self._tokens_input += int(total_tokens * self._DEFAULT_INPUT_RATIO)
-        self._tokens_output += total_tokens - int(total_tokens * self._DEFAULT_INPUT_RATIO)
+        if tokens_input is not None and tokens_output is not None:
+            self._tokens_input += int(tokens_input)
+            self._tokens_output += int(tokens_output)
+            source = "exact"
+        else:
+            # Compatibility for legacy producers that only sent total_tokens.
+            estimated_input = int(total_tokens * self._DEFAULT_INPUT_RATIO)
+            self._tokens_input += estimated_input
+            self._tokens_output += total_tokens - estimated_input
+            source = "estimated_70_30"
+
+        if self._token_count_source == "unavailable":
+            self._token_count_source = source
+        elif self._token_count_source != source:
+            self._token_count_source = "mixed"
 
         self._duration_ms = duration_ms
 

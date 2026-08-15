@@ -22,6 +22,19 @@ class _FakeSandbox:
         return type("R", (), {"exit_code": 0, "stdout": f"{self.stdout}:{command}", "stderr": ""})()
 
 
+class _BlockingSandbox:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def execute(self, command, cwd, timeout):
+        self.started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            self.cancelled.set()
+
+
 async def test_background_returns_handle_then_event():
     bus = EventBus()
     captured = []
@@ -84,3 +97,19 @@ async def test_manager_no_sandbox_uses_subprocess():
     res = mgr.get_result(task_id)
     assert isinstance(res, ToolResult) and res.success
     assert "hello-bg" in res.output
+
+
+async def test_manager_aclose_cancels_owned_runner():
+    mgr = BackgroundTaskManager()
+    sandbox = _BlockingSandbox()
+    task_id = await mgr.run("sleep", ".", sandbox)
+    await asyncio.wait_for(sandbox.started.wait(), timeout=1)
+
+    await mgr.aclose()
+
+    assert sandbox.cancelled.is_set()
+    assert mgr.pending_count == 0
+    assert mgr.is_done(task_id)
+    result = mgr.get_result(task_id)
+    assert isinstance(result, ToolResult)
+    assert result.error == "background task cancelled"

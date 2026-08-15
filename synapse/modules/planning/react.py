@@ -171,6 +171,7 @@ class ReActPlanner:
                  tool_timeout_seconds: int = 120, llm_timeout_seconds: int = 120,
                  max_tool_result_chars: int = 16_000,
         max_llm_retries: int = 3,
+        completion_gate_enabled: bool = True,
         verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
         background_manager=None, skill_loader=None):
@@ -185,6 +186,7 @@ class ReActPlanner:
         self.llm_timeout_seconds = llm_timeout_seconds
         self.max_tool_result_chars = max_tool_result_chars
         self.max_llm_retries = max(0, int(max_llm_retries))
+        self.completion_gate_enabled = completion_gate_enabled
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
         # (e.g. "reviewer") without a separate class.
@@ -600,12 +602,8 @@ class ReActPlanner:
                                 tool_name, tool_input, risk_level, session.id,
                             )
                             decision = self.auth.authorize(auth_req)
-                            await event_bus.emit(AuthDecisionMade(
-                                session_id=session.id,
-                                tool_name=tool_name,
-                                allowed=decision.allowed,
-                                reason=decision.reason,
-                            ))
+                            final_allowed = decision.allowed
+                            final_reason = decision.reason
                             if not decision.allowed:
                                 denied_result = _denied_tool_result(
                                     tool_name, f"Authorization denied: {decision.reason}")
@@ -615,13 +613,23 @@ class ReActPlanner:
                                     if self._confirm is not None else False
                                 )
                                 if not approved:
-                                    denied_result = _denied_tool_result(
-                                        tool_name,
+                                    final_allowed = False
+                                    final_reason = (
                                         f"User denied: {decision.reason}"
                                         if self._confirm is not None
-                                        else f"Non-interactive confirmation required, "
-                                             f"no callback (auto-denied): {decision.reason}",
+                                        else "Non-interactive confirmation required, "
+                                             f"no callback (auto-denied): {decision.reason}"
                                     )
+                                    denied_result = _denied_tool_result(
+                                        tool_name,
+                                        final_reason,
+                                    )
+                            await event_bus.emit(AuthDecisionMade(
+                                session_id=session.id,
+                                tool_name=tool_name,
+                                allowed=final_allowed,
+                                reason=final_reason,
+                            ))
 
                     if denied_result is not None:
                         # Denied: record the blocked call and skip execution.
@@ -722,6 +730,7 @@ class ReActPlanner:
                         success=result.success,
                         duration_ms=duration_ms,
                         files_touched=result.metadata.files_touched,
+                        sandbox_violation=result.metadata.sandbox_violation,
                     ))
 
             # Drop any prefetched task nobody consumed (denied call, early
@@ -757,7 +766,7 @@ class ReActPlanner:
         # Runtime completion gate: code changes need executable evidence. Keep
         # natural-language tasks permissive, while preventing a model from
         # claiming a repository fix without running a relevant check.
-        if code_task and result_status == ResultStatus.SUCCESS:
+        if self.completion_gate_enabled and code_task and result_status == ResultStatus.SUCCESS:
             if not verification_seen:
                 result_status = ResultStatus.PARTIAL
                 final_output = ((final_output + "\n\n") if final_output else "") + (
@@ -782,6 +791,8 @@ class ReActPlanner:
                 total_tokens=metrics.tokens_input + metrics.tokens_output,
                 tool_calls=metrics.tool_call_count,
                 duration_ms=metrics.duration_ms,
+                tokens_input=metrics.tokens_input,
+                tokens_output=metrics.tokens_output,
             ))
         return AgentResult(
             status=result_status,

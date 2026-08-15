@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
+from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
 
 
 class WriteTool:
@@ -42,16 +43,17 @@ class WriteTool:
 
     async def execute(self, params: dict, sandbox=None) -> ToolResult:
         raw = params["path"]
-        path = self._resolve_path(raw)
+        try:
+            path = resolve_workspace_path(raw, self._workspace_root)
+        except (WorkspacePathError, ValueError) as e:
+            return ToolResult(
+                success=False, output="", error=str(e),
+                metadata=ToolCallMetadata(tool_name="write"),
+            )
         content = params["content"]
         meta = ToolCallMetadata(tool_name="write")
         meta.files_touched = [str(path)]
 
-        # NOTE: writes outside the workspace are intentionally allowed here.
-        # The boundary lives in ActionAuthorizer (WRITE_LOCAL), which requires
-        # explicit user confirmation for out-of-workspace targets and denies
-        # them outright when running non-interactively.  Duplicating a hard
-        # jail here would contradict that and break legitimate absolute writes.
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             # newline="" preserves exact content (no LF->CRLF translation).

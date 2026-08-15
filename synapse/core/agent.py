@@ -64,6 +64,13 @@ class Agent:
             self._partitioner = container.resolve(ContextPartitioner)
         except (KeyError, ImportError):
             pass
+
+        self._eval_ablation = None
+        try:
+            from synapse.core.evaluation import EvaluationAblations
+            self._eval_ablation = container.resolve(EvaluationAblations)
+        except (KeyError, ImportError):
+            pass
         try:
             from synapse.modules.context.compactor import ContextCompactor
             self._compactor = container.resolve(ContextCompactor)
@@ -121,7 +128,11 @@ class Agent:
         self._citation_tracker = getattr(self._planner, "_last_citation_tracker", None)
 
         # Phase 3 — record citation history for adaptive budget tuning.
-        if self._citation_tracker is not None and self._last_task_type is not None:
+        if (
+            self._citation_tracker is not None
+            and self._last_task_type is not None
+            and (self._eval_ablation is None or self._eval_ablation.context)
+        ):
             try:
                 report = self._citation_tracker.report(context)
                 await self._budget_history.record(self._last_task_type, report)
@@ -162,7 +173,9 @@ class Agent:
         except Exception:
             pass  # emitting a warning must never mask the original result
 
-    async def _build_budget(self, task: str = "") -> "ContextBudget":
+    async def _build_budget(
+        self, task: str = "", *, adaptive: bool = True,
+    ) -> "ContextBudget":
         """Construct a ContextBudget from config + task classification.
 
         Phase 3: classifies the task, picks the static profile, then
@@ -188,6 +201,8 @@ class Agent:
         self._last_task_type = task_type
         base = select_budget(task_type, total)
 
+        if not adaptive:
+            return base
         # Apply historical adjustments (no-op until enough samples).
         return await self._budget_history.suggest_adjustment(task_type, base)
 
@@ -221,7 +236,8 @@ class Agent:
         from pathlib import Path
         from synapse.protocols.retriever import Context, ContextBlock, ContextSource
 
-        budget = await self._build_budget(task)
+        governance_enabled = self._eval_ablation is None or self._eval_ablation.context
+        budget = await self._build_budget(task, adaptive=governance_enabled)
 
         try:
             context = await asyncio.wait_for(
@@ -238,6 +254,11 @@ class Agent:
             # Fallback: minimal SYSTEM-only context (read README/AGENTS.md).
             await self.event_bus.emit(self._fallback_context_event(session, task))
             context = self._fallback_context()
+
+        if not governance_enabled:
+            context.reference = context.reference + context.overflow
+            context.overflow = []
+            return context
 
         # Compact overflow before partitioning.
         overflow_chars = sum(len(b.content) for b in context.overflow)

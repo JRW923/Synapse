@@ -69,10 +69,12 @@ class ActionAuthorizer:
         confirmation_enabled: bool = True,
         allowed_paths: list[str] | None = None,
         allowlisted_commands: list[str] | None = None,
+        bypass_policy: bool = False,
     ):
         self.workspace_root = Path(workspace_root).resolve()
         self.allow_external = allow_external
         self.confirmation_enabled = confirmation_enabled
+        self.bypass_policy = bypass_policy
         self._allowed_paths = [self._resolve_scope_boundary(p) for p in (allowed_paths or [])]
         self._allowlisted_commands = (
             set(allowlisted_commands)
@@ -93,6 +95,11 @@ class ActionAuthorizer:
         )
 
     def authorize(self, request: AuthRequest) -> AuthDecision:
+        if self.bypass_policy:
+            return AuthDecision(
+                allowed=True,
+                reason="Action-time authorization disabled for evaluation ablation",
+            )
         risk = request.risk_level
 
         # --- READ_ONLY: allow, but gate sensitive files ---------------------------

@@ -8,6 +8,9 @@ from synapse.eval.runner import (
     TaskResult,
     BenchmarkResult,
 )
+from synapse.eval.ablations import EvaluationAblations
+from synapse.eval.experiments import Experiment, ExperimentResult
+from synapse.eval.harness_adapter import CommandHarnessAdapter
 from synapse.eval.benchmarks import (
     SWEBenchAdapter, ProcessQualityBenchmark, RepoPytestBenchmark,
     TerminalBenchAdapter, TerminalSmokeBenchmark,
@@ -20,6 +23,10 @@ __all__ = [
     "TaskGrade",
     "TaskResult",
     "BenchmarkResult",
+    "EvaluationAblations",
+    "Experiment",
+    "ExperimentResult",
+    "CommandHarnessAdapter",
     "SWEBenchAdapter",
     "RepoPytestBenchmark",
     "ProcessQualityBenchmark",

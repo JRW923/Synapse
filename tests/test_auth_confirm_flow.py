@@ -141,6 +141,14 @@ async def test_no_confirm_callback_auto_denies(tmp_path):
     auth = synapse._container.resolve(ActionAuthorizer)
     auth.workspace_root = tmp_path
     auth._allowed_paths = []
+    from synapse.core.events import EventBus
+    from synapse.protocols.events import EventType
+    decisions = []
+
+    async def capture(event):
+        decisions.append(event.allowed)
+
+    synapse._container.resolve(EventBus).subscribe(EventType.AUTH_DECISION, capture)
 
     target = tmp_path / "out.txt"
     mock_llm = AsyncMock()
@@ -170,6 +178,7 @@ async def test_no_confirm_callback_auto_denies(tmp_path):
 
     # 工具被自动拒绝，文件不应被写入
     assert not target.exists(), "无回调时确认类写操作不应执行"
+    assert decisions == [False]
     assert result.status == ResultStatus.SUCCESS
 
 

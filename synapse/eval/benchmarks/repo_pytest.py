@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 
-from synapse.protocols.planner import AgentResult, ResultStatus
+from synapse.protocols.planner import AgentResult
 from synapse.eval.runner import Benchmark, BenchmarkTask, TaskGrade
 
 
@@ -39,6 +39,10 @@ class RepoPytestBenchmark:
     """Run one fix task in an isolated repo, then grade the Git diff with pytest."""
 
     task = "Fix add() so the existing pytest suite passes. Do not change the tests."
+    _SAFE_ENV_KEYS = {
+        "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "PYTHONIOENCODING",
+        "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "WINDIR",
+    }
 
     @classmethod
     def benchmark(cls) -> Benchmark:
@@ -51,7 +55,17 @@ class RepoPytestBenchmark:
                 metadata={"category": "functional", "difficulty": "easy"},
             )],
             grader=cls.grade,
-            metadata={"isolation": "temporary_git_repo", "grader": "pytest"},
+            metadata={
+                "isolation": "temporary_git_repo",
+                "grader": "pytest",
+                "dataset_manifest": {
+                    "version": "1",
+                    "source": "bundled deterministic fixture",
+                    "license": "not_declared",
+                    "grader_commands": [["python", "-m", "pytest", "-q"]],
+                    "grader_timeouts_seconds": [60],
+                },
+            },
         )
 
     @staticmethod
@@ -64,11 +78,10 @@ class RepoPytestBenchmark:
         """
         facts = (run_score or {}).get("repo_pytest", {})
         passed = bool(facts.get("tests_passed"))
-        agent_ok = agent_result.status == ResultStatus.SUCCESS
-        score = 1.0 if passed and agent_ok else 0.0
+        score = 1.0 if passed else 0.0
         reason = "pytest suite passed" if passed else "pytest suite still failing"
         return TaskGrade(
-            passed=passed and agent_ok,
+            passed=passed,
             score=score,
             reason=reason,
             details={
@@ -78,10 +91,22 @@ class RepoPytestBenchmark:
             },
         )
 
+    @staticmethod
+    def require_trusted_host_execution(trusted_host_execution: bool = False) -> None:
+        """Reject host-side pytest for agent-controlled repositories by default."""
+        if trusted_host_execution is not True:
+            raise RuntimeError(
+                "repo_pytest host execution is disabled; pass "
+                "trusted_host_execution=True only for trusted fixtures"
+            )
+
     async def run(
         self,
         run_agent: Callable[[str, Path], Awaitable[AgentResult | tuple[AgentResult, dict]]],
+        *,
+        trusted_host_execution: bool = False,
     ) -> RepoPytestResult:
+        self.require_trusted_host_execution(trusted_host_execution)
         with tempfile.TemporaryDirectory(prefix="synapse-bench-") as tmp:
             root = Path(tmp)
             self._create_repo(root)
@@ -125,7 +150,10 @@ class RepoPytestBenchmark:
 
     @staticmethod
     def _pytest(root: Path) -> subprocess.CompletedProcess[str]:
-        env = os.environ.copy()
+        env = {
+            key: value for key, value in os.environ.items()
+            if key.upper() in RepoPytestBenchmark._SAFE_ENV_KEYS
+        }
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         return subprocess.run(
             [sys.executable, "-B", "-m", "pytest", "-q"], cwd=root,

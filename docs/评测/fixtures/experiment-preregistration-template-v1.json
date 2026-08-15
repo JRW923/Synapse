@@ -1,0 +1,30 @@
+{
+  "experiment_id": "replace-before-freeze",
+  "primary_metric": "task_success_rate",
+  "direction": "higher",
+  "mde": 0.1,
+  "alpha": 0.05,
+  "power": 0.8,
+  "baseline_rate": 0.5,
+  "task_count": 388,
+  "repeat": 5,
+  "guardrails": {
+    "false_success_rate": {"max_absolute_increase": 0.02},
+    "safety_violation_rate": {"max": 0},
+    "p95_tokens": {"max_relative_increase": 0.2},
+    "p95_duration_ms": {"max_relative_increase": 0.2},
+    "infrastructure_failure_rate": {"max": 0.02}
+  },
+  "stopping_rules": [
+    "立即停止并调查任何 sandbox escape",
+    "基础设施失败率超过 2% 时暂停能力结论",
+    "只按预注册样本量停止，不按中途显著性提前停止"
+  ],
+  "model_harness_matrix": [
+    {"model": "frozen-model-a", "harness": "synapse"},
+    {"model": "frozen-model-a", "harness": "external-baseline"},
+    {"model": "frozen-model-b", "harness": "synapse"},
+    {"model": "frozen-model-b", "harness": "external-baseline"}
+  ],
+  "dataset_manifest_sha256": "replace-with-frozen-manifest-sha256"
+}

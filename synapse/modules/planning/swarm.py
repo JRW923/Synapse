@@ -435,6 +435,7 @@ class SwarmPlanner:
                     allowed_paths=allowed,
                     confirmation_enabled=auth.confirmation_enabled,
                     allow_external=auth.allow_external,
+                    bypass_policy=auth.bypass_policy,
                 )
             suffix = (
                 f"{spec.system_prompt_suffix}\n"
@@ -450,6 +451,7 @@ class SwarmPlanner:
                 allowed_paths=[file_scope],
                 confirmation_enabled=auth.confirmation_enabled,
                 allow_external=auth.allow_external,
+                bypass_policy=auth.bypass_policy,
             )
         return ReActPlanner(
             role=spec.role,
@@ -461,6 +463,7 @@ class SwarmPlanner:
             auth=auth,
             confirm_callback=base._confirm,
             total_timeout_seconds=base.total_timeout_seconds,
+            completion_gate_enabled=getattr(base, "completion_gate_enabled", True),
         )
 
     async def _decompose_scopes(self, task, llm, event_bus, session, n: int) -> list[dict]:

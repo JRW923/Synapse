@@ -22,6 +22,12 @@ from pathlib import Path
 
 from synapse.protocols.sandbox import SandboxResult
 
+
+_SAFE_ENV_KEYS = {
+    "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "PYTHONIOENCODING",
+    "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "WINDIR",
+}
+
 try:
     import ctypes  # Windows Job Object API
 except ImportError:  # pragma: no cover
@@ -87,6 +93,13 @@ class ProcessSandbox:
         timeout: int = 120,
     ) -> SandboxResult:
         try:
+            if env is None:
+                env = {
+                    key: value for key, value in os.environ.items()
+                    if key.upper() in _SAFE_ENV_KEYS
+                    or key.upper().startswith("PYENV_")
+                    or key.upper() in {"VIRTUAL_ENV"}
+                }
             # Tool schemas carry paths as strings; normalize at the sandbox
             # boundary so every backend receives one stable path type.
             cwd_path = Path(cwd) if cwd is not None else None
@@ -132,6 +145,9 @@ class ProcessSandbox:
                     timed_out=False,
                     platform=self.platform,
                 )
+            except asyncio.CancelledError:
+                self._kill_tree(proc)
+                raise
             except asyncio.TimeoutError:
                 self._kill_tree(proc)
                 return SandboxResult(

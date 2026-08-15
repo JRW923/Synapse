@@ -140,6 +140,8 @@ class PlanExecutePlanner:
             total_tokens=metrics.tokens_input + metrics.tokens_output,
             tool_calls=metrics.tool_call_count,
             duration_ms=metrics.duration_ms,
+            tokens_input=metrics.tokens_input,
+            tokens_output=metrics.tokens_output,
         ))
 
         output_parts = [verification_msg]

@@ -10,8 +10,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import tempfile
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from synapse.config import load_config
@@ -25,6 +28,8 @@ from synapse.protocols.llm import LLMProvider
 from synapse.protocols.planner import Planner, AgentResult, PlanningMode
 from synapse.protocols.tool import ToolRegistry
 from synapse.protocols.memory import MemoryStore, MemoryEntry, MemoryLevel, MemoryMetadata
+from synapse.core.evaluation import EvaluationAblations
+from synapse.eval.ablations import DisabledMemoryStore
 from synapse.eval.metrics import RunScore
 from synapse.protocols.retriever import ContextRetriever
 from synapse.protocols.sandbox import Sandbox
@@ -83,11 +88,11 @@ from synapse.modules.planning.react import ReActPlanner
 from synapse.modules.planning.plan_execute import PlanExecutePlanner
 from synapse.modules.planning.hierarchical import HierarchicalPlanner
 from synapse.modules.planning.swarm import SwarmPlanner
-from synapse.modules.tools.background import get_default_manager
+from synapse.modules.tools.background import BackgroundTaskManager, get_default_manager
 from synapse.modules.tools.skill_tool import SkillTool
 from synapse.modules.skill import get_default_skill_loader
 from synapse.modules.tools.todo_tool import TodoWriteTool, TodoReadTool
-from synapse.modules.todo import get_default_todo_store
+from synapse.modules.todo import TodoStore, get_default_todo_store
 
 # MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
@@ -259,8 +264,11 @@ class Synapse:
         Path to a YAML configuration file.  If *None*, the default lookup
         order is used (``synapse.yaml``, then ``~/.synapse/config.yaml``).
     enable_eval:
-        If ``True``, wire eval metrics collectors to the event bus (Phase 3).
-        Defaults to ``False``.
+        If ``True``, isolate persistent memory and disable run-score writes so
+        benchmark attempts do not influence later attempts.
+    eval_ablation:
+        Evaluation-only module switches. Keys are ``context``, ``memory``,
+        ``completion_gate`` and ``action_auth``; all default to ``True``.
     memory_backend:
         Semantic memory backend.  One of ``"chromadb"`` (default) or
         ``"qdrant"``.
@@ -278,9 +286,8 @@ class Synapse:
     **overrides:
         Additional keyword arguments are applied as overrides on top of the
         loaded configuration.  Supported keys include any field on
-        ``ProviderConfig``, ``PlanningConfig``, ``ToolsConfig``, or
-        ``SecurityConfig`` (e.g. ``max_tokens``, ``max_iterations``,
-        ``workspace_root``).
+        any top-level config section (e.g. ``max_tokens``, ``max_iterations``,
+        ``workspace_root``, ``total_tokens``).
     """
 
     def __init__(
@@ -289,13 +296,26 @@ class Synapse:
         model: str | None = None,
         config_path: str | None = None,
         enable_eval: bool = False,
+        eval_ablation: EvaluationAblations | dict[str, bool] | None = None,
         memory_backend: str = "chromadb",
         enable_external_tools: bool = False,
         mcp_servers: list[McpServerConfig] | None = None,
         confirm_callback=None,  # async (AuthRequest) -> bool
+        strict_overrides: bool = False,
         **overrides: Any,
     ) -> None:
+        if eval_ablation is not None and not enable_eval:
+            raise ValueError("eval_ablation requires enable_eval=True")
         self._enable_eval = enable_eval
+        self._eval_ablation = EvaluationAblations.from_value(eval_ablation)
+        self._background_manager = (
+            BackgroundTaskManager() if enable_eval else get_default_manager()
+        )
+        self._todo_store = TodoStore() if enable_eval else get_default_todo_store()
+        self._eval_memory_dir = (
+            tempfile.TemporaryDirectory(prefix="synapse-eval-memory-")
+            if enable_eval and self._eval_ablation.memory else None
+        )
         if memory_backend.lower() not in {"chromadb", "qdrant"}:
             raise ValueError(
                 f"Unknown memory_backend '{memory_backend}'. "
@@ -309,7 +329,20 @@ class Synapse:
         # Synapse owns shared planner/metrics instances; serialize runs until
         # those components become per-run state objects.
         self._run_lock = asyncio.Lock()
-        self._config = self._load_config(config_path, provider, model, overrides)
+        self._config = self._load_config(
+            config_path, provider, model, overrides, strict_overrides,
+        )
+        if enable_eval:
+            if self._config.hooks.hooks:
+                raise RuntimeError(
+                    "evaluation runs disable host lifecycle hooks; "
+                    "move hooks outside the measured process"
+                )
+            if self._config.plugins.paths:
+                raise RuntimeError(
+                    "evaluation runs disable host plugins; "
+                    "use a trusted harness image instead"
+                )
         self._provider_name = self._config.provider.provider
         self._container = self._build_container()
         self._last_run_score = None  # populated by run()
@@ -376,6 +409,8 @@ class Synapse:
             self._last_run_score = RunScore(
                 task=task,
                 status=status,
+                run_id=str(session.metadata.get("last_run_id", "")),
+                model_id=str(getattr(agent.llm, "model_id", "")),
                 safety=self._run_metrics[0].snapshot(),
                 process=self._run_metrics[1].snapshot(),
                 quality=self._run_metrics[2].snapshot(),
@@ -395,6 +430,18 @@ class Synapse:
             # connect guard above) — no per-run shutdown, so registered tools
             # remain discoverable and we don't respawn server subprocesses.
             self._run_lock.release()
+
+    async def aclose(self) -> None:
+        """Release resources owned by this Synapse instance."""
+        try:
+            if self._enable_eval:
+                await self._background_manager.aclose()
+            if self._mcp_manager is not None:
+                await self._mcp_manager.shutdown()
+        finally:
+            if self._eval_memory_dir is not None:
+                self._eval_memory_dir.cleanup()
+                self._eval_memory_dir = None
 
     def get_citation_report(self) -> dict | None:
         """Phase 4 — return the citation/usage report for the last run, or None."""
@@ -433,13 +480,58 @@ class Synapse:
             score = self._last_run_score.to_dict()
         else:
             score = RunScore(
+                model_id=str(getattr(self._container.resolve(LLMProvider), "model_id", "")),
                 safety=self._run_metrics[0].snapshot(),
                 process=self._run_metrics[1].snapshot(),
                 quality=self._run_metrics[2].snapshot(),
                 efficiency=self._run_metrics[3].snapshot(),
             ).to_dict()
         score["process_hint"] = self._last_process_hint
+        registry = self._container.resolve(ToolRegistry)
+        tool_names = sorted(tool.name for tool in registry.list_all())
+        mcp_tool_names = [name for name in tool_names if name.startswith("mcp.")]
+        score["capabilities"] = {
+            "tool_count": len(tool_names),
+            "tool_names_sha256": hashlib.sha256(
+                "\n".join(tool_names).encode("utf-8")
+            ).hexdigest(),
+            "mcp_connected": bool(
+                self._mcp_manager is not None and self._mcp_manager.connected
+            ),
+            "mcp_server_count": len(
+                getattr(self._mcp_manager, "_clients", {})
+            ) if self._mcp_manager is not None else 0,
+            "mcp_tool_count": len(mcp_tool_names),
+            "mcp_tool_names_sha256": hashlib.sha256(
+                "\n".join(mcp_tool_names).encode("utf-8")
+            ).hexdigest(),
+        }
         return score
+
+    def get_effective_config(self) -> dict[str, Any]:
+        """Return the secret-free effective runtime config for eval reports."""
+        from synapse.eval.runner import _sanitize_config
+
+        payload = self._config.model_dump(mode="json")
+        payload["tools"]["workspace_root"] = "<runtime-workspace>"
+        payload["plugins"]["paths"] = [
+            Path(path).name for path in payload["plugins"].get("paths", [])
+        ]
+        payload["runtime"] = {
+            "enable_eval": self._enable_eval,
+            "eval_ablation": self._eval_ablation.to_dict(),
+            "memory_backend": self._memory_backend,
+            "enable_external_tools": self._enable_external_tools,
+            "mcp_servers": [
+                {
+                    "name": server.name,
+                    "transport": server.transport,
+                    "risk_level": getattr(server.risk_level, "value", str(server.risk_level)),
+                }
+                for server in (self._mcp_servers or [])
+            ],
+        }
+        return _sanitize_config(payload)
 
     async def _on_process_quality_scored(self, event: BaseEvent) -> None:
         """L.4 — remember the latest process-quality hint for the user."""
@@ -452,6 +544,8 @@ class Synapse:
         store is idempotent by id, so the fixed ``run-score-log`` id keeps the
         latest score (older ones are replaced, not accumulated).
         """
+        if self._enable_eval:
+            return
         try:
             pm = self._container.resolve(ProjectMemory)
         except Exception:
@@ -485,6 +579,7 @@ class Synapse:
         provider: str | None,
         model: str | None,
         overrides: dict[str, Any],
+        strict_overrides: bool = False,
     ):
         config, _ = load_config(config_path)
 
@@ -497,18 +592,17 @@ class Synapse:
                 model or config.provider.model,
             )
 
-        # **overrides applied to matching config sections
+        sections = (
+            config.provider, config.planning, config.tools, config.security,
+            config.context, config.hooks, config.plugins,
+        )
         for key, value in overrides.items():
-            if hasattr(config.provider, key):
-                setattr(config.provider, key, value)
-            elif hasattr(config.planning, key):
-                setattr(config.planning, key, value)
-            elif hasattr(config.tools, key):
-                setattr(config.tools, key, value)
-            elif hasattr(config.security, key):
-                setattr(config.security, key, value)
-            elif hasattr(config.plugins, key):
-                setattr(config.plugins, key, value)
+            section = next((item for item in sections if hasattr(item, key)), None)
+            if section is None:
+                if strict_overrides:
+                    raise ValueError(f"Unknown Synapse config override '{key}'")
+                continue
+            setattr(section, key, value)
 
         return config
 
@@ -536,6 +630,7 @@ class Synapse:
         # Make config available to components that need it (e.g. Agent reads ContextConfig).
         from synapse.config.schema import SynapseConfig
         c.register(SynapseConfig, self._config)
+        c.register(EvaluationAblations, self._eval_ablation)
 
         # Audit log — tamper-evident event logging (Phase 2)
         audit_logger = AuditLogger(bus=event_bus)
@@ -562,14 +657,26 @@ class Synapse:
         c.register(ToolRegistry, registry)
 
         # Memory — layered: session + project + user + semantic
-        session_memory = SessionMemory()
-        project_memory = ProjectMemory()
-        user_memory = UserMemory()
-        # Passed as a factory, not an instance — see LayeredMemory._get_semantic.
-        layered = LayeredMemory(
-            session_memory, project_memory, user_memory, self._create_semantic_memory,
-        )
-        c.register(MemoryStore, layered)
+        workspace_root = Path(self._config.tools.workspace_root).expanduser().resolve()
+        if self._eval_ablation.memory:
+            session_memory = SessionMemory()
+            if self._eval_memory_dir is not None:
+                memory_root = Path(self._eval_memory_dir.name)
+                project_memory = ProjectMemory(memory_root / "project")
+                user_memory = UserMemory(memory_root / "user")
+            else:
+                project_memory = ProjectMemory(workspace_root / ".synapse" / "memory")
+                user_memory = UserMemory()
+            # Passed as a factory, not an instance — see LayeredMemory._get_semantic.
+            memory = LayeredMemory(
+                session_memory,
+                project_memory,
+                user_memory,
+                None if self._enable_eval else self._create_semantic_memory,
+            )
+        else:
+            memory = DisabledMemoryStore()
+        c.register(MemoryStore, memory)
 
         # Process-quality verification closed loop — live, not eval-gated.
         # Skip persisting feedback during eval benchmarks so the loop does not
@@ -579,7 +686,7 @@ class Synapse:
             ProcessQualityVerifier,
             ProcessQualityVerifier(
                 event_bus=event_bus,
-                memory=layered,
+                memory=memory,
                 persist_feedback=not self._enable_eval,
             ),
         )
@@ -614,12 +721,19 @@ class Synapse:
                 if sandbox_mode == "enforce":
                     raise RuntimeError("Sandbox initialization failed in enforce mode") from exc
         c.register(Sandbox, sandbox)
+        if not self._eval_ablation.action_auth and (
+            sandbox is None or getattr(sandbox, "backend", "process") != "docker"
+        ):
+            raise RuntimeError(
+                "action_auth ablation requires the Docker sandbox backend"
+            )
 
         auth = ActionAuthorizer(
             workspace_root=self._config.tools.workspace_root,
             confirmation_enabled=self._config.security.auth_confirmation,
             allowed_paths=self._config.security.allowed_paths,
             allowlisted_commands=self._config.tools.allowlist_commands,
+            bypass_policy=not self._eval_ablation.action_auth,
             # EXTERNAL tools (web/browser/db) run only when explicitly opted in
             # via config (security.allow_external) or the enable_external_tools
             # flag (which also registers them). web_search is READ_ONLY and is
@@ -745,27 +859,30 @@ class Synapse:
             auth,
             self._confirm_callback,
             max_llm_retries=self._config.provider.max_retries,
+            completion_gate_enabled=self._eval_ablation.completion_gate,
+            background_manager=self._background_manager,
         )
 
     # -- Internal: tool factory ----------------------------------------------
 
     def _create_all_tools(self):
         """Return the full set of tools, including external ones when enabled."""
-        # s13 — shared so ShellTool can start background tasks the planner tracks.
-        bg_manager = get_default_manager()
         # s07 — shared so prompt injection and the load_skill tool agree.
         skill_loader = get_default_skill_loader()
         tools: list = [
             ReadTool(workspace_root=self._config.tools.workspace_root),
             WriteTool(workspace_root=self._config.tools.workspace_root),
-            EditTool(),
+            EditTool(workspace_root=self._config.tools.workspace_root),
             GlobTool(workspace_root=self._config.tools.workspace_root),
             GrepTool(workspace_root=self._config.tools.workspace_root),
-            ShellTool(background_manager=bg_manager),
-            GitTool(),
+            ShellTool(
+                background_manager=self._background_manager,
+                workspace_root=self._config.tools.workspace_root,
+            ),
+            GitTool(workspace_root=self._config.tools.workspace_root),
             SkillTool(skill_loader),
-            TodoWriteTool(get_default_todo_store()),
-            TodoReadTool(get_default_todo_store()),
+            TodoWriteTool(self._todo_store),
+            TodoReadTool(self._todo_store),
         ]
 
         # Web search is always available (DuckDuckGo, no API key required).
@@ -792,7 +909,14 @@ class Synapse:
         return [tool for tool in tools if tool.name in enabled or tool.name.startswith("mcp.")]
 
 
-def build_planner(planning_config, auth, confirm_callback=None, max_llm_retries: int = 3) -> Planner:
+def build_planner(
+    planning_config,
+    auth,
+    confirm_callback=None,
+    max_llm_retries: int = 3,
+    completion_gate_enabled: bool = True,
+    background_manager: BackgroundTaskManager | None = None,
+) -> Planner:
     """Build the planner for a planning config — single source of truth.
 
     Shared by :meth:`Synapse._create_planner` and by CLI/test wiring so the
@@ -811,7 +935,8 @@ def build_planner(planning_config, auth, confirm_callback=None, max_llm_retries:
         total_timeout_seconds=cfg.total_timeout_seconds,
         max_tool_result_chars=cfg.max_tool_result_chars,
         max_llm_retries=max_llm_retries,
-        background_manager=get_default_manager(),
+        completion_gate_enabled=completion_gate_enabled,
+        background_manager=background_manager or get_default_manager(),
         skill_loader=get_default_skill_loader(),
     )
 

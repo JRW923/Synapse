@@ -1,6 +1,8 @@
 """Tests for the FastAPI HTTP server adapter."""
 
+import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,6 +10,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from synapse.protocols.llm import LLMResponse, Message
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
 from synapse.core.events import EventBus
+
+
+def test_remote_experiment_config_rejects_host_escape_hatches():
+    from synapse.adapters.server import _validate_remote_experiment_config
+
+    with pytest.raises(ValueError, match="base_url"):
+        _validate_remote_experiment_config({"base_url": "https://attacker.invalid"})
+    with pytest.raises(ValueError, match="hooks"):
+        _validate_remote_experiment_config({"runtime": {"hooks": {}}})
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +64,108 @@ def client(mock_synapse):
     app = create_app(synapse_instance=mock_synapse)
     from fastapi.testclient import TestClient
     return TestClient(app)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fail", "expected_status"),
+    [(False, "completed"), (True, "failed")],
+)
+async def test_experiment_http_comparability_and_workspace_cleanup(
+    monkeypatch, fail, expected_status,
+):
+    import synapse.adapters.server as server
+
+    run_workspaces: list[Path] = []
+
+    class FakeSynapse:
+        def __init__(self, **config):
+            self.config = config
+
+        async def run(self, _task):
+            workspace = Path(self.config["workspace_root"])
+            assert workspace.is_dir()
+            assert not any(workspace.iterdir())
+            run_workspaces.append(workspace)
+            if fail:
+                raise RuntimeError("fixture failure")
+            return AgentResult(
+                status=ResultStatus.SUCCESS,
+                output="done",
+                metrics=ExecutionMetrics(
+                    duration_ms=10,
+                    tokens_input=4,
+                    tokens_output=2,
+                    tool_call_count=1,
+                    tool_success_count=1,
+                ),
+            )
+
+        def get_run_score(self):
+            return {"model_id": "fixture-model", "safety": {}}
+
+        def get_effective_config(self):
+            return {
+                "variant": self.config["variant"],
+                "provider": {"max_tokens": 100, "timeout_seconds": 30},
+                "planning": {
+                    "max_iterations": 5,
+                    "max_tokens_per_task": 1000,
+                    "total_timeout_seconds": 60,
+                },
+                "context": {"total_tokens": 500},
+                "security": {
+                    "sandbox_enabled": True,
+                    "sandbox_mode": "enforce",
+                    "sandbox_backend": "docker",
+                    "sandbox_network": False,
+                    "auth_confirmation": True,
+                    "allowed_paths": [],
+                    "allow_external": False,
+                },
+                "tools": {"enabled": ["read"], "allowlist_commands": []},
+                "runtime": {"enable_external_tools": False, "mcp_servers": []},
+            }
+
+    monkeypatch.setattr(server, "Synapse", FakeSynapse)
+    app = server.create_app(synapse_instance=MagicMock())
+    start = next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", None) == "/eval/experiment"
+        and "POST" in route.methods
+    )
+    status = next(
+        route.endpoint for route in app.routes
+        if getattr(route, "path", None) == "/eval/experiment/{experiment_id}"
+        and "GET" in route.methods
+    )
+
+    created = await start(server.ExperimentRequest(
+        name="http-contract",
+        agent_config_a={"variant": "A"},
+        agent_config_b={"variant": "B"},
+        benchmark_task="diagnostic task",
+        runs_per_config=2,
+        allowed_config_diff_paths=["variant"],
+    ))
+    for _ in range(10):
+        await asyncio.sleep(0)
+        response = await status(created["experiment_id"])
+        if response.status != "running":
+            break
+
+    assert response.status == expected_status
+    assert run_workspaces
+    assert all(not workspace.exists() for workspace in run_workspaces)
+    if fail:
+        assert response.result is None
+        assert response.error == "RuntimeError: fixture failure"
+    else:
+        assert response.error is None
+        assert response.result["comparability_eligible"] is True
+        assert response.result["comparability_issues"] == []
+        assert response.result["comparability_evidence"]["workspace_instances"] == 4
+        assert len(set(run_workspaces)) == 4
 
 
 # ---------------------------------------------------------------------------

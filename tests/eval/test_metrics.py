@@ -278,8 +278,9 @@ async def test_efficiency_metrics_records_events():
     snapshot = collector.snapshot()
 
     # Token counts (estimated input/output split from total_tokens)
-    assert snapshot.tokens_input > 0
-    assert snapshot.tokens_output > 0
+    assert snapshot.tokens_input == 1750
+    assert snapshot.tokens_output == 750
+    assert snapshot.token_count_source == "estimated_70_30"
 
     # Tool call counts
     assert snapshot.tool_call_count == 3
@@ -288,10 +289,42 @@ async def test_efficiency_metrics_records_events():
 
     # Duration & cost
     assert snapshot.duration_ms == 4500
-    assert snapshot.cost_estimate_usd > 0
+    assert snapshot.cost_estimate_usd == 0.0165
+    assert snapshot.cost_is_estimate is True
+    assert snapshot.input_cost_per_million_usd == 3.0
+    assert snapshot.output_cost_per_million_usd == 15.0
 
     # Thrashing ratio
     assert snapshot.thrashing_ratio > 0
+
+
+@pytest.mark.asyncio
+async def test_efficiency_metrics_prefers_exact_token_split_and_reports_prices():
+    bus = EventBus()
+    collector = EfficiencyMetrics(
+        bus,
+        cost_per_m_input=2.0,
+        cost_per_m_output=8.0,
+    )
+
+    await bus.emit(AgentCompleted(
+        session_id="s1",
+        status="success",
+        total_tokens=9999,
+        tokens_input=1200,
+        tokens_output=300,
+        tool_calls=0,
+        duration_ms=1250,
+    ))
+
+    snapshot = collector.snapshot()
+    assert snapshot.tokens_input == 1200
+    assert snapshot.tokens_output == 300
+    assert snapshot.token_count_source == "exact"
+    assert snapshot.cost_estimate_usd == 0.0048
+    assert snapshot.cost_is_estimate is True
+    assert snapshot.input_cost_per_million_usd == 2.0
+    assert snapshot.output_cost_per_million_usd == 8.0
 
 
 @pytest.mark.asyncio
@@ -311,6 +344,7 @@ async def test_efficiency_metrics_reset():
     assert snap.duration_ms == 0
     assert snap.tool_call_count == 0
     assert snap.cost_estimate_usd == 0.0
+    assert snap.token_count_source == "unavailable"
 
 
 # ============================================================================
@@ -368,8 +402,8 @@ async def test_safety_metrics_records_events():
     # Auth blocks
     assert snapshot.auth_blocks == 2  # two allowed=False decisions
 
-    # Sandbox violations
-    assert snapshot.sandbox_violations >= 0
+    # Ordinary shell/tool failures are not sandbox violations.
+    assert snapshot.sandbox_violations == 0
 
     # Injection attempts (dangerous commands detected in tool params)
     assert snapshot.injection_attempts >= 1  # cat /etc/shadow; rm -rf /
@@ -397,6 +431,23 @@ async def test_safety_metrics_reset():
     assert snap.auth_blocks == 0
     assert snap.injection_attempts == 0
     assert snap.dangerous_command_attempts == 0
+
+
+@pytest.mark.asyncio
+async def test_safety_metrics_require_explicit_sandbox_violation_signal():
+    bus = EventBus()
+    collector = SafetyMetrics(bus)
+
+    await bus.emit(ToolCallCompleted(
+        session_id="s1", tool_name="shell", success=False, duration_ms=1,
+    ))
+    assert collector.snapshot().sandbox_violations == 0
+
+    await bus.emit(ToolCallCompleted(
+        session_id="s1", tool_name="shell", success=False, duration_ms=1,
+        sandbox_violation=True,
+    ))
+    assert collector.snapshot().sandbox_violations == 1
 
 
 @pytest.mark.asyncio

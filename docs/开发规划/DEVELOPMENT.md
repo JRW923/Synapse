@@ -2,6 +2,15 @@
 
 > 从需求到交付的完整过程。每个条目标注变更类型。后续每次会话追加，内容过多时压缩精简。
 
+## 2026-08-15 · 评测 P4/P5 治理闭环
+
+- `[feat]` 新增 `synapse/eval/governance.py`：冻结 dataset manifest、实验预注册与样本量校验、grader golden-case 校准、内容寻址 artifact store、append-only run registry 和 series 趋势/漂移分析，全部使用 stdlib。
+- `[feat]` `BenchmarkRunner` 支持失败产物可选归档；报告只保存 URI/SHA-256/bytes。任务元数据包含 `repository_id` 时，Pass@k、Pass^k 和 task success 区间按 repository cluster bootstrap。
+- `[feat]` `run_score.capabilities` 记录实际 ToolRegistry/MCP 数量与名称指纹，补足声明配置之外的运行态能力证据。
+- `[test]` 冻结 Memory follow-up fixture、grader mutation golden cases、预注册模板和 failure taxonomy 复核格式；新增治理、不可变性、完整性、artifact 泄露边界与 repository cluster 检查。
+- `[chore]` CI 分为 PR unit、PR offline smoke、Nightly representative、Weekly ablation/red-team 和手动 Release；定时任务不调用收费模型，外部评测必须由受保护环境、secrets 和显式开关启动。
+- `[docs]` 正式模型和跨 Harness 实验仍待官方/可信固定 runner、冻结镜像与真实模型执行；仓库内回归只证明治理和执行合同，不作为能力提升百分比。
+
 ### 变更类型说明
 
 | 前缀 | 含义 |
@@ -427,7 +436,7 @@ Synapse/
 |---|------|------|------|
 | 1 | Metrics Collectors | Process/Quality/Efficiency/Safety 四维指标采集器 | 8 |
 | 2 | Benchmark Runner | SWE-bench 防污染适配 + 自建过程质量 benchmark | 3 |
-| 3 | A/B Experiments | Experiment 类 + scipy t-test 显著性检验 | 3 |
+| 3 | A/B Experiments | 配对多指标实验、随机交错、bootstrap CI 与随机化检验 | 3 |
 | 4 | SemanticMemory | ChromaDB 向量存储，语义相似检索 | 3 |
 | 5 | HTTP API | FastAPI server: /run, /sessions, /eval/experiment, /health | 3 |
 | 6 | Injection Defense | TrustLevel 标注 + EXTERNAL 包裹（标注不拦截） | 3 |

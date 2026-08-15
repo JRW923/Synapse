@@ -35,6 +35,7 @@ class ToolCallMetadata:
     start_time: datetime = field(default_factory=datetime.now)
     duration_ms: int = 0
     sandbox_used: bool = False
+    sandbox_violation: bool = False
     files_touched: list[str] = field(default_factory=list)
 
 

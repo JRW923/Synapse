@@ -1,6 +1,9 @@
 """Shell command execution tool — runs in sandbox."""
 
 import asyncio
+from pathlib import Path
+
+from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
 from synapse.modules.tools.background import BackgroundTaskManager
 
@@ -41,12 +44,16 @@ class ShellTool:
     risk_level = RiskLevel.EXECUTE
     category = ToolCategory.EXECUTION
 
-    def __init__(self, background_manager: BackgroundTaskManager | None = None):
+    def __init__(
+        self,
+        background_manager: BackgroundTaskManager | None = None,
+        workspace_root: str | None = None,
+    ):
         self.background_manager = background_manager
+        self._workspace_root = Path(workspace_root).resolve() if workspace_root else None
 
     async def execute(self, params: dict, sandbox=None, timeout: int | None = None) -> ToolResult:
         command = params["command"]
-        cwd = params.get("cwd", ".")
         timeout = timeout or 120
         meta = ToolCallMetadata(tool_name="shell")
 
@@ -61,6 +68,12 @@ class ShellTool:
             if res == "still running":
                 return ToolResult(success=True, output=f"[background task {read_task_id} still running]", metadata=meta)
             return res
+
+        try:
+            cwd = str(resolve_workspace_path(params.get("cwd", "."), self._workspace_root))
+        except (WorkspacePathError, ValueError) as exc:
+            meta.sandbox_violation = True
+            return ToolResult(success=False, output="", error=str(exc), metadata=meta)
 
         # s13 — start in background, return a handle immediately.
         if params.get("run_in_background") and self.background_manager is not None:
