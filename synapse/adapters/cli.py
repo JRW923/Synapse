@@ -228,11 +228,13 @@ def _check_api_key(config):
         print()
 
 
-def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
+def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None, auth=None):
     """Return an async callback that prompts the user for tool-call approval.
 
     Displays three options: ``[A]llow`` / ``[D]eny`` / ``[Y]es to all``.
-    *Yes to all* permanently allows future calls for the same tool name.
+    *Yes to all* permanently allows future calls with the same approval
+    signature (command first-token / parent dir / tool name) — both in this
+    callback and in the shared ActionAuthorizer when *auth* is provided.
     """
     import sys as _sys
 
@@ -240,6 +242,12 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
     # Serialize prompts so concurrent swarm workers can't interleave reads on
     # the shared stdin (they all share this one callback instance).
     _prompt_lock = asyncio.Lock()
+
+    def _signature(request) -> str:
+        a = getattr(_confirm, "auth", None) or auth
+        if a is not None:
+            return a.approval_signature(request)
+        return getattr(request, "tool_name", "unknown")
 
     def _describe(request) -> str:
         """Human-readable summary of the risky call: tool, risk level, target."""
@@ -255,9 +263,10 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
 
     async def _confirm(request):
         tool_name = getattr(request, "tool_name", "unknown")
+        sig = _signature(request)
 
-        # Permanent allow list (session-scoped: "yes to all" for this tool).
-        if tool_name in _auto_allowed:
+        # Permanent allow list (session-scoped "yes to all" per signature).
+        if sig in _auto_allowed:
             return True
 
         # Shutting down — deny without prompt.
@@ -291,7 +300,10 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None):
                 answer = await loop.run_in_executor(None, _ask)
 
             if answer == "y":
-                _auto_allowed.add(tool_name)
+                _auto_allowed.add(sig)
+                a = getattr(_confirm, "auth", None) or auth
+                if a is not None:
+                    a.remember_approval(request)
                 return True
             if answer in ("a", ""):
                 return True
@@ -380,7 +392,9 @@ def main():
     run_parser.add_argument(
         "--provider", "-p",
         default=None,
-        choices=["anthropic", "openai", "deepseek", "google", "ollama"],
+        # No argparse choices here: custom providers registered in
+        # ~/.synapse/models.json must be selectable too; _resolve_provider
+        # owns the real validation (built-ins + custom_providers).
         help="LLM provider (overrides config)",
     )
     run_parser.add_argument(
@@ -464,7 +478,9 @@ def main():
     chat_parser.add_argument(
         "--provider", "-p",
         default=None,
-        choices=["anthropic", "openai", "deepseek", "google", "ollama"],
+        # No argparse choices here: custom providers registered in
+        # ~/.synapse/models.json must be selectable too; _resolve_provider
+        # owns the real validation (built-ins + custom_providers).
         help="LLM provider (overrides config)",
     )
     chat_parser.add_argument(
@@ -506,7 +522,9 @@ def main():
     eval_parser.add_argument(
         "--provider", "-p",
         default=None,
-        choices=["anthropic", "openai", "deepseek", "google", "ollama"],
+        # No argparse choices here: custom providers registered in
+        # ~/.synapse/models.json must be selectable too; _resolve_provider
+        # owns the real validation (built-ins + custom_providers).
         help="LLM provider (default: models.json selection)",
     )
     eval_parser.add_argument(
@@ -702,6 +720,8 @@ def main():
             use_rich = False
 
         session = _resolve_session(args.resume)
+        from synapse.modules.todo import get_default_todo_store
+        get_default_todo_store().bind_session(session.id)
         status_holder: list = []
         prev_handler = _install_cancel_handler(synapse, status_holder)
         try:
@@ -814,6 +834,8 @@ _SLASH_COMMANDS: tuple = (
     ("/context-report",  "上下文区块引用热力图"),
     ("/score",           "运行时评分 + 过程提示"),
     ("/todos",           "查看当前任务清单"),
+    ("/checkpoint",      "为工作区打 git 快照"),
+    ("/rewind",          "回滚到某个 checkpoint"),
     ("/exit",            "退出"),
     ("/quit",            "退出"),
 )
@@ -1179,6 +1201,8 @@ def _show_help(console):
     t.add_row("  /context-report", "上下文区块引用 / 使用热力图")
     t.add_row("  /score", "运行时评分 (safety/process/quality/efficiency) + 提示")
     t.add_row("  /todos", "查看当前任务清单")
+    t.add_row("  /checkpoint [label]", "为工作区打一个 git 快照（非 git 目录不可用）")
+    t.add_row("  /rewind [num]", "回滚工作区到某个 checkpoint（无参数则列出）")
     t.add_row("  /exit, /quit", "退出")
     console.print(t)
     console.print()
@@ -1820,6 +1844,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
     # Resolve the session before rendering the home screen so it can show a
     # useful resume hint without importing the heavy runtime.
     session = _resolve_session(resume)
+    from synapse.modules.todo import get_default_todo_store
+    get_default_todo_store().bind_session(session.id)
 
     # Show the welcome banner immediately, before heavy imports.
     if use_rich:
@@ -1854,15 +1880,21 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         nonlocal _synapse
         if _synapse is None:
             from synapse.adapters.library import Synapse as _Synapse
+            cb = _make_confirm_callback(
+                status_holder=status_holder, exiting=exiting,
+            )
             _synapse = _Synapse(
                 provider=provider,
                 model=model,
                 mode=config.planning.mode,
                 config_path=None,
-                confirm_callback=_make_confirm_callback(
-                    status_holder=status_holder, exiting=exiting,
-                ),
+                confirm_callback=cb,
             )
+            # Late-bind the shared ActionAuthorizer so "yes to all" memory and
+            # the callback stay in sync (the container only exists post-init).
+            with _swallow("repl: bind authorizer"):
+                from synapse.modules.security.auth import ActionAuthorizer
+                cb.auth = _synapse._container.resolve(ActionAuthorizer)
         return _synapse
 
     while True:
@@ -1935,6 +1967,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 _show_help(console)
             elif cmd in ("/reset", "/clear"):
                 session = Session()
+                from synapse.modules.todo import get_default_todo_store
+                get_default_todo_store().bind_session(session.id)
                 # SESSION memory outlives the Session object — clear it too so
                 # prior tasks' summaries don't leak into the next task.
                 if _synapse is not None:
@@ -1989,6 +2023,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     print(msg)
             elif cmd == "/resume":
                 session = _resolve_session(arg or "__latest__")
+                from synapse.modules.todo import get_default_todo_store
+                get_default_todo_store().bind_session(session.id)
                 note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
                 if use_rich:
                     console.print(f"[dim]{note}[/dim]")
@@ -2000,6 +2036,52 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 _show_score(console, _synapse, use_rich)
             elif cmd == "/todos":
                 _show_todos(console, use_rich)
+            elif cmd in ("/checkpoint", "/rewind"):
+                from synapse.modules.checkpoint import CheckpointManager
+                mgr = CheckpointManager(Path.cwd())
+                if not mgr.available():
+                    hint = "当前目录不是 git 仓库，checkpoint 不可用。"
+                    if use_rich:
+                        console.print(f"[yellow]{hint}[/yellow]")
+                    else:
+                        print(hint)
+                elif cmd == "/checkpoint":
+                    cp = mgr.create(label=arg or "manual")
+                    msg = f"已创建 checkpoint {cp.label}" if cp else "checkpoint 创建失败"
+                    if use_rich:
+                        console.print(f"[dim]{msg}[/dim]")
+                    else:
+                        print(msg)
+                else:  # /rewind
+                    cps = mgr.list()
+                    if not cps:
+                        hint = "没有可用的 checkpoint。"
+                        if use_rich:
+                            console.print(f"[yellow]{hint}[/yellow]")
+                        else:
+                            print(hint)
+                    elif arg.isdigit() and 1 <= int(arg) <= len(cps):
+                        note = mgr.restore(cps[int(arg) - 1])
+                        if use_rich:
+                            console.print(f"[green]{note}[/green]")
+                        else:
+                            print(note)
+                    elif arg:
+                        hint = f"无效编号：{arg}（1-{len(cps)}）"
+                        if use_rich:
+                            console.print(f"[red]{hint}[/red]")
+                        else:
+                            print(hint)
+                    else:
+                        lines = "\n".join(
+                            f"  {i}. {c.label}  ({c.timestamp})"
+                            for i, c in enumerate(cps[-10:], start=len(cps) - min(10, len(cps)) + 1)
+                        )
+                        tail = "\n最新 10 条如上；用 /rewind <编号> 回滚（tracked 文件恢复，untracked 保留）。"
+                        if use_rich:
+                            console.print(f"[dim]Checkpoints:\n{lines}{tail}[/dim]")
+                        else:
+                            print(f"Checkpoints:\n{lines}{tail}")
             elif cmd == "/model":
                 if arg.lower() == "add":
                     try:

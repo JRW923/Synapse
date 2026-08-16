@@ -51,6 +51,11 @@ class BrowserTool:
 
         meta = ToolCallMetadata(tool_name="browser")
 
+        from synapse.modules.security.ssrf import check_url
+        rejected = check_url(url)
+        if rejected:
+            return ToolResult(success=False, output="", error=rejected, metadata=meta)
+
         try:
             from playwright.async_api import async_playwright
 
@@ -72,9 +77,12 @@ class BrowserTool:
                         b64 = base64.b64encode(screenshot_bytes).decode()
                         output_parts.append(f"\n\n[SCREENSHOT_BASE64]\n{b64}")
 
+                    from synapse.modules.security.injection import InjectionGuard
+                    guarded = InjectionGuard.guard_external_output(
+                        "\n".join(output_parts), "browser")
                     return ToolResult(
                         success=True,
-                        output="\n".join(output_parts),
+                        output=guarded,
                         metadata=meta,
                     )
                 finally:

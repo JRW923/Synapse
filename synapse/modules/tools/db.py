@@ -161,7 +161,10 @@ class DBTool:
                 metadata=meta,
             )
 
-        return ToolResult(success=True, output=output, metadata=meta)
+        # DB content is externally sourced (tables can carry injected text).
+        from synapse.modules.security.injection import InjectionGuard
+        guarded = InjectionGuard.guard_external_output(output, "db")
+        return ToolResult(success=True, output=guarded, metadata=meta)
 
 
 def _classify_statement(query: str) -> str:

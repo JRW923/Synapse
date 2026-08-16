@@ -13,7 +13,7 @@ from synapse.protocols.planner import (
 from synapse.protocols.llm import Message
 from synapse.protocols.events import (
     ToolCallStarted, ToolCallCompleted, ThrashingDetected, AgentCompleted, AgentProgress, LLMToken,
-    AuthDecisionMade, FileWritten,
+    AuthDecisionMade, FileWritten, CheckpointCreated, CheckpointRestored,
 )
 from synapse.core.exceptions import PlannerError
 from synapse.protocols.tool import RiskLevel, ToolResult, ToolCallMetadata
@@ -171,8 +171,13 @@ class ReActPlanner:
                  tool_timeout_seconds: int = 120, llm_timeout_seconds: int = 120,
                  max_tool_result_chars: int = 16_000,
         max_llm_retries: int = 3,
-        completion_gate_enabled: bool = True,
-        verbose: bool = True,
+                 completion_gate_enabled: bool = True,
+                 # Off by default so bare/test constructions never write refs
+                 # into whatever repo the cwd happens to be. Production entry
+                 # points (library._build_planner) enable it via config.
+                 checkpoint_enabled: bool = False,
+                 history_compaction: str = "elide",
+                 verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
         background_manager=None, skill_loader=None):
         self.max_iterations = max_iterations
@@ -187,6 +192,8 @@ class ReActPlanner:
         self.max_tool_result_chars = max_tool_result_chars
         self.max_llm_retries = max(0, int(max_llm_retries))
         self.completion_gate_enabled = completion_gate_enabled
+        self.checkpoint_enabled = checkpoint_enabled
+        self.history_compaction = history_compaction
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
         # (e.g. "reviewer") without a separate class.
@@ -418,7 +425,24 @@ class ReActPlanner:
             message=f"Analyzing task with {len(tool_schemas)} tools available"
         ))
 
+        # Baseline checkpoint so a run-amok task can be rolled back (manual
+        # /rewind, or automatic single-file recovery below). Non-git
+        # workspaces silently skip checkpoints — best-effort capability.
+        checkpoint_mgr = None
+        baseline_checkpoint = None
+        if self.checkpoint_enabled:
+            from synapse.modules.checkpoint import CheckpointManager
+            checkpoint_mgr = CheckpointManager(_working_directory(self.auth))
+            baseline_checkpoint = checkpoint_mgr.create(label=task[:40])
+            if baseline_checkpoint is not None:
+                await event_bus.emit(CheckpointCreated(
+                    session_id=session.id,
+                    label=baseline_checkpoint.label,
+                    ref=baseline_checkpoint.ref,
+                ))
+
         thrash_stop = False
+        thrash_recovery_note = ""  # set by auto-recovery; injected after tool msgs
         tool_results: list = []  # accumulates results from executed tool calls
 
         for iteration in range(1, self.max_iterations + 1):
@@ -442,11 +466,11 @@ class ReActPlanner:
                 session.messages = self._repair_session(messages)
                 break
 
-            # In-loop history compaction: elide the content of old tool results
-            # once the conversation grows past a soft budget, so long tasks don't
-            # blow the provider context window (which would 400 -> retry -> FAILED).
-            # ponytail: elides oldest tool messages only; recent context preserved.
-            self._compact_history(messages)
+            # In-loop history compaction: elide (or LLM-summarize, then elide)
+            # the content of old tool results once the conversation grows past
+            # a soft budget, so long tasks don't blow the provider context
+            # window (which would 400 -> retry -> FAILED).
+            await self._compact_history(messages, llm=llm)
 
             # Call LLM with exponential backoff retry (I2)
             self._log(f"Iteration {iteration}: calling LLM...")
@@ -700,6 +724,29 @@ class ReActPlanner:
                                 modification_count=file_touch_counts[f],
                             ))
                             metrics.thrashing_events += 1
+                            # Auto-recovery (first threshold hit only): reset the
+                            # thrashed file to its baseline state so the next
+                            # attempt starts clean instead of stacking edit #4
+                            # on three failed ones. The event counter keeps
+                            # counting — a second thrash still stops the task.
+                            if (checkpoint_mgr and baseline_checkpoint is not None
+                                    and file_touch_counts[f] == self.thrashing_threshold):
+                                try:
+                                    note = checkpoint_mgr.restore_file(
+                                        f, baseline_checkpoint)
+                                    thrash_recovery_note = (
+                                        f"[system] {note}. Repeated conflicting edits "
+                                        f"were detected on this file and it was rolled "
+                                        f"back; continue the task with a different "
+                                        f"approach."
+                                    )
+                                    await event_bus.emit(CheckpointRestored(
+                                        session_id=session.id,
+                                        label=baseline_checkpoint.label,
+                                        file_path=f, reason="thrashing",
+                                    ))
+                                except Exception as exc:  # noqa: BLE001 — best effort
+                                    self._log(f"checkpoint restore failed: {exc}")
 
                     # Early-stop: too many thrashing events → abort the whole task.
                     if metrics.thrashing_events >= self.max_thrashing_events:
@@ -709,7 +756,9 @@ class ReActPlanner:
                         )
                         final_output = (
                             f"Thrashing detected on: {', '.join(thrash_files)}. "
-                            f"Stopping to prevent wasted tokens."
+                            f"Stopping to prevent wasted tokens. "
+                            f"Use /rewind to roll the workspace back to the "
+                            f"pre-task checkpoint."
                         )
                         result_status = ResultStatus.PARTIAL
                         thrash_stop = True
@@ -755,6 +804,12 @@ class ReActPlanner:
                     content=content,
                     tool_call_id=tool_id,
                 ))
+
+            # Auto-recovery note rides as a user message AFTER the tool batch,
+            # so assistant(tool_calls) → tool messages pairing stays intact.
+            if thrash_recovery_note:
+                messages.append(Message(role="user", content=thrash_recovery_note))
+                thrash_recovery_note = ""
 
         else:
             # Exceeded max iterations (for/else: loop completed without break)
@@ -905,25 +960,83 @@ class ReActPlanner:
             )
         return prefetched
 
-    def _compact_history(self, messages, soft_chars: int = 120_000, keep_recent: int = 6):
-        """Elide old tool-message content to bound conversation growth.
+    async def _compact_history(self, messages, llm=None, soft_chars: int = 120_000,
+                               keep_recent: int = 6):
+        """Bound conversation growth: summarize-then-elide old tool results.
 
-        Tool messages only need role + tool_call_id + content to stay valid;
-        replacing stale content with a short placeholder preserves the message
-        chain while reclaiming tokens. Recent tool results are kept intact so
-        the model retains what it just did. System/user/assistant turns are
-        never touched.
+        Tool messages only need role + tool_call_id + content to stay valid.
+        With ``history_compaction="llm"`` the content about to be dropped is
+        first summarized into one compacted note (auto /compact), preserving
+        findings the model may still need; on any summarizer failure this
+        degrades to plain elision. Recent tool results are kept intact so the
+        model retains what it just did. System/user/assistant turns are never
+        touched.
         """
         total = sum(len(getattr(m, "content", "") or "") for m in messages)
         if total <= soft_chars:
             return
         tool_idx = [i for i, m in enumerate(messages) if getattr(m, "role", None) == "tool"]
         # Never elide the most recent `keep_recent` tool messages.
-        for i in (tool_idx[:-keep_recent] if len(tool_idx) > keep_recent else []):
-            m = messages[i]
-            old = getattr(m, "content", "") or ""
-            if len(old) > 200 and "[elided" not in old:
-                m.content = "[elided older tool result to save context]"
+        old_idx = tool_idx[:-keep_recent] if len(tool_idx) > keep_recent else []
+        victims = [i for i in old_idx
+                   if len(getattr(messages[i], "content", "") or "") > 200
+                   and "[elided" not in (messages[i].content or "")
+                   and "[compacted" not in (messages[i].content or "")]
+        if not victims:
+            return
+
+        if self.history_compaction == "llm" and llm is not None:
+            summary = await self._summarize_history(messages, victims, llm)
+            if summary:
+                first = victims[0]
+                messages[first].content = (
+                    f"[compacted summary of {len(victims)} older tool results]\n{summary}"
+                )
+                for i in victims[1:]:
+                    messages[i].content = "[elided → summarized above]"
+                return
+            # Summarizer failed — fall through to plain elision.
+
+        for i in victims:
+            messages[i].content = "[elided older tool result to save context]"
+
+    async def _summarize_history(self, messages, victims, llm) -> str:
+        """Summarize the tool results about to be elided (best effort).
+
+        ponytail: input capped at 8K chars per compaction pass — very long
+        histories lose tail content in the summary. Upgrade path: chunked
+        hierarchical summarization like LLMCompactor does for OVERFLOW blocks.
+        """
+        import hashlib
+        from synapse.modules.context.llm_compactor import (
+            MAX_INPUT_CHARS, MAX_SUMMARY_CHARS,
+        )
+        joined = "\n\n".join(
+            f"--- tool result #{n} ---\n{(messages[i].content or '')}"
+            for n, i in enumerate(victims, start=1)
+        )[:MAX_INPUT_CHARS]
+        key = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
+        cached = getattr(self, "_history_summary_cache", None)
+        if cached is None:
+            cached = self._history_summary_cache = {}
+        if key in cached:
+            return cached[key]
+        try:
+            response = await llm.chat([
+                Message(role="system",
+                        content="You are a concise context summarizer for a coding agent."),
+                Message(role="user", content=(
+                    "Summarize these past tool results into one dense reference. "
+                    "Preserve file paths, symbol names, error messages, key "
+                    "findings and decisions. Drop prose.\n\n"
+                    f"{joined}"
+                )),
+            ], tools=None)
+            summary = (response.content or "").strip()[:MAX_SUMMARY_CHARS]
+        except Exception:
+            summary = ""
+        cached[key] = summary
+        return summary
 
     @staticmethod
     def _format_block(block) -> str:

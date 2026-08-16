@@ -40,13 +40,15 @@ Synapse 是一个 Python 实现的端到端 Code Agent Harness。它不是把 LL
 
 ReAct 支持 streaming、tool call、timeout、retry、授权和最小验证 gate；Plan-Execute、Hierarchical、Swarm 共享 Planner 接口。默认从简单的 ReAct 开始，复杂模式按任务显式选择，不把 Agent 数量当作核心卖点。
 
+长任务跑偏有恢复路径：任务起点自动打 Git checkpoint（临时 index 快照，不触碰用户暂存区与工作区），thrashing 检测首次触发时把该文件回滚到任务前状态并提示模型换思路；`/rewind` 可跨会话手动回滚（快照存于 `refs/synapse/checkpoints/`）。
+
 ### 3. Context Engineering + 分层记忆
 
-Retriever 使用 Git-aware 文件发现、相关性排序、AST symbol、预算分区与 compaction；Session / Project / User / Semantic 四层记忆分别服务于会话恢复、项目规则、用户偏好和可选向量召回。外部内容带 trust annotation，降低 prompt injection 中“数据被当成指令”的风险。
+Retriever 使用 Git-aware 文件发现、相关性排序、AST symbol、预算分区与 compaction；Session / Project / User / Semantic 四层记忆分别服务于会话恢复、项目规则、用户偏好和可选向量召回。外部内容带 trust annotation，降低 prompt injection 中“数据被当成指令”的风险。对话历史超过软限时可按 `history_compaction: llm` 先摘要再 elide（自动 /compact），TODO 清单随 Session 持久化、`--resume` 后原样恢复。
 
 ### 4. Action-time 安全边界
 
-每次工具调用都会结合风险等级、工作区路径、命令链、敏感路径和 MCP 配置重新授权。默认进程沙箱保证子进程生命周期回收；Docker、bubblewrap、Seatbelt 是可选的更强执行后端。这里明确区分 **process containment** 与完整的文件/网络 sandbox。
+每次工具调用都会结合风险等级、工作区路径、命令链、敏感路径和 MCP 配置重新授权。命令链检测基于 shlex token 解析：引号内的操作符只是参数文本，`$()`/反引号/子 shell 会触发确认。支持 ask/allow/deny 三态权限规则与会话级“总是允许”签名记忆（按命令首 token / 父目录粒度）。web/browser/db 的输出经 InjectionGuard 扫描注入签名并中和伪造信任标签；出站请求有 SSRF 防护（私网/环回/云元数据拒绝，重定向逐跳校验）。默认进程沙箱保证子进程生命周期回收；Docker、bubblewrap、Seatbelt 是可选的更强执行后端。这里明确区分 **process containment** 与完整的文件/网络 sandbox。
 
 ### 5. 事件驱动的可观测性
 
@@ -101,7 +103,7 @@ synapse --resume
 synapse serve --host 127.0.0.1 --port 8000
 ```
 
-REPL 常用命令：`/help`、`/model`、`/model add`、`/mode`、`/resume`、`/score`。会话自动持久化到 `~/.synapse/sessions/`。
+REPL 常用命令：`/help`、`/model`、`/model add`、`/mode`、`/resume`、`/score`、`/checkpoint`、`/rewind`。会话自动持久化到 `~/.synapse/sessions/`。
 
 ## 评测与可视化
 
@@ -216,7 +218,7 @@ synapse/
 - Swarm 支持 worktree、review、vote 和冲突保护，但还不是完整 Git three-way merge。
 - 评测分数区分模型能力、Harness 能力和 grader 质量，不能用一次 smoke run 推断通用模型排名。
 
-优先路线：Git checkpoint/rollback、typed retry classifier、HTTP SSRF policy、跨平台强沙箱 CI、SWE-bench 小样本可复现实验，以及基于 EventBus 的时序/DAG 可视化。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
+优先路线：typed retry classifier、跨平台强沙箱 CI、SWE-bench 小样本可复现实验、DNS rebinding 级 SSRF 加固，以及基于 EventBus 的时序/DAG 可视化。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
 
 ## 设计取舍
 
@@ -227,6 +229,8 @@ synapse/
 **process containment 和 filesystem sandbox 有什么区别？** Windows Job Object / Unix process group 能保证子进程被回收，但不限制文件和网络访问。需要强隔离必须显式选择 Docker、bubblewrap 或 Seatbelt 后端。
 
 **怎么判断任务真的完成了？** 运行时 gate 看的是工具返回的 exit code，不是模型文本里的「已完成」；评测层的 grader 在 Agent 跑完之后由 Harness 独立执行。正式数据集还必须在入库 preflight 中确认 baseline 失败、目标状态可通过，避免「测试本来就过」的假阳性。
+
+**为什么 thrashing 只回滚单个文件，不自动回滚整个工作区？** thrashing 首次触发时，只有那个反复被改的文件被证明处于坏状态，回滚它是安全的；整区回滚会把其他文件的半成品修改一并丢掉，而模型可能马上要在此基础上继续。整区回滚是用户的决定（`/rewind`），不是 harness 的默认行为——恢复动作本身也是副作用，越保守越好。checkpoint 的 restore 只重置 tracked 文件，untracked 文件一律保留，因为无法区分「agent 建的」和「用户的」。
 
 ## 文档
 

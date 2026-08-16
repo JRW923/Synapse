@@ -112,6 +112,15 @@ class PlanningConfig(BaseModel):
     # KB HTML page) is re-counted each turn and blows the token budget fast.
     # 0 = no cap. This is the universal safety net for ALL tools.
     max_tool_result_chars: int = 16_000
+    # Conversation-history compaction once it passes the soft limit:
+    # "elide" replaces old tool results with a placeholder (cheap, lossy);
+    # "llm" first summarizes them into one compacted note (auto /compact),
+    # falling back to elide when the summarizer fails.
+    history_compaction: str = "elide"
+    # Git-backed workspace checkpoints: task-start snapshot + thrashing
+    # auto-recovery + /rewind. Requires a git workspace; silently skipped
+    # otherwise.
+    checkpoints: bool = True
 
 
 class ContextConfig(BaseModel):

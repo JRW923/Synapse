@@ -38,15 +38,17 @@ Size: ~18.6k lines of Python under `synapse/`, 73 test files / 431 test function
 
 ### 2. A real Agent Loop, not a one-shot function call
 
-ReAct supports streaming, tool calls, timeout, retry, authorization, and a minimal verification gate. Plan-Execute, Hierarchical, and Swarm share the Planner contract. The default remains the simple ReAct path; complex modes are explicit options rather than a claim that more agents are always better.
+ReAct supports streaming, tool calls, timeout, retry, authorization, and a minimal verification gate. Plan-Execute, Hierarchical, and Swarm share the Planner contract. The default remains the simple ReAct path; complex modes are explicit options rather than a claim that more agents is always better.
+
+Runaway long tasks have a recovery path: a Git checkpoint is taken at task start (temporary-index snapshot that never touches the user's staging area), the first thrashing trip auto-rolls the offending file back to its pre-task state and tells the model to try a different approach, and `/rewind` restores any snapshot across sessions (stored under `refs/synapse/checkpoints/`).
 
 ### 3. Context engineering and layered memory
 
-The Retriever combines Git-aware file discovery, relevance ranking, AST symbols, budget partitioning, and compaction. Session / Project / User / Semantic memory layers serve continuation, project rules, preferences, and optional vector recall. External content is trust-annotated to reduce the chance that data is mistaken for instruction during prompt-injection attempts.
+The Retriever combines Git-aware file discovery, relevance ranking, AST symbols, budget partitioning, and compaction. Session / Project / User / Semantic memory layers serve continuation, project rules, preferences, and optional vector recall. External content is trust-annotated to reduce the chance that data is mistaken for instruction during prompt-injection attempts. Conversation history past its soft limit can be LLM-summarized before eliding (auto /compact via `history_compaction: llm`); the TODO list persists with the Session and is restored by `--resume`.
 
 ### 4. Action-time security boundaries
 
-Every tool call is re-authorized using risk, workspace paths, command chains, sensitive paths, and MCP configuration. The default process sandbox contains child-process lifetimes; Docker, bubblewrap, and Seatbelt are optional stronger backends. The project explicitly distinguishes **process containment** from a complete filesystem/network sandbox.
+Every tool call is re-authorized using risk, workspace paths, command chains, sensitive paths, and MCP configuration. Command-chain checks are shlex token-based: quoted operators are argument text, while `$()`/backticks/subshells trigger confirmation. Ask/allow/deny permission rules and session-scoped "yes to all" approval memory (signatured by command first-token / parent directory) are supported. Output from web/browser/db is scanned for injection signatures and forged trust tags are neutralized; outbound requests carry SSRF protection (private/loopback/cloud-metadata targets rejected, redirect hops re-checked). The default process sandbox contains child-process lifetimes; Docker, bubblewrap, and Seatbelt are optional stronger backends. The project explicitly distinguishes **process containment** from a complete filesystem/network sandbox.
 
 ### 5. Event-driven observability
 
@@ -97,7 +99,7 @@ synapse --resume
 synapse serve --host 127.0.0.1 --port 8000
 ```
 
-Useful REPL commands include `/help`, `/model`, `/model add`, `/mode`, `/resume`, and `/score`. Sessions are persisted under `~/.synapse/sessions/`.
+Useful REPL commands include `/help`, `/model`, `/model add`, `/mode`, `/resume`, `/score`, `/checkpoint`, and `/rewind`. Sessions are persisted under `~/.synapse/sessions/`.
 
 ## Evaluation and visualization
 
@@ -172,7 +174,7 @@ These boundaries are deliberate and explicitly labelled. Check that they fit you
 - Swarm supports worktrees, review, voting, and conflict protection, but not a complete Git three-way merge.
 - Evaluation separates model ability, Harness behavior, and grader quality; one smoke run cannot establish a general model ranking.
 
-Priority follow-ups are Git checkpoint/rollback, a typed retry classifier, HTTP SSRF policy, cross-platform strong-sandbox CI, reproducible SWE-bench samples, and EventBus-based timeline/DAG visualization. There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
+Priority follow-ups are a typed retry classifier, cross-platform strong-sandbox CI, reproducible SWE-bench samples, DNS-rebinding-grade SSRF hardening, and EventBus-based timeline/DAG visualization. There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
 
 ## Design trade-offs
 
@@ -183,6 +185,8 @@ Priority follow-ups are Git checkpoint/rollback, a typed retry classifier, HTTP 
 **What is the difference between process containment and a filesystem sandbox?** Windows Job Objects and Unix process groups guarantee child processes are reclaimed, but do not restrict file or network access. Strong isolation requires explicitly selecting the Docker, bubblewrap, or Seatbelt backend.
 
 **How do you know a task is actually complete?** The runtime gate reads tool exit codes, not the phrase "done" in model output. The evaluation grader runs independently after the Agent finishes, and first confirms the baseline fails so a passing-anyway test cannot produce a false positive.
+
+**Why does thrashing only roll back one file instead of the whole workspace?** When thrashing first trips, only the repeatedly-edited file is proven bad — rolling it back is safe. A full-workspace rollback would also discard half-finished edits elsewhere the model may still build on. Full restores are the user's call (`/rewind`), never the harness default: a recovery action is itself a side effect, so it stays conservative. Restores reset tracked files only; untracked files are always kept because the harness cannot tell "the agent created this" from "the user did".
 
 ## Documentation
 

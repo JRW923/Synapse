@@ -139,5 +139,5 @@ async def test_web_fetch_caps_extracted_text(httpx_mock):
     )
     result = await WebFetchTool().execute({"url": "https://example.com/big"})
     assert result.success
-    assert len(result.output) <= 16_000 + 60  # cap + truncation notice
+    assert len(result.output) <= 16_000 + 120  # cap + truncation notice + injection-guard wrap
     assert "truncated" in result.output

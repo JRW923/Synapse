@@ -865,6 +865,8 @@ def build_planner(
         max_tool_result_chars=cfg.max_tool_result_chars,
         max_llm_retries=max_llm_retries,
         completion_gate_enabled=completion_gate_enabled,
+        checkpoint_enabled=cfg.checkpoints,
+        history_compaction=cfg.history_compaction,
         background_manager=background_manager or get_default_manager(),
         skill_loader=get_default_skill_loader(),
     )

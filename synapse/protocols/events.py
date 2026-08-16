@@ -31,6 +31,8 @@ class EventType(str, Enum):
     TASK_RELEASED = "task_released"
     BACKGROUND_RESULT = "background_result"
     AGENT_MESSAGE = "agent_message"
+    CHECKPOINT_CREATED = "checkpoint_created"
+    CHECKPOINT_RESTORED = "checkpoint_restored"
 
 
 @dataclass(kw_only=True)
@@ -271,3 +273,23 @@ class AgentMessage(BaseEvent):
     recipient: str = ""                # target agent_id; "" = broadcast
     message: str = ""
     kind: str = "notify"               # notify | request | response
+
+
+@dataclass(kw_only=True)
+class CheckpointCreated(BaseEvent):
+    """A workspace checkpoint snapshot was taken (task start or /checkpoint)."""
+    event_type: str = EventType.CHECKPOINT_CREATED
+    label: str = ""
+    ref: str = ""
+
+
+@dataclass(kw_only=True)
+class CheckpointRestored(BaseEvent):
+    """The workspace (or one file) was rolled back to a checkpoint.
+
+    Triggered by thrashing recovery (single file) or /rewind (whole tree).
+    """
+    event_type: str = EventType.CHECKPOINT_RESTORED
+    label: str = ""
+    file_path: str = ""                # "" = full workspace restore
+    reason: str = ""                   # "thrashing" | "manual" | ...

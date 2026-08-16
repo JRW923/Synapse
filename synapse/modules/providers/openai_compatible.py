@@ -11,6 +11,7 @@ code — subclasses are thin.  If a provider diverges in wire format (e.g.
 Gemini), do NOT force it into this base.
 """
 
+import asyncio
 import json
 import logging
 from openai import AsyncOpenAI
@@ -90,7 +91,12 @@ class OpenAICompatibleProvider:
 
         try:
             out_tokens = 0
-            async for chunk in self._client.chat.completions.create(**kwargs):
+            stream = self._client.chat.completions.create(**kwargs)
+            # openai SDK >=2 returns a coroutine; test doubles and some
+            # compatible servers hand back the async iterator directly.
+            if asyncio.iscoroutine(stream):
+                stream = await stream
+            async for chunk in stream:
                 # Authoritative usage. Standard OpenAI only puts this on the
                 # final chunk (stream_options.include_usage); some compatible
                 # servers (vLLM, llama.cpp, Ollama native, …) stream cumulative

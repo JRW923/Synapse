@@ -1,19 +1,17 @@
 """Action-Time Authorization — evaluates tool calls before execution."""
 
-import re
+import shlex
 from collections.abc import Callable, Awaitable
 from pathlib import Path
 from synapse.protocols.tool import RiskLevel
 from synapse.protocols.sandbox import AuthRequest, AuthDecision
 
-#: Split points for shell chains so `a && b` / `a | b` validate every segment.
-_SHELL_CONTROL = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
-#: Redirect operators with their target. The `[^0-9&]` guard skips fd forms
-#: like `2>&1` and `2>>log` so only path redirects are checked.
-_REDIRECT_RE = re.compile(r"(?:^|[^0-9&])(>>|>|<)\s*([^\s;&|]+)")
 _SAFE_REDIRECT_TARGETS = {
     "/dev/null", "/dev/tty", "/dev/stdin", "/dev/stdout", "/dev/stderr",
 }
+#: Token-level control operators — only these split a chain; the same text
+#: inside quotes stays part of one argument token and cannot hide a segment.
+_CONTROL_OPERATORS = {"&&", "||", ";", "|", "\n"}
 
 #: Callback signature for interactive confirmation.
 #: Receives the AuthRequest, returns True if user approves.
@@ -70,11 +68,17 @@ class ActionAuthorizer:
         allowed_paths: list[str] | None = None,
         allowlisted_commands: list[str] | None = None,
         bypass_policy: bool = False,
+        permission_rules: list[tuple[str, str]] | None = None,
     ):
         self.workspace_root = Path(workspace_root).resolve()
         self.allow_external = allow_external
         self.confirmation_enabled = confirmation_enabled
         self.bypass_policy = bypass_policy
+        #: Per-tool三态规则 (pattern, action)：action ∈ ask | allow | deny。
+        #: pattern 支持 fnmatch 通配（"shell"、"web*"、"*"）。
+        self._permission_rules = list(permission_rules or [])
+        #: 会话内批准记忆：签名（命令首 token / 父目录 / 工具名）→ 已批准。
+        self._approved_signatures: set[str] = set()
         self._allowed_paths = [self._resolve_scope_boundary(p) for p in (allowed_paths or [])]
         self._allowlisted_commands = (
             set(allowlisted_commands)
@@ -100,6 +104,63 @@ class ActionAuthorizer:
                 allowed=True,
                 reason="Action-time authorization disabled for evaluation ablation",
             )
+
+        # --- 三态规则表：deny 硬拒 / allow 静默放行 / ask 走默认流程 ----------
+        rule = self._rule_for(request.tool_name)
+        if rule == "deny":
+            return AuthDecision(
+                allowed=False,
+                reason=f"Denied by permission rule for tool '{request.tool_name}'",
+            )
+        if rule == "allow":
+            return AuthDecision(
+                allowed=True,
+                reason=f"Allowed by permission rule for tool '{request.tool_name}'",
+            )
+
+        decision = self._decide(request)
+
+        # --- 记忆化批准：同一签名（如同一命令首 token）本会话已批准 → 免确认 --
+        if decision.requires_confirmation and self._is_remembered(request):
+            return AuthDecision(
+                allowed=decision.allowed,
+                reason=f"{decision.reason} [signature approved earlier this session]",
+            )
+        return decision
+
+    def _rule_for(self, tool_name: str) -> str | None:
+        """First matching permission rule's action (ask | allow | deny), if any."""
+        import fnmatch
+        for pattern, action in self._permission_rules:
+            if fnmatch.fnmatch(tool_name, pattern):
+                return action
+        return None
+
+    @staticmethod
+    def approval_signature(request: AuthRequest) -> str:
+        """Coarse-grained identity of a call for approval memory.
+
+        shell → command's first token ("yes to all pytest", not "yes to all
+        shell"); path tools → parent directory; everything else → tool name.
+        """
+        params = getattr(request, "tool_params", {}) or {}
+        if getattr(request, "tool_name", "") == "shell":
+            cmd = str(params.get("command", ""))
+            parts = cmd.strip().split(None, 1)
+            return f"shell:{parts[0]}" if parts else "shell:"
+        path = params.get("path")
+        if path:
+            return f"{request.tool_name}:{Path(path).parent}"
+        return request.tool_name
+
+    def remember_approval(self, request: AuthRequest) -> None:
+        """Record that the user approved this call's signature (session-scoped)."""
+        self._approved_signatures.add(self.approval_signature(request))
+
+    def _is_remembered(self, request: AuthRequest) -> bool:
+        return self.approval_signature(request) in self._approved_signatures
+
+    def _decide(self, request: AuthRequest) -> AuthDecision:
         risk = request.risk_level
 
         # --- READ_ONLY: allow, but gate sensitive files ---------------------------
@@ -164,10 +225,15 @@ class ActionAuthorizer:
                     allowed=False,
                     reason=f"Command redirects to unsafe target: '{bad_redirect}'",
                 )
+            segments = self._segments(command)
+            offending = next(
+                (seg[0] for seg in (segments or []) if seg[0] not in self._allowlisted_commands),
+                self._first_token(command),
+            )
             if not self._is_allowlisted(command):
                 return AuthDecision(
                     allowed=False,
-                    reason=f"Command not in allowlist: {self._first_token(command)}",
+                    reason=f"Command not in allowlist: {offending}",
                 )
             # ponytail: commands that can chain arbitrary code/network access are
             # allowed only after explicit user confirmation, never silent.
@@ -239,16 +305,61 @@ class ActionAuthorizer:
         return False
 
     @staticmethod
-    def _split_shell(command: str) -> list[str]:
-        """Split on shell control operators so a chain can't hide behind an
-        allowlisted first token. ponytail: quoting (echo "a&&b") is not
-        parsed — this is a best-effort gate, not a shell grammar."""
-        return [seg for seg in _SHELL_CONTROL.split(command) if seg.strip()]
+    def _tokenize(command: str) -> list[str] | None:
+        """Shell-tokenize *command* (quotes respected), or None when it cannot
+        be parsed (unbalanced quotes) — callers must then deny, not guess.
+
+        ponytail: posix shlex eats backslashes, so a bare Windows path argument
+        (`pytest C:\\repo\\x`) loses separators in argument tokens. Only token
+        boundaries and operator structure are consumed here, and every
+        mis-parse fails toward the strict side, so this stays safe.
+        """
+        try:
+            lex = shlex.shlex(command, posix=True, punctuation_chars=True)
+            lex.whitespace_split = True
+            return list(lex)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _segments(cls, command: str) -> list[list[str]] | None:
+        """Split the token stream at real (unquoted) control operators.
+
+        `git commit -m "a && b"` is ONE git command — the quoted `&&` never
+        reaches the operator boundary. Returns None when unparseable, and
+        [] when a chain has an empty segment (`a && && b`), which callers
+        treat as not-allowlisted.
+        """
+        tokens = cls._tokenize(command)
+        if tokens is None:
+            return None
+        segments: list[list[str]] = [[]]
+        for tok in tokens:
+            if tok in _CONTROL_OPERATORS:
+                segments.append([])
+            else:
+                segments[-1].append(tok)
+        if any(not seg for seg in segments):
+            return []
+        return segments
 
     @staticmethod
     def _first_token(command: str) -> str:
         tokens = command.strip().split()
         return tokens[0] if tokens else ""
+
+    @classmethod
+    def _has_command_substitution(cls, command: str) -> bool:
+        """True when the token stream carries an unquoted `$(...)`, `(...)`
+        subshell, or backtick — any of these can execute arbitrary code from
+        inside an otherwise allowlisted command (`echo $(python evil.py)`)."""
+        tokens = cls._tokenize(command)
+        if tokens is None:
+            return True  # unparseable → assume the worst
+        return any(
+            tok in ("(", ")") or "`" in tok or tok.startswith("$(")
+            for tok in tokens
+        )
 
     def _is_dangerous(self, command: str) -> str | None:
         """Return the first dangerous pattern matched by *command*, else None.
@@ -284,9 +395,20 @@ class ActionAuthorizer:
 
     def _unsafe_redirection(self, command: str) -> str | None:
         """Return a redirect target that escapes the workspace (or a sensitive
-        path), else None. e.g. `echo hi > /etc/cron.d/y`."""
-        for _op, target in _REDIRECT_RE.findall(command):
-            target = target.strip("'\"")
+        path), else None. e.g. `echo hi > /etc/cron.d/y`.
+
+        Token-based: a quoted `>` (`git commit -m "a > b"`) is argument text,
+        not a redirect, and does not trip this check.
+        """
+        tokens = self._tokenize(command)
+        if tokens is None:
+            return command  # unparseable → caller denies
+        for i, tok in enumerate(tokens):
+            if tok not in (">", ">>", "<"):
+                continue
+            if i + 1 >= len(tokens):
+                return "<missing target>"
+            target = tokens[i + 1]
             if target.startswith("&"):
                 continue  # fd redirect like 2>&1
             if target in _SAFE_REDIRECT_TARGETS:
@@ -311,20 +433,21 @@ class ActionAuthorizer:
         )
 
     def _is_allowlisted(self, command: str) -> bool:
-        segments = self._split_shell(command)
+        segments = self._segments(command)
         if not segments:
-            return False
+            return False  # unparseable, empty chain segment, or empty command
         # CONFIRM_REQUIRED commands (python/curl/wget) are allowed but gated by
         # the confirmation branch; without them here `python x.py` would be
         # denied as "not in allowlist" before confirmation was ever offered.
         allowed = self._allowlisted_commands
-        return all(
-            self._first_token(seg) in allowed
-            for seg in segments
-        )
+        return all(seg[0] in allowed for seg in segments)
 
     def _requires_confirmation(self, command: str) -> bool:
+        if self._has_command_substitution(command):
+            return True
+        segments = self._segments(command)
+        if not segments:
+            return True  # unparseable → never silent
         return any(
-            self._first_token(seg) in self.CONFIRM_REQUIRED_COMMANDS
-            for seg in self._split_shell(command)
+            seg[0] in self.CONFIRM_REQUIRED_COMMANDS for seg in segments
         )

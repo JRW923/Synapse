@@ -14,6 +14,25 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
+def _guard_output(text: str, source: str) -> str:
+    """InjectionGuard hardening for external tool output (scan + tag wrap)."""
+    from synapse.modules.security.injection import InjectionGuard
+    return InjectionGuard.guard_external_output(text, source)
+
+
+async def _ssrf_event_hook(response):
+    """Reject any redirect hop that lands on a private address."""
+    from synapse.modules.security.ssrf import is_private_host
+    host = response.request.url.host
+    if is_private_host(host):
+        raise httpx.ConnectError(f"SSRF guard: redirect to private host '{host}'")
+
+
+def _ssrf_reject(url: str) -> str | None:
+    from synapse.modules.security.ssrf import check_url
+    return check_url(url)
+
+
 def _html_to_text(html: str) -> str:
     """Best-effort extraction of visible text from an HTML page.
 
@@ -79,8 +98,14 @@ class HTTPTool:
         timeout = httpx.Timeout(DEFAULT_TIMEOUT)
         limits = httpx.Limits(max_keepalive_connections=0)
 
+        rejected = _ssrf_reject(url)
+        if rejected:
+            return ToolResult(success=False, output="", error=rejected, metadata=meta)
+
         try:
-            async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+            async with httpx.AsyncClient(
+                    timeout=timeout, limits=limits,
+                    event_hooks={"response": [_ssrf_event_hook]}) as client:
                 if method == "POST":
                     kwargs: dict = {}
                     if body is not None:
@@ -98,12 +123,12 @@ class HTTPTool:
                     text = text[:MAX_RESPONSE_BYTES] + "\n\n[Response truncated — exceeded 100 KB limit]"
                     return ToolResult(
                         success=True,
-                        output=text,
+                        output=_guard_output(text, "web"),
                         metadata=meta,
                     )
 
                 if resp.is_success:
-                    return ToolResult(success=True, output=text, metadata=meta)
+                    return ToolResult(success=True, output=_guard_output(text, "web"), metadata=meta)
                 else:
                     return ToolResult(
                         success=False,
@@ -157,8 +182,13 @@ class WebFetchTool:
 
         timeout = httpx.Timeout(_FETCH_TIMEOUT)
         limits = httpx.Limits(max_keepalive_connections=0)
+        rejected = _ssrf_reject(url)
+        if rejected:
+            return ToolResult(success=False, output="", error=rejected, metadata=meta)
         try:
-            async with httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True) as client:
+            async with httpx.AsyncClient(
+                    timeout=timeout, limits=limits, follow_redirects=True,
+                    event_hooks={"response": [_ssrf_event_hook]}) as client:
                 resp = await client.get(url)
         except Exception as exc:
             return ToolResult(success=False, output="", error=str(exc), metadata=meta)
@@ -168,7 +198,7 @@ class WebFetchTool:
             text = text[:_MAX_FETCH_CHARS] + "\n\n[Response truncated — exceeded fetch limit]"
 
         if resp.is_success:
-            return ToolResult(success=True, output=text, metadata=meta)
+            return ToolResult(success=True, output=_guard_output(text, "web_fetch"), metadata=meta)
         return ToolResult(
             success=False, output=text, error=f"HTTP {resp.status_code}", metadata=meta
         )
