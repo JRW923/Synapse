@@ -128,9 +128,19 @@ def _select_tool_schemas(tool_schemas: list[dict], task: str) -> list[dict]:
 
 def _is_non_retryable_llm_error(exc: BaseException) -> bool:
     """Return True for authentication/permission failures that cannot heal by retrying."""
+    return _classify_llm_failure(exc) == "auth"
+
+
+def _classify_llm_failure(exc: BaseException) -> str:
+    """Bucket a fatal LLM error for evaluation-side failure taxonomy.
+
+    "provider_unavailable" (5xx / timeouts / connection resets) is an
+    infrastructure fact, not a model capability result — the runner uses this
+    to keep gateway outages out of capability statistics.
+    """
     current: BaseException | None = exc
     seen: set[int] = set()
-    markers = (
+    auth_markers = (
         "authentication_error",
         "invalid_api_key",
         "invalid api key",
@@ -143,16 +153,30 @@ def _is_non_retryable_llm_error(exc: BaseException) -> bool:
         "status_code=401",
         "status_code=403",
     )
+    unavailable_markers = (
+        "503", "502", "500", "504", "429",
+        "provider_unavailable", "service unavailable",
+        "rate limit", "overloaded",
+        "timeout", "timed out",
+        "connection reset", "connection refused", "connection error",
+        "failed to connect", "recv failure",
+    )
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         response = getattr(current, "response", None)
         if getattr(response, "status_code", None) in {401, 403}:
-            return True
+            return "auth"
+        if getattr(response, "status_code", None) in {429, 500, 502, 503, 504}:
+            return "provider_unavailable"
         message = str(current).lower()
-        if any(marker in message for marker in markers):
-            return True
+        if any(marker in message for marker in auth_markers):
+            return "auth"
+        if isinstance(current, (TimeoutError, asyncio.TimeoutError, ConnectionError)):
+            return "provider_unavailable"
+        if any(marker in message for marker in unavailable_markers):
+            return "provider_unavailable"
         current = current.__cause__ or current.__context__
-    return False
+    return "llm_error"
 
 
 class ReActPlanner:
@@ -480,6 +504,7 @@ class ReActPlanner:
             ))
             max_llm_retries = self.max_llm_retries
             for attempt in range(max_llm_retries + 1):  # 1 initial + retries
+                t_llm = time.monotonic()
                 try:
                     response = await asyncio.wait_for(
                         self._call_llm(
@@ -493,6 +518,10 @@ class ReActPlanner:
                     non_retryable = _is_non_retryable_llm_error(e)
                     if non_retryable or attempt == max_llm_retries:
                         attempts = attempt + 1
+                        # Provider outages are infrastructure facts; tag the
+                        # metrics so evaluation keeps them out of capability
+                        # statistics (infrastructure_failure_attempts).
+                        metrics.llm_failure = _classify_llm_failure(e)
                         detail = (
                             f"LLM API call failed after {attempts} attempt"
                             f"{'s' if attempts != 1 else ''}"
@@ -509,6 +538,9 @@ class ReActPlanner:
                         )
                     await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
                     self._log(f"LLM call attempt {attempt + 1} failed: {e}, retrying...")
+                finally:
+                    metrics.llm_call_count += 1
+                    metrics.llm_time_ms += int((time.monotonic() - t_llm) * 1000)
             metrics.tokens_input += response.usage.get("input", 0)
             metrics.tokens_output += response.usage.get("output", 0)
             total_tokens = metrics.tokens_input + metrics.tokens_output

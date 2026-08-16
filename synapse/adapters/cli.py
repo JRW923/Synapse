@@ -2583,6 +2583,8 @@ async def _run_swebench_eval(args, provider: str, model: str, report_path: Path)
                     "changed_files": execution.changed_files,
                     "output": execution.output,
                     "patch_chars": len(patch),
+                    "llm_call_count": getattr(agent_result.metrics, "llm_call_count", 0),
+                    "llm_time_ms": getattr(agent_result.metrics, "llm_time_ms", 0),
                     "runtime": synapse.get_run_score(),
                 }
                 return agent_result, {"swebench": facts}

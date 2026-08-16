@@ -26,6 +26,12 @@ class ExecutionMetrics:
     tool_success_count: int = 0
     duration_ms: int = 0
     thrashing_events: int = 0
+    # LLM call accounting — separates provider latency from tool time in the
+    # efficiency dimension, and lets evaluation classify provider outages as
+    # infrastructure failures instead of model failures.
+    llm_call_count: int = 0
+    llm_time_ms: int = 0
+    llm_failure: str = ""  # "" | "provider_unavailable" | "auth" | "llm_error"
 
 
 @dataclass

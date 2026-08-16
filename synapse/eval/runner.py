@@ -116,6 +116,10 @@ class TaskResult:
     grade_reason: str = ""
     grade_details: dict[str, Any] = field(default_factory=dict)
     verification_status: str = "not_graded"
+    # Fatal LLM-side failure bucket from ExecutionMetrics.llm_failure
+    # ("provider_unavailable" | "auth" | "llm_error" | ""). Non-empty means the
+    # attempt never got a fair shot at the task.
+    failure_kind: str = ""
     run_score: dict[str, Any] | None = None
     artifact_ref: dict[str, Any] | None = None
 
@@ -217,6 +221,7 @@ class BenchmarkResult:
                 if result.grade_reason else "",
                 "grade_details": sanitize_value(result.grade_details),
                 "verification_status": result.verification_status,
+                "failure_kind": result.failure_kind,
                 "run_score": sanitize_value(result.run_score),
                 "artifact_ref": result.artifact_ref,
             }
@@ -1026,7 +1031,9 @@ def build_benchmark_result(
     total_tokens = tokens_input + tokens_output
     token_metrics_complete = attempt_total > 0 and token_count_attempts == attempt_total
     infrastructure_failure_attempts = sum(
-        item.status == "error" or item.verification_status == "grader_error"
+        item.status == "error"
+        or item.verification_status == "grader_error"
+        or item.failure_kind == "provider_unavailable"
         for item in results
     )
     if efficiency_attempts < attempt_total:
@@ -1287,6 +1294,8 @@ class BenchmarkRunner:
                     grade_reason=grade.reason,
                     grade_details=grade.details,
                     verification_status=verification_status,
+                    failure_kind=str(getattr(
+                        getattr(agent_result, "metrics", None), "llm_failure", "") or ""),
                     run_score=run_score,
                 )
                 if artifact_store is not None and (
