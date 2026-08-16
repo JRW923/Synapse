@@ -220,7 +220,16 @@ synapse/
 - Swarm 支持 worktree、review、vote 和冲突保护，但还不是完整 Git three-way merge。
 - 评测分数区分模型能力、Harness 能力和 grader 质量，不能用一次 smoke run 推断通用模型排名。
 
-优先路线：typed retry classifier、跨平台强沙箱 CI、DNS rebinding 级 SSRF 加固、Aider 跨 Harness 对照（同冻结集同 grader），以及基于 EventBus 的时序/DAG 可视化。SWE-bench 冻结 20 题多模型正式 run 已完成（见[评测基线](docs/评测/评测基线与接入.md)：三档模型 × 3 次重复、gold-verified 入库、外部 grader 实测）。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
+优先路线（按当前价值排序）：
+
+- **Aider 跨 Harness 对照**：同冻结 20 题、同网关模型、同外部 grader 下 Synapse vs Aider 配对对比——把“有数字”升级为“Harness 能力证据”的关键实验（Aider 已验证支持 OpenAI 兼容网关与本仓 JSONL 格式）。
+- **Subagent 委派工具**：给模型侧提供 `spawn_subagent` 类工具，让探索型子任务在独立上下文窗口执行、摘要回主线，控制主上下文膨胀（可复用 HierarchicalPlanner 的 session.fork 机制）。
+- **PreToolUse 钩子**：hooks 当前只支持只读 PostToolUse 通知；把 PreToolUse 阻断/改写接入 ActionAuthorizer 决策点，支撑企业自定义合规拦截。
+- **HTTP 会话持久化**：server 的 sessions 为内存态（重启即丢），补持久化与 resume/cancel 端点，与 CLI `--resume` 能力对齐。
+- **EventBus 时序/DAG 可视化**：把 swarm 的 worker/review/vote 事件流渲染为 timeline/DAG 并入 HTML Dashboard，强化“可复盘”。
+- DNS rebinding 级 SSRF 加固（传输层固定已解析 IP）。
+
+SWE-bench 冻结 20 题多模型正式 run 已完成（见[评测基线](docs/评测/评测基线与接入.md)）；typed retry classifier 与 Windows CI 矩阵已落地。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
 
 ## 设计取舍
 

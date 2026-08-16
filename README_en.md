@@ -174,7 +174,16 @@ These boundaries are deliberate and explicitly labelled. Check that they fit you
 - Swarm supports worktrees, review, voting, and conflict protection, but not a complete Git three-way merge.
 - Evaluation separates model ability, Harness behavior, and grader quality; one smoke run cannot establish a general model ranking.
 
-Priority follow-ups are a typed retry classifier, cross-platform strong-sandbox CI, DNS-rebinding-grade SSRF hardening, an Aider cross-harness comparison (same frozen set and grader), and EventBus-based timeline/DAG visualization. The frozen-20 SWE-bench multi-model run is done (three model tiers × 3 repeats, gold-verified admission, external graders — see the evaluation baseline doc). There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
+Priority roadmap (by current value):
+
+- **Aider cross-harness comparison**: Synapse vs Aider on the same frozen 20 tasks, gateway model, and external graders — the experiment that turns "we have numbers" into "harness capability evidence" (Aider is confirmed to support OpenAI-compatible gateways and this repo's JSONL format).
+- **Subagent delegation tool**: a model-side `spawn_subagent`-style tool so exploratory subtasks run in their own context window and return a summary, bounding main-context growth (the HierarchicalPlanner's session.fork machinery can be reused).
+- **PreToolUse hooks**: hooks today are read-only PostToolUse notifications; wire PreToolUse block/rewrite into the ActionAuthorizer decision point for enterprise policy enforcement.
+- **HTTP session persistence**: the server keeps sessions in memory (lost on restart); add persistence plus resume/cancel endpoints to match the CLI's `--resume`.
+- **EventBus timeline/DAG visualization**: render swarm worker/review/vote event flows into the HTML dashboard to strengthen replayability.
+- DNS-rebinding-grade SSRF hardening (pin resolved IPs at the transport layer).
+
+The frozen-20 SWE-bench multi-model run is done (three model tiers × 3 repeats, gold-verified admission, external graders — see the evaluation baseline doc); the typed retry classifier and the Windows CI matrix have landed. There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
 
 ## Design trade-offs
 
