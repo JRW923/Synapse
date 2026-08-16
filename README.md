@@ -218,7 +218,7 @@ synapse/
 - Swarm 支持 worktree、review、vote 和冲突保护，但还不是完整 Git three-way merge。
 - 评测分数区分模型能力、Harness 能力和 grader 质量，不能用一次 smoke run 推断通用模型排名。
 
-优先路线：typed retry classifier、跨平台强沙箱 CI、SWE-bench 小样本可复现实验、DNS rebinding 级 SSRF 加固，以及基于 EventBus 的时序/DAG 可视化。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
+优先路线：typed retry classifier、跨平台强沙箱 CI、DNS rebinding 级 SSRF 加固、Aider 跨 Harness 对照（同冻结集同 grader），以及基于 EventBus 的时序/DAG 可视化。SWE-bench 冻结 20 题多模型正式 run 已完成（见[评测基线](docs/评测/评测基线与接入.md)：三档模型 × 3 次重复、gold-verified 入库、外部 grader 实测）。当前没有全量 TypeScript 重构计划：Python 更适合保留 Agent runtime，TypeScript 只作为 IDE/API client 边界。
 
 ## 设计取舍
 

@@ -174,7 +174,7 @@ These boundaries are deliberate and explicitly labelled. Check that they fit you
 - Swarm supports worktrees, review, voting, and conflict protection, but not a complete Git three-way merge.
 - Evaluation separates model ability, Harness behavior, and grader quality; one smoke run cannot establish a general model ranking.
 
-Priority follow-ups are a typed retry classifier, cross-platform strong-sandbox CI, reproducible SWE-bench samples, DNS-rebinding-grade SSRF hardening, and EventBus-based timeline/DAG visualization. There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
+Priority follow-ups are a typed retry classifier, cross-platform strong-sandbox CI, DNS-rebinding-grade SSRF hardening, an Aider cross-harness comparison (same frozen set and grader), and EventBus-based timeline/DAG visualization. The frozen-20 SWE-bench multi-model run is done (three model tiers × 3 repeats, gold-verified admission, external graders — see the evaluation baseline doc). There is no plan for a full TypeScript rewrite: Python remains the Agent runtime, while TypeScript is a better boundary for an IDE/API client.
 
 ## Design trade-offs
 
