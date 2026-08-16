@@ -33,6 +33,28 @@ def test_unknown_error_bucket():
     assert _classify_llm_failure(ValueError("weird")) == "llm_error"
 
 
+def test_400_context_length_is_invalid_request_and_not_retried():
+    e = RuntimeError("Error code: 400 - {'error': {'message': 'maximum context "
+                     "length is 128000 tokens', 'type': 'invalid_request_error'}}")
+    assert _classify_llm_failure(e) == "invalid_request"
+    assert _is_non_retryable_llm_error(e)
+
+
+def test_invalid_request_fails_fast_without_retries():
+    llm = AsyncMock()
+    llm.chat.side_effect = RuntimeError(
+        "Error code: 400 - {'type': 'invalid_request_error'}")
+    planner = ReActPlanner(max_iterations=3, max_llm_retries=3)
+    result = asyncio.run(planner.execute(
+        task="x", context=Context(), tools=_registry(), llm=llm,
+        sandbox=None, session=Session(), event_bus=EventBus(),
+    ))
+    # 1 call total: the 400 was terminal, no retry attempts billed.
+    assert result.metrics.llm_call_count == 1
+    assert result.metrics.llm_failure == "invalid_request"
+    assert "not retryable" in result.output
+
+
 def _registry():
     class _R:
         def get(self, name):

@@ -323,7 +323,7 @@ async def test_react_auth_error_fails_without_retry(monkeypatch):
 
     assert result.status.value == "failed"
     assert "after 1 attempt" in result.output
-    assert "retries skipped" in result.output
+    assert "not retryable" in result.output
     assert mock_llm.chat.call_count == 1
     assert sleeps == []
 

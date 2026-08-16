@@ -205,7 +205,9 @@ synapse/
 │   └── mcp/       # stdio / Streamable HTTP MCP client
 ├── eval/          # Metrics、Benchmarks、Red Team、A/B experiments、visualize
 ├── adapters/      # CLI、Library API、HTTP Server
-└── config/        # Pydantic schema、YAML、env、models.json
+├── config/        # Pydantic schema、YAML、env、models.json
+└── examples/
+    └── extensions/  # 自定义 Provider / Tool 最小示例（见 docs/开发/扩展指南.md）
 ```
 
 ## 工程边界与未来优化

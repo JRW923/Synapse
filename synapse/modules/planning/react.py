@@ -127,8 +127,8 @@ def _select_tool_schemas(tool_schemas: list[dict], task: str) -> list[dict]:
 
 
 def _is_non_retryable_llm_error(exc: BaseException) -> bool:
-    """Return True for authentication/permission failures that cannot heal by retrying."""
-    return _classify_llm_failure(exc) == "auth"
+    """True for errors that cannot heal by retrying (auth / bad request)."""
+    return _classify_llm_failure(exc) in ("auth", "invalid_request")
 
 
 def _classify_llm_failure(exc: BaseException) -> str:
@@ -136,7 +136,9 @@ def _classify_llm_failure(exc: BaseException) -> str:
 
     "provider_unavailable" (5xx / timeouts / connection resets) is an
     infrastructure fact, not a model capability result — the runner uses this
-    to keep gateway outages out of capability statistics.
+    to keep gateway outages out of capability statistics. The same buckets
+    drive the retry policy: auth and invalid_request fail fast, everything
+    else gets the exponential backoff.
     """
     current: BaseException | None = exc
     seen: set[int] = set()
@@ -153,6 +155,15 @@ def _classify_llm_failure(exc: BaseException) -> str:
         "status_code=401",
         "status_code=403",
     )
+    invalid_request_markers = (
+        "error code: 400",
+        "status_code=400",
+        "invalid request error",
+        "context_length_exceeded",
+        "context length exceeded",
+        "maximum context length",
+        "too large for model",
+    )
     unavailable_markers = (
         "503", "502", "500", "504", "429",
         "provider_unavailable", "service unavailable",
@@ -164,13 +175,18 @@ def _classify_llm_failure(exc: BaseException) -> str:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         response = getattr(current, "response", None)
-        if getattr(response, "status_code", None) in {401, 403}:
+        code = getattr(response, "status_code", None)
+        if code in {401, 403}:
             return "auth"
-        if getattr(response, "status_code", None) in {429, 500, 502, 503, 504}:
+        if code == 400:
+            return "invalid_request"
+        if code in {429, 500, 502, 503, 504}:
             return "provider_unavailable"
         message = str(current).lower()
         if any(marker in message for marker in auth_markers):
             return "auth"
+        if any(marker in message for marker in invalid_request_markers):
+            return "invalid_request"
         if isinstance(current, (TimeoutError, asyncio.TimeoutError, ConnectionError)):
             return "provider_unavailable"
         if any(marker in message for marker in unavailable_markers):
@@ -515,17 +531,18 @@ class ReActPlanner:
                     )
                     break
                 except Exception as e:
-                    non_retryable = _is_non_retryable_llm_error(e)
+                    kind = _classify_llm_failure(e)
+                    non_retryable = kind in ("auth", "invalid_request")
                     if non_retryable or attempt == max_llm_retries:
                         attempts = attempt + 1
                         # Provider outages are infrastructure facts; tag the
                         # metrics so evaluation keeps them out of capability
                         # statistics (infrastructure_failure_attempts).
-                        metrics.llm_failure = _classify_llm_failure(e)
+                        metrics.llm_failure = kind
                         detail = (
                             f"LLM API call failed after {attempts} attempt"
                             f"{'s' if attempts != 1 else ''}"
-                            + (" (authentication/permission error; retries skipped)" if non_retryable else "")
+                            + (f" ({kind}; not retryable)" if non_retryable else "")
                             + f": {e}"
                         )
                         # All retries exhausted — return FAILED
