@@ -95,8 +95,6 @@ from synapse.config import load_config, models_config_path
 from synapse.config.models import apply_model_selection, set_default_model
 from synapse.config.schema import _effective_api_key
 from synapse.protocols.mcp import McpServerConfig
-from synapse.core.agent import Agent
-from synapse.core.events import EventBus
 from synapse.core.exceptions import (
     SynapseError,
     ConfigError,
@@ -105,8 +103,6 @@ from synapse.core.exceptions import (
     SandboxError,
     PlannerError,
 )
-from synapse.core.session import Session
-from synapse.modules.planning.react import summarize_params
 from synapse.protocols.planner import Planner
 from synapse.adapters.cli_render import (  # terminal rendering layer
     _BORDER, _BRAND, _HINT, _ICON, _INFO, _LABEL, _MASCOT_DARK,

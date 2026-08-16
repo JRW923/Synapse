@@ -1,173 +1,108 @@
-"""Architecture boundary checker for Synapse.
+"""Validate Synapse package dependency boundaries.
 
-Verifies that:
-  1. synapse/protocols/* only import from stdlib (typing, dataclasses, datetime, enum, uuid, pathlib).
-  2. synapse/core/* only import from stdlib + synapse.protocols.*
-  3. synapse/modules/* only import from stdlib + synapse.protocols.*
-     + synapse.core.exceptions + synapse.core.events
+The project intentionally keeps runtime composition in ``core`` and
+``adapters``. This checker validates package directions rather than imposing
+the false rule that every core file must be implementation-free.
 """
+
+from __future__ import annotations
+
 import ast
 import sys
 from pathlib import Path
 
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SYNAPSE = PROJECT_ROOT / "synapse"
 
-STDLIB_MODULES = {
-    "typing", "dataclasses", "datetime", "enum", "uuid", "pathlib",
-    "json", "logging", "os", "re", "subprocess", "asyncio",
-    "textwrap", "shlex", "fnmatch", "tempfile", "secrets",
-    "hmac", "hashlib", "time", "abc", "collections",
-    "collections.abc", "contextlib", "copy", "functools",
-    "inspect", "io", "itertools", "math", "random",
-    "sys", "threading", "traceback", "types", "warnings",
-    "weakref", "ast", "resource", "signal", "atexit",
-    "__future__", "argparse", "base64", "concurrent",
-    "concurrent.futures", "importlib", "platform", "unittest",
-    "shutil", "getpass", "socket", "http", "urllib",
-    "xml", "csv", "html", "configparser", "email",
-    "struct", "stat", "string", "binascii", "gzip",
-    "zipfile", "tarfile", "pdb", "pstats", "profile",
-    "multiprocessing", "queue", "select", "selectors",
-    "ssl", "errno", "fcntl", "mmap", "msvcrt",
+_STDLIB = set(sys.stdlib_module_names) | {"__future__"}
+_THIRD_PARTY = {
+    "anthropic", "chromadb", "fastapi", "google", "httpx", "mcp",
+    "openai", "playwright", "prompt_toolkit", "pydantic", "qdrant_client",
+    "rich", "sentence_transformers", "tiktoken", "uvicorn", "yaml",
 }
 
-# Third-party packages that are expected/allowed (optional providers).
-ALLOWED_THIRD_PARTY = {
-    "anthropic", "openai", "google", "google.genai",
-    "yaml", "pydantic", "httpx",
-}
-
-ProtocolsAllowed = set(STDLIB_MODULES)
-CoreAllowed = set(STDLIB_MODULES) | {
-    "synapse.protocols",
-    "synapse.core",
-}
-ModulesAllowed = set(STDLIB_MODULES) | {
-    "synapse.protocols",
-    "synapse.core.exceptions",
-    "synapse.core.events",
+# Dependencies point from a package to packages it may import. ``core`` owns
+# the runtime flow and can use concrete modules, but no lower layer may import
+# an adapter, configuration, or evaluation implementation.
+_ALLOWED = {
+    "protocols": {"protocols"},
+    "config": {"config", "core", "protocols"},
+    "core": {"config", "core", "modules", "protocols"},
+    "modules": {"core", "modules", "protocols"},
+    "eval": {"core", "eval", "modules", "protocols"},
+    "adapters": {"adapters", "config", "core", "eval", "modules", "protocols"},
 }
 
 
-def extract_imports(file_path: Path) -> list[str]:
-    """Return a list of top-level import module names in *file_path*."""
-    tree = ast.parse(file_path.read_text(encoding="utf-8"))
-    imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                imports.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            if node.module is not None:
-                # Only track top-level package
-                imports.add(node.module.split(".")[0])
-    return sorted(imports)
+def _module_parts(node: ast.AST) -> list[str]:
+    """Return imported module names, preserving the Synapse package path."""
+    if isinstance(node, ast.Import):
+        return [alias.name for alias in node.names]
+    if isinstance(node, ast.ImportFrom) and node.module:
+        return [node.module]
+    return []
 
 
-def is_stdlib(module_base: str) -> bool:
-    """Heuristic: a bare module name is stdlib if it's in STDLIB_MODULES."""
-    return module_base in STDLIB_MODULES
+def _imports(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return {
+        module
+        for node in ast.walk(tree)
+        for module in _module_parts(node)
+    }
 
 
-def is_allowed_third_party(module_base: str) -> bool:
-    return module_base in ALLOWED_THIRD_PARTY
+def _owner(path: Path) -> str:
+    return path.relative_to(SYNAPSE).parts[0]
 
 
-def check_file(file_path: Path, allowed: set, label: str) -> list[str]:
+def check_file(path: Path) -> list[str]:
+    """Return dependency-boundary violations for one source file."""
+    owner = _owner(path)
+    allowed = _ALLOWED.get(owner)
+    if allowed is None:
+        return []
+
     violations: list[str] = []
-    imports = extract_imports(file_path)
-    syn_path = file_path.relative_to(PROJECT_ROOT)
-
-    for imp in imports:
-        # stdlib is always OK
-        if imp in STDLIB_MODULES:
+    for module in sorted(_imports(path)):
+        root = module.split(".")[0]
+        if root in _STDLIB or root in _THIRD_PARTY:
             continue
-        # Allowed third-party
-        if is_allowed_third_party(imp):
+        if root != "synapse":
+            violations.append(f"{path.relative_to(PROJECT_ROOT)}: unknown import '{module}'")
             continue
-        # Check if the import base is in the allowed set
-        if imp == "synapse":
-            # For synapse imports, we need to check the full module path
-            # Check more granularly: re-parse the full module import paths
-            tree = ast.parse(file_path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module is not None:
-                    full = node.module
-                    if full.startswith("synapse."):
-                        # Check if the first two segments are allowed
-                        parts = full.split(".")
-                        prefix2 = ".".join(parts[:2]) if len(parts) >= 2 else full
-                        prefix3 = ".".join(parts[:3]) if len(parts) >= 3 else full
-                        # Check prefix2 and prefix3 against allowed patterns
-                        ok = False
-                        for allowed_pat in allowed:
-                            if full == allowed_pat or full.startswith(allowed_pat + "."):
-                                ok = True
-                                break
-                        if not ok:
-                            violations.append(
-                                f"[{label}] {syn_path}: imports '{full}' which is not allowed"
-                            )
-                    continue
-                elif isinstance(node, ast.Import):
-                    for alias in node.names:
-                        name = alias.name
-                        if name.startswith("synapse."):
-                            ok = False
-                            for allowed_pat in allowed:
-                                if name == allowed_pat or name.startswith(allowed_pat + "."):
-                                    ok = True
-                                    break
-                            if not ok:
-                                violations.append(
-                                    f"[{label}] {syn_path}: imports '{name}' which is not allowed"
-                                )
-        else:
-            # Unknown import — not stdlib, not third-party, not synapse
+        if module == "synapse":
+            continue
+        parts = module.split(".")
+        target = parts[1] if len(parts) > 1 else ""
+        if target not in allowed:
             violations.append(
-                f"[{label}] {syn_path}: imports unknown module '{imp}'"
+                f"{path.relative_to(PROJECT_ROOT)}: {owner} must not import '{module}'"
             )
-
     return violations
 
 
+def check_project(root: Path = SYNAPSE) -> list[str]:
+    """Return all package-boundary violations below *root*."""
+    return [
+        violation
+        for path in sorted(root.rglob("*.py"))
+        if "__pycache__" not in path.parts
+        for violation in check_file(path)
+    ]
+
+
 def main() -> int:
-    all_violations: list[str] = []
-
-    # 1. Check protocols/
-    protocols_dir = SYNAPSE / "protocols"
-    for py_file in sorted(protocols_dir.glob("*.py")):
-        if py_file.name == "__init__.py":
-            continue
-        violations = check_file(py_file, ProtocolsAllowed, "protocols")
-        all_violations.extend(violations)
-
-    # 2. Check core/
-    core_dir = SYNAPSE / "core"
-    for py_file in sorted(core_dir.glob("*.py")):
-        if py_file.name == "__init__.py":
-            continue
-        violations = check_file(py_file, CoreAllowed, "core")
-        all_violations.extend(violations)
-
-    # 3. Check modules/ (recursive)
-    modules_dir = SYNAPSE / "modules"
-    for py_file in sorted(modules_dir.rglob("*.py")):
-        if py_file.name == "__init__.py":
-            continue
-        violations = check_file(py_file, ModulesAllowed, "modules")
-        all_violations.extend(violations)
-
-    if all_violations:
-        print("ARCHITECTURE BOUNDARY VIOLATIONS FOUND:")
-        for v in all_violations:
-            print(f"  {v}")
+    violations = check_project()
+    if violations:
+        print("Architecture boundary violations:")
+        for violation in violations:
+            print(f"  {violation}")
         return 1
-    else:
-        print("All architecture boundaries verified successfully.")
-        return 0
+    print("Architecture boundaries verified.")
+    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

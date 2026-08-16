@@ -68,6 +68,7 @@ except ImportError:  # pragma: no cover
 from synapse.modules.memory.session import SessionMemory
 from synapse.modules.memory.project import ProjectMemory
 from synapse.modules.memory.user import UserMemory
+from synapse.adapters.memory_layer import LayeredMemory
 
 # NOTE: SemanticMemory (chromadb) and QdrantMemory are imported lazily inside
 # _create_semantic_memory().  At module scope they cost ~1.3s of cold start on
@@ -96,82 +97,6 @@ from synapse.modules.todo import TodoStore, get_default_todo_store
 
 # MCP config type (lightweight dataclass).
 from synapse.protocols.mcp import McpServerConfig
-
-
-# ---- LayeredMemory ---------------------------------------------------------
-
-
-class LayeredMemory:
-    """Routes memory operations to the correct store based on MemoryLevel.
-
-    Composes SessionMemory, ProjectMemory, UserMemory, and SemanticMemory
-    into a single MemoryStore-compatible interface.  Each layer only handles
-    its own level; queries for unhandled levels return an empty list.
-    """
-
-    def __init__(
-        self,
-        session_memory: SessionMemory,
-        project_memory: ProjectMemory,
-        user_memory: UserMemory,
-        semantic_memory=None,
-    ) -> None:
-        self._session = session_memory
-        self._project = project_memory
-        self._user = user_memory
-        # Either a store instance or a zero-arg factory; resolved on first use
-        # so importing chromadb/qdrant never happens unless SEMANTIC is touched.
-        self._semantic = semantic_memory
-
-    def _get_semantic(self):
-        if callable(self._semantic):
-            try:
-                self._semantic = self._semantic()
-            except Exception:
-                # Optional backend (chromadb/qdrant) missing or broken — degrade
-                # to no semantic memory rather than fail the whole run.
-                self._semantic = None
-        return self._semantic
-
-    async def store(self, entry: MemoryEntry) -> None:
-        if entry.level == MemoryLevel.SESSION:
-            await self._session.store(entry)
-        elif entry.level == MemoryLevel.PROJECT:
-            await self._project.store(entry)
-        elif entry.level == MemoryLevel.USER:
-            await self._user.store(entry)
-        elif entry.level == MemoryLevel.SEMANTIC:
-            semantic = self._get_semantic()
-            if semantic is not None:
-                await semantic.store(entry)
-
-    async def retrieve(
-        self, query: str, level: MemoryLevel, top_k: int = 5
-    ) -> list[MemoryEntry]:
-        if level == MemoryLevel.SESSION:
-            return await self._session.retrieve(query, level, top_k)
-        if level == MemoryLevel.PROJECT:
-            return await self._project.retrieve(query, level, top_k)
-        if level == MemoryLevel.USER:
-            return await self._user.retrieve(query, level, top_k)
-        if level == MemoryLevel.SEMANTIC:
-            semantic = self._get_semantic()
-            if semantic is not None:
-                return await semantic.retrieve(query, level, top_k)
-        return []
-
-    async def forget(self, entry_id: str) -> None:
-        await self._session.forget(entry_id)
-        await self._project.forget(entry_id)
-        await self._user.forget(entry_id)
-        # Don't spin up the vector backend just to forget from it — only if
-        # it was already materialized by a prior SEMANTIC store/retrieve.
-        if self._semantic is not None and not callable(self._semantic):
-            await self._semantic.forget(entry_id)
-
-    def clear_session(self) -> None:
-        """Drop all in-memory SESSION entries (used by /reset)."""
-        self._session.clear()
 
 
 # ---- Provider registry -----------------------------------------------------
@@ -438,6 +363,10 @@ class Synapse:
                 await self._background_manager.aclose()
             if self._mcp_manager is not None:
                 await self._mcp_manager.shutdown()
+            memory = self._container.resolve(MemoryStore)
+            close = getattr(memory, "close", None)
+            if close is not None:
+                close()
         finally:
             if self._eval_memory_dir is not None:
                 self._eval_memory_dir.cleanup()

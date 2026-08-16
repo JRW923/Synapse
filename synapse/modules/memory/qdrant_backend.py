@@ -309,8 +309,11 @@ class QdrantMemory:
 
     def close(self) -> None:
         """Release resources and clean up temporary storage."""
+        client = getattr(self, "_client", None)
+        self._client = None
         try:
-            self._client.close()
+            if client is not None:
+                client.close()
         except Exception:
             pass
         if self._temp_dir is not None:
