@@ -126,6 +126,22 @@
   #pair .row { display: flex; justify-content: flex-end; }
   #pair button { border-radius: 6px; padding: 6px 16px; cursor: pointer;
     border: 1px solid var(--border); background: none; color: var(--text); }
+  /* settings modal: browser-supplied API key (local single-user) */
+  #settings { position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: none; align-items: center; justify-content: center; z-index: 20; }
+  #settings.show { display: flex; }
+  #settings .box { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px 20px; width: 380px; max-width: 92vw; }
+  #settings h3 { margin: 0 0 4px; font-size: 15px; }
+  #settings .hint { color: var(--dim); font-size: 12px; margin-bottom: 12px; }
+  #settings label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  #settings input { width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit; }
+  #settings .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  #settings button { border-radius: 6px; padding: 6px 16px; cursor: pointer;
+    font-weight: 600; border: 1px solid var(--border); background: none; color: var(--text); }
+  #settings button.save { background: var(--brand); color: #0d1117; border: none; }
+  #settings .err { color: var(--err); font-size: 12px; min-height: 16px; margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -134,6 +150,7 @@
   <span class="session" id="session"></span>
   <span class="session connector" id="connector"></span>
   <button onclick="pairLocalWorkspace()">连接本机</button>
+  <button onclick="openSettings()">设置</button>
   <button onclick="newSession()">新会话</button>
 </header>
 <div id="chat"><div id="live">
@@ -168,6 +185,23 @@
     onkeydown="return keydown(event)" oninput="grow(this)"></textarea>
   <button id="sendbtn">发送</button>
 </form>
+<div id="settings">
+  <div class="box">
+    <h3>设置你的 API Key</h3>
+    <div class="hint">Key 仅保存在本机进程内存，不写入任何服务器文件。每次启动需重新填写（本地优先用法）。</div>
+    <label>Provider</label>
+    <input id="cfg-provider" value="openai" autocomplete="off">
+    <label>Model</label>
+    <input id="cfg-model" value="gpt-4o-mini" autocomplete="off">
+    <label>API Key</label>
+    <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="off">
+    <div class="err" id="cfg-err"></div>
+    <div class="row">
+      <button onclick="closeSettings()">取消</button>
+      <button class="save" onclick="saveConfig()">保存</button>
+    </div>
+  </div>
+</div>
 <script>
 let sessionId = null, busy = false, spinner = null, elapsed = null, timer = null;
 let pendingConfirm = null;
@@ -379,6 +413,41 @@ async function pollPairing(pairing) {
   }
 }
 
+// Browser-supplied API key: if the server has no key configured, prompt for it.
+async function checkConfig() {
+  try {
+    const r = await fetch("/config");
+    const d = await r.json();
+    if (!d.configured) openSettings();
+  } catch (e) { /* server error surfaces on first send instead */ }
+}
+function openSettings() {
+  $("settings").classList.add("show");
+  $("cfg-err").textContent = "";
+  $("cfg-key").focus();
+}
+function closeSettings() {
+  $("settings").classList.remove("show");
+}
+async function saveConfig() {
+  const provider = $("cfg-provider").value.trim();
+  const model = $("cfg-model").value.trim();
+  const api_key = $("cfg-key").value.trim();
+  if (!api_key) { $("cfg-err").textContent = "API Key 不能为空"; return; }
+  try {
+    const res = await fetch("/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, model, api_key }),
+    });
+    if (!res.ok) { $("cfg-err").textContent = "保存失败"; return; }
+    closeSettings();
+  } catch (e) {
+    $("cfg-err").textContent = "保存失败：" + e.message;
+  }
+}
+checkConfig();
+
 async function answer(approve) {
   if (pendingConfirm === null) return;
   const id = pendingConfirm; pendingConfirm = null;
@@ -464,7 +533,14 @@ async function send(e) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      let msg = "模型未配置，请先点击「设置」填入你的 API Key。";
+      try { msg = (await res.json()).detail || msg; } catch (e) {}
+      stopLive();
+      busy = false; $("sendbtn").disabled = false;
+      addMsg("agent", msg);
+      return false;
+    }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";

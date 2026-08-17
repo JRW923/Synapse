@@ -146,6 +146,19 @@ class ConnectorCompleteRequest(BaseModel):
     result: dict[str, Any]
 
 
+class KeyConfig(BaseModel):
+    """Browser-supplied API credentials for a local single-user instance.
+
+    Stored in process memory only (``app.state.runtime_key``); never written to
+    the server's ``models.json``. Lets ``synapse serve`` start with no config and
+    have the user paste their own key in the web UI.
+    """
+
+    provider: str = "openai"
+    model: str = "gpt-4o-mini"
+    api_key: str
+
+
 class ConfirmDecision(BaseModel):
     approve: bool
 
@@ -338,6 +351,12 @@ def create_app(
     # server; upgrade path is LRU eviction + aclose() once multi-tenant.
     synapse_instances: dict[str, Synapse] = {}
 
+    # Browser-set API key (local single-user). In-memory only; set via POST
+    # /config from the web UI. When set, every session is built with it so the
+    # user runs on their own key. None means fall back to the server's
+    # models.json (or a friendly 400 if that's also absent).
+    app.state.runtime_key = None
+
     # request_id -> [asyncio.Event, approved|None] for in-flight confirmations.
     # The Event lives on the run's event loop; /confirm may arrive on another
     # thread's loop, so the wakeup must go through call_soon_threadsafe.
@@ -348,9 +367,26 @@ def create_app(
         """Per-session facade; an injected instance (tests) is always reused."""
         if synapse_instance is not None:
             return synapse_instance
+        rc = app.state.runtime_key
+        if rc is not None:
+            inst = synapse_instances.get(session_id)
+            if inst is None:
+                inst = Synapse(
+                    provider=rc["provider"], model=rc["model"], api_key=rc["api_key"],
+                )
+                synapse_instances[session_id] = inst
+            return inst
+        # Fallback to the server's models.json; fail friendly if absent so the
+        # web UI's "set your own key" gate is the only path needed.
         inst = synapse_instances.get(session_id)
         if inst is None:
-            inst = Synapse()
+            try:
+                inst = Synapse()
+            except Exception as exc:  # ConfigError / missing models.json
+                raise HTTPException(
+                    status_code=400,
+                    detail="尚未配置模型：请先点击右上角「设置」填入你自己的 API Key。",
+                )
             synapse_instances[session_id] = inst
         return inst
 
@@ -424,6 +460,24 @@ def create_app(
     @app.get("/", include_in_schema=False)
     async def webui():
         return HTMLResponse(_WEBUI_HTML)
+
+    # ---- GET /config / POST /config — browser-supplied credentials ---------
+
+    @app.get("/config", include_in_schema=False)
+    async def get_config():
+        rc = app.state.runtime_key
+        return {"configured": rc is not None, "provider": rc["provider"] if rc else None}
+
+    @app.post("/config", include_in_schema=False)
+    async def set_config(cfg: KeyConfig):
+        if not cfg.api_key.strip():
+            raise HTTPException(status_code=422, detail="api_key 不能为空")
+        app.state.runtime_key = {
+            "provider": cfg.provider.strip(),
+            "model": cfg.model.strip(),
+            "api_key": cfg.api_key.strip(),
+        }
+        return {"ok": True, "provider": cfg.provider}
 
     # ---- POST /confirm/{request_id} — answer an interactive approval ------
 

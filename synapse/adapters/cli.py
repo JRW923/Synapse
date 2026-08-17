@@ -795,27 +795,18 @@ def main():
     if args.command == "serve":
         import uvicorn
 
-        from synapse.adapters.library import Synapse
         from synapse.adapters.server import create_app
 
         if args.connector_only:
             uvicorn.run(create_app(connector_only=True), host=args.host, port=args.port)
             return
 
-        try:
-            config, _ = load_config()
-        except Exception as exc:
-            print(_friendly_error(exc))
-            return
-        if not _ensure_first_model(config):
-            return
-        config, _ = load_config()
-
-        synapse = Synapse(
-            memory_backend=args.memory_backend,
-            enable_external_tools=args.enable_external_tools,
-        )
-        server_app = create_app(synapse_instance=synapse)
+        # 不强制要求 models.json：无配置时 Web UI 会在浏览器内提示填入用户自己的
+        # API Key（POST /config），key 仅存于进程内存、不写服务器磁盘。若
+        # ~/.synapse/models.json 已存在仍作为默认（无需在页面填）。
+        # ponytail: 绑定 127.0.0.1 即本机，配合浏览器填 key 是本地优先用法；
+        # 不要把它对公网开放（官方文档已声明不可匿名公开）。
+        server_app = create_app()
         uvicorn.run(server_app, host=args.host, port=args.port)
         return
 
