@@ -195,6 +195,13 @@ def _classify_llm_failure(exc: BaseException) -> str:
     return "llm_error"
 
 
+def _error_summary(exc: BaseException) -> str:
+    """str(exc) can be empty (asyncio.TimeoutError, bare OSError) — the
+    exception type name is the floor so retry logs never show a blank cause."""
+    msg = str(exc).strip()
+    return msg if msg else type(exc).__name__
+
+
 class ReActPlanner:
     """Classic ReAct loop: the LLM thinks, calls tools, observes results, repeats.
 
@@ -543,7 +550,7 @@ class ReActPlanner:
                             f"LLM API call failed after {attempts} attempt"
                             f"{'s' if attempts != 1 else ''}"
                             + (f" ({kind}; not retryable)" if non_retryable else "")
-                            + f": {e}"
+                            + f": {_error_summary(e)}"
                         )
                         # All retries exhausted — return FAILED
                         self._log(f"ERROR: {detail}")
@@ -554,7 +561,7 @@ class ReActPlanner:
                             metrics=metrics,
                         )
                     await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
-                    self._log(f"LLM call attempt {attempt + 1} failed: {e}, retrying...")
+                    self._log(f"LLM call attempt {attempt + 1} failed: {_error_summary(e)} [{_classify_llm_failure(e)}], retrying...")
                 finally:
                     metrics.llm_call_count += 1
                     metrics.llm_time_ms += int((time.monotonic() - t_llm) * 1000)

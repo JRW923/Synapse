@@ -111,3 +111,10 @@ def test_runner_counts_provider_outage_as_infra_failure():
     # and the field survives report serialization
     d = TaskResult(task_id="a", status="failed", failure_kind="provider_unavailable")
     assert d.failure_kind == "provider_unavailable"
+
+
+def test_error_summary_falls_back_to_type_name():
+    # asyncio.TimeoutError has an empty str() — the log floor is the type name.
+    from synapse.modules.planning.react import _error_summary
+    assert _error_summary(asyncio.TimeoutError()) == "TimeoutError"
+    assert _error_summary(RuntimeError("boom")) == "boom"
