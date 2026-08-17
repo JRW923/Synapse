@@ -67,3 +67,28 @@ def test_confirmed_command_in_chain_gates_whole_chain():
 def test_empty_chain_segment_denied():
     d = _auth("ls && && pytest")
     assert not d.allowed
+
+
+def test_powershell_pipeline_allowlisted():
+    # Sub-expression head `(` must not shadow the cmdlet; parens still gate
+    # via command-substitution confirmation (fail-closed, not denied).
+    d = _auth("(Get-ChildItem packages -Recurse -Filter package.json | Measure-Object).Count")
+    assert d.allowed
+    assert d.requires_confirmation
+    assert "not in allowlist" not in d.reason
+
+
+def test_powershell_cmdlet_case_insensitive():
+    d = _auth("Get-Content -LiteralPath 'README.md' | Select-Object -First 3")
+    assert d.allowed
+    assert "not in allowlist" not in d.reason
+
+
+def test_powershell_unknown_cmdlet_denied():
+    d = _auth("Invoke-Expression 'evil'")
+    assert not d.allowed
+
+
+def test_posix_lowercase_still_matches():
+    d = _auth("ls && git status")
+    assert d.allowed

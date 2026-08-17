@@ -14,6 +14,7 @@ they were not. ``method`` now reports what is actually used.)
 """
 
 import asyncio
+import base64
 import os
 import signal
 import shutil
@@ -27,6 +28,39 @@ _SAFE_ENV_KEYS = {
     "HOME", "LANG", "LC_ALL", "PATH", "PATHEXT", "PYTHONIOENCODING",
     "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "WINDIR",
 }
+
+#: PowerShell cmdlet heads (lowercase) — commands starting with one of these
+#: only run under powershell, never under cmd.exe, so route them explicitly.
+_POWERSHELL_CMDLETS = frozenset({
+    "get-content", "get-childitem", "get-item", "get-process", "get-location",
+    "measure-object", "select-string", "select-object", "test-path",
+    "where-object", "sort-object", "group-object", "compare-object",
+    "format-table", "format-list", "out-string", "new-item", "remove-item",
+    "copy-item", "move-item", "set-content",
+})
+
+
+def _is_powershell_command(command: str) -> bool:
+    """True when the first word marks PowerShell-only syntax (a cmdlet).
+
+    Auth allowlists these heads case-insensitively; execution must then land
+    in powershell or cmd.exe would just report "not recognized".
+    """
+    head = command.strip().split(None, 1)[0].lower() if command.strip() else ""
+    return head in _POWERSHELL_CMDLETS
+
+
+def route_windows_shell(command: str) -> str:
+    """Wrap PowerShell-cmdlet commands for cmd.exe-based subprocess shells.
+
+    Uses -EncodedCommand (Base64 UTF-16LE, the PowerShell-standard channel):
+    cmd.exe must not see the raw pipeline/parens, or it splits them itself
+    (`powershell -Command a | b` pipes in cmd, not in PowerShell).
+    """
+    if os.name == "nt" and _is_powershell_command(command):
+        encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+        return f"powershell -NoProfile -EncodedCommand {encoded}"
+    return command
 
 try:
     import ctypes  # Windows Job Object API
@@ -118,7 +152,7 @@ class ProcessSandbox:
                     self._assign_job(proc.pid)
             elif os.name == "nt":
                 proc = await asyncio.create_subprocess_shell(
-                    command,
+                    route_windows_shell(command),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=str(workdir),

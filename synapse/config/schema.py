@@ -95,6 +95,13 @@ class ToolsConfig(BaseModel):
     allowlist_commands: list[str] = Field(default_factory=lambda: [
         "ls", "git", "pytest", "python", "pip", "npm", "cargo", "go", "node",
         "curl", "wget", "mkdir", "find", "cat", "echo", "type", "dir",
+        # PowerShell cmdlets so Windows-first agents aren't denied by default
+        # (matching is case-insensitive in ActionAuthorizer).
+        "get-content", "get-childitem", "get-item", "get-process",
+        "get-location", "measure-object", "select-string", "select-object",
+        "test-path", "where-object", "sort-object", "group-object",
+        "compare-object", "format-table", "format-list", "out-string",
+        "new-item", "remove-item", "copy-item", "move-item", "set-content",
     ])
     workspace_root: str = "."
 

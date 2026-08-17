@@ -58,3 +58,24 @@ async def test_sandbox_does_not_forward_untrusted_environment(monkeypatch):
     assert result.exit_code == 0
     assert "must-not-leak" not in result.stdout
     assert "missing" in result.stdout
+
+
+def test_powershell_routing_detection():
+    from synapse.modules.security.sandbox import (
+        _is_powershell_command, route_windows_shell,
+    )
+    assert _is_powershell_command("Get-Content -LiteralPath x")
+    assert _is_powershell_command("get-childitem")
+    assert not _is_powershell_command("git status")
+    assert not _is_powershell_command("")
+    assert route_windows_shell("git status") == "git status"
+    if sys.platform == "win32":
+        assert route_windows_shell("Get-Content x").startswith("powershell")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell routing is Windows-only")
+async def test_sandbox_powershell_cmdlet_runs():
+    sandbox = ProcessSandbox()
+    result = await sandbox.execute("Get-Content -LiteralPath README.md | Measure-Object -Line")
+    assert result.exit_code == 0

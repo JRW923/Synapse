@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 from synapse.modules.tools.workspace import WorkspacePathError, resolve_workspace_path
+from synapse.modules.security.sandbox import route_windows_shell
 from synapse.protocols.tool import Tool, ToolSchema, ToolResult, ToolCallMetadata, RiskLevel, ToolCategory
 from synapse.modules.tools.background import BackgroundTaskManager
 
@@ -97,7 +98,7 @@ class ShellTool:
 
             # Fallback: no sandbox (warning mode)
             proc = await asyncio.create_subprocess_shell(
-                command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                route_windows_shell(command), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
             )
             try:

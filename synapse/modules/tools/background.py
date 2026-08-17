@@ -15,6 +15,7 @@ from typing import Any
 
 from synapse.protocols.tool import ToolResult
 from synapse.protocols.events import BackgroundResult
+from synapse.modules.security.sandbox import route_windows_shell
 
 
 @dataclass
@@ -63,7 +64,7 @@ class BackgroundTaskManager:
                     stdout, stderr = r.stdout, r.stderr
                 else:
                     proc = await asyncio.create_subprocess_shell(
-                        command,
+                        route_windows_shell(command),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                         cwd=cwd,

@@ -54,6 +54,13 @@ class ActionAuthorizer:
         "git", "pip", "npm", "node", "cargo",
         "go", "pytest", "mypy", "ruff", "black",
         "mkdir", "find", "type", "dir", "del", "rm",
+        # PowerShell cmdlets (Windows-first setups) — read-only set plus the
+        # rm/del/new-item equivalents already allowlisted above.
+        "get-content", "get-childitem", "get-item", "get-process",
+        "get-location", "measure-object", "select-string", "select-object",
+        "test-path", "where-object", "sort-object", "group-object",
+        "compare-object", "format-table", "format-list", "out-string",
+        "new-item", "remove-item", "copy-item", "move-item", "set-content",
     ]
 
     # Commands that can chain arbitrary code execution or network access.
@@ -81,7 +88,7 @@ class ActionAuthorizer:
         self._approved_signatures: set[str] = set()
         self._allowed_paths = [self._resolve_scope_boundary(p) for p in (allowed_paths or [])]
         self._allowlisted_commands = (
-            set(allowlisted_commands)
+            {c.lower() for c in allowlisted_commands}
             if allowlisted_commands is not None
             else set(self.ALWAYS_ALLOWED_COMMANDS) | set(self.CONFIRM_REQUIRED_COMMANDS)
         )
@@ -337,6 +344,12 @@ class ActionAuthorizer:
         for tok in tokens:
             if tok in _CONTROL_OPERATORS:
                 segments.append([])
+            elif not segments[-1] and tok == "(":
+                # Leading `(` of a sub-expression (PowerShell `(cmd | cmd).Count`)
+                # — the segment head is the cmdlet after it. `$(`/backtick still
+                # trip _has_command_substitution → confirmation, so this only
+                # widens the allowlist lookup, never the confirmation gate.
+                continue
             else:
                 segments[-1].append(tok)
         if any(not seg for seg in segments):
@@ -439,8 +452,10 @@ class ActionAuthorizer:
         # CONFIRM_REQUIRED commands (python/curl/wget) are allowed but gated by
         # the confirmation branch; without them here `python x.py` would be
         # denied as "not in allowlist" before confirmation was ever offered.
+        # Case-insensitive: PowerShell cmdlets are unconventionally cased
+        # (Get-Content vs get-content) while POSIX commands stay lowercase.
         allowed = self._allowlisted_commands
-        return all(seg[0] in allowed for seg in segments)
+        return all(seg[0].lower() in allowed for seg in segments)
 
     def _requires_confirmation(self, command: str) -> bool:
         if self._has_command_substitution(command):
@@ -449,5 +464,5 @@ class ActionAuthorizer:
         if not segments:
             return True  # unparseable → never silent
         return any(
-            seg[0] in self.CONFIRM_REQUIRED_COMMANDS for seg in segments
+            seg[0].lower() in self.CONFIRM_REQUIRED_COMMANDS for seg in segments
         )
