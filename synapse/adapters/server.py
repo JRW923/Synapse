@@ -23,11 +23,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
-from pydantic import BaseModel, Field as PydanticField
+from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
 from synapse.adapters.library import Synapse
+from synapse.adapters.connector import (
+    ConnectorAuthenticationError,
+    ConnectorBroker,
+    ConnectorBusyError,
+    ConnectorError,
+    ConnectorJob,
+    ConnectorJobError,
+    ConnectorOfflineError,
+    ConnectorPairingError,
+)
 from synapse.core.events import EventBus
 from synapse.core.session import DEFAULT_SESSION_DIR, Session
 from synapse.protocols.planner import AgentResult, ExecutionMetrics
@@ -76,9 +86,25 @@ def _validate_remote_experiment_config(value: Any, *, _path: str = "config") -> 
             _validate_remote_experiment_config(nested, _path=f"{_path}[{index}]")
 
 
-# L.3: opt-in auto-approve for headless confirmation-required calls.
-async def _auto_approve(_request) -> bool:
-    return True
+def _bearer_token(authorization: str | None) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing connector credential")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing connector credential")
+    return token
+
+
+def _raise_connector_error(exc: ConnectorError) -> None:
+    if isinstance(exc, ConnectorAuthenticationError):
+        raise HTTPException(status_code=403, detail="Connector authentication failed") from exc
+    if isinstance(exc, ConnectorPairingError):
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if isinstance(exc, (ConnectorOfflineError, ConnectorBusyError)):
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, ConnectorJobError):
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 #: How long a streamed run waits for the user to answer a /confirm prompt
@@ -92,9 +118,32 @@ _CONFIRM_TIMEOUT_S = 300.0
 
 
 class RunRequest(BaseModel):
+    # HTTP callers are untrusted.  In particular, they must not smuggle a
+    # workspace path or an approval bypass into the server process.
+    model_config = ConfigDict(extra="forbid")
+
     task: str
-    auto_approve: bool = False  # L.3: approve confirmation-required calls headlessly
     session_id: str | None = None  # continue a prior conversation (in-memory or saved on disk)
+    # A local-workspace task is selected by opaque connector credentials.  A
+    # browser never submits a path, model key, or local execution setting.
+    connector_id: str | None = None
+    connector_token: str | None = None
+
+
+class ConnectorRegisterRequest(BaseModel):
+    workspace_name: str
+    pair_code: str | None = None
+    connector_id: str | None = None
+
+
+class ConnectorEventsRequest(BaseModel):
+    job_id: str
+    events: list[dict[str, Any]]
+
+
+class ConnectorCompleteRequest(BaseModel):
+    job_id: str
+    result: dict[str, Any]
 
 
 class ConfirmDecision(BaseModel):
@@ -256,7 +305,11 @@ async def _effective_experiment_config(config: dict[str, Any]) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
-def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
+def create_app(
+    synapse_instance: Synapse | None = None,
+    *,
+    connector_only: bool = False,
+) -> FastAPI:
     """Build and return a configured FastAPI application.
 
     Parameters
@@ -265,6 +318,9 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
         An optional pre-configured :class:`Synapse` instance.  When not
         provided a default ``Synapse(provider="anthropic")`` is used.
         Tests should inject a mock.
+    connector_only:
+        Reject server-side Agent execution and only relay local Connector
+        jobs.  This is the intended mode for a hosted local-workspace UI.
     """
     app = FastAPI(title="Synapse API", version="0.1.0")
 
@@ -272,6 +328,8 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
     sessions: dict[str, Session] = {}
     experiments: dict[str, ExperimentRecord] = {}
     experiment_lock = asyncio.Lock()
+    connector_broker = ConnectorBroker()
+    app.state.connector_broker = connector_broker
 
     # One Synapse per session: each instance serializes runs through its own
     # _run_lock, so different sessions execute concurrently and each SSE
@@ -333,6 +391,32 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
             return Session.load(path)
         raise HTTPException(status_code=404, detail="Session not found")
 
+    async def _connector_job_for(req: RunRequest) -> ConnectorJob | None:
+        if req.connector_id is None and req.connector_token is None:
+            return None
+        if not req.connector_id or not req.connector_token:
+            raise HTTPException(
+                status_code=422,
+                detail="connector_id and connector_token must be provided together",
+            )
+        session_id = req.session_id or str(uuid.uuid4())
+        try:
+            uuid.UUID(session_id)
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise HTTPException(status_code=422, detail="Invalid connector session id") from exc
+        try:
+            # The Connector owns the local ActionAuthorizer and prompts its
+            # user; the browser cannot send local execution policy.
+            return await connector_broker.start_job(
+                connector_id=req.connector_id,
+                browser_token=req.connector_token,
+                task=req.task,
+                session_id=session_id,
+            )
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+        return None
+
     # ---- GET / — built-in web UI -----------------------------------------
 
     _WEBUI_HTML = (Path(__file__).with_name("webui.html")).read_text(encoding="utf-8")
@@ -375,17 +459,127 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
     async def health():
         return {"status": "ok"}
 
+    # ---- Local-workspace Connector ---------------------------------------
+
+    @app.post("/connectors/pair")
+    async def create_connector_pairing():
+        return connector_broker.create_pairing()
+
+    @app.get("/connectors/pair/{pair_id}")
+    async def connector_pairing_status(
+        pair_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        try:
+            return connector_broker.pairing_status(pair_id, _bearer_token(authorization))
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+
+    @app.post("/connectors/register")
+    async def register_connector(
+        req: ConnectorRegisterRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        token = None
+        if authorization:
+            token = _bearer_token(authorization)
+        try:
+            return connector_broker.register(
+                workspace_name=req.workspace_name,
+                pair_code=req.pair_code,
+                connector_id=req.connector_id,
+                device_token=token,
+            )
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+
+    @app.post("/connectors/{connector_id}/commands")
+    async def connector_commands(
+        connector_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        try:
+            command = await connector_broker.poll(
+                connector_id, _bearer_token(authorization),
+            )
+            return {"command": command}
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+
+    @app.post("/connectors/{connector_id}/events")
+    async def connector_events(
+        connector_id: str,
+        req: ConnectorEventsRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        try:
+            await connector_broker.publish_events(
+                connector_id=connector_id,
+                device_token=_bearer_token(authorization),
+                job_id=req.job_id,
+                events=req.events,
+            )
+            return {"ok": True}
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+
+    @app.post("/connectors/{connector_id}/complete")
+    async def connector_complete(
+        connector_id: str,
+        req: ConnectorCompleteRequest,
+        authorization: str | None = Header(default=None),
+    ):
+        try:
+            await connector_broker.complete_job(
+                connector_id=connector_id,
+                device_token=_bearer_token(authorization),
+                job_id=req.job_id,
+                result=req.result,
+            )
+            return {"ok": True}
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+
+    @app.post("/connectors/{connector_id}/disconnect")
+    async def connector_disconnect(
+        connector_id: str,
+        authorization: str | None = Header(default=None),
+    ):
+        try:
+            await connector_broker.disconnect(
+                connector_id, _bearer_token(authorization),
+            )
+            return {"ok": True}
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+
     # ---- POST /run -------------------------------------------------------
 
     @app.post("/run", response_model=RunResponse)
     async def run_task(req: RunRequest):
+        connector_job = await _connector_job_for(req)
+        if connector_job is not None:
+            payload = await connector_broker.wait_for_completion(connector_job)
+            try:
+                return RunResponse(**payload)
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Local connector returned an invalid result",
+                ) from exc
+
+        if connector_only:
+            raise HTTPException(
+                status_code=403,
+                detail="This server only accepts local Connector jobs",
+            )
+
         session = _resolve_session(req.session_id)
         synapse = _synapse_for(session.id)
-        # Non-streamed runs have no channel to ask the user: auto_approve
-        # answers yes headlessly, otherwise the engine's default (deny) applies.
+        # Non-streamed runs have no confirmation channel, so risky calls deny
+        # by default instead of accepting a request-controlled bypass.
         result: AgentResult = await synapse.run(
             req.task, session=session,
-            confirm_callback=_auto_approve if req.auto_approve else None,
         )
 
         # Store the session so it can be queried later.  Pass the directory
@@ -436,6 +630,32 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
     @app.post("/run/stream")
     async def run_task_stream(req: RunRequest):
+        connector_job = await _connector_job_for(req)
+        if connector_job is not None:
+            async def _connector_event_stream():
+                try:
+                    while True:
+                        item = await connector_broker.next_event(connector_job)
+                        yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                        if item["type"] in ("done", "error"):
+                            break
+                finally:
+                    # The browser is the only consumer of this job.  Tell the
+                    # local process to stop rather than leave it spending model
+                    # budget after an abandoned tab.
+                    if not connector_job.completion.done():
+                        await connector_broker.cancel_job(connector_job)
+
+            return StreamingResponse(
+                _connector_event_stream(), media_type="text/event-stream",
+            )
+
+        if connector_only:
+            raise HTTPException(
+                status_code=403,
+                detail="This server only accepts local Connector jobs",
+            )
+
         session = _resolve_session(req.session_id)
         synapse = _synapse_for(session.id)
         event_bus = synapse._container.resolve(EventBus)
@@ -461,10 +681,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
             try:
                 res = await synapse.run(
                     req.task, session=session,
-                    confirm_callback=(
-                        _auto_approve if req.auto_approve
-                        else _make_confirm_bridge(queue.put)
-                    ),
+                    confirm_callback=_make_confirm_bridge(queue.put),
                 )
                 sessions[session.id] = session
                 with _swallow("run/stream: session save"):
@@ -546,6 +763,11 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
     @app.post("/eval/experiment", response_model=dict)
     async def start_experiment(req: ExperimentRequest):
+        if connector_only:
+            raise HTTPException(
+                status_code=403,
+                detail="This server only accepts local Connector jobs",
+            )
         from synapse.eval.runner import _fingerprint
 
         try:

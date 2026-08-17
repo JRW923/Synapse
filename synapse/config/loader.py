@@ -68,7 +68,7 @@ def load_config(
                 path = Path.home() / ".synapse" / "config.yaml"
 
     if path.exists():
-        raw = yaml.safe_load(path.read_text())
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         if raw:
             config = SynapseConfig.model_validate(raw)
             source = str(path)

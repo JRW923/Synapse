@@ -473,6 +473,38 @@ def main():
         default=False,
         help="Enable external tools (HTTP, DB, Browser) — disabled by default",
     )
+    serve_parser.add_argument(
+        "--connector-only",
+        action="store_true",
+        help="只提供本地 Connector 中继，不在服务器执行 Agent 或配置模型",
+    )
+
+    connect_parser = sub.add_parser(
+        "connect", help="连接网页，在本机工作区执行任务",
+    )
+    connect_parser.add_argument(
+        "--server",
+        required=True,
+        metavar="URL",
+        help="网页服务地址，例如 https://agent.example.com",
+    )
+    connect_parser.add_argument(
+        "--workspace",
+        required=True,
+        metavar="PATH",
+        help="只允许网页任务操作的本机目录",
+    )
+    connect_parser.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="网页显示的本地工作区名称（默认使用目录名）",
+    )
+    connect_parser.add_argument(
+        "--pair",
+        action="store_true",
+        help="输入网页配对码（首次连接或重新绑定）",
+    )
 
     chat_parser = sub.add_parser("chat", help="Start an interactive chat session")
     chat_parser.add_argument(
@@ -766,6 +798,10 @@ def main():
         from synapse.adapters.library import Synapse
         from synapse.adapters.server import create_app
 
+        if args.connector_only:
+            uvicorn.run(create_app(connector_only=True), host=args.host, port=args.port)
+            return
+
         try:
             config, _ = load_config()
         except Exception as exc:
@@ -781,6 +817,23 @@ def main():
         )
         server_app = create_app(synapse_instance=synapse)
         uvicorn.run(server_app, host=args.host, port=args.port)
+        return
+
+    if args.command == "connect":
+        from synapse.adapters.connector import ConnectorError, run_connector
+
+        try:
+            asyncio.run(run_connector(
+                server=args.server,
+                workspace=args.workspace,
+                name=args.name,
+                config_path=args.config,
+                pair=args.pair,
+            ))
+        except KeyboardInterrupt:
+            print("已停止本地 Connector。")
+        except ConnectorError as exc:
+            print(f"Connector 启动失败：{exc}")
         return
 
     if args.command == "eval":

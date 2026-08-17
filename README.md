@@ -103,6 +103,35 @@ synapse --resume
 synapse serve --host 127.0.0.1 --port 8000
 ```
 
+### 网页操作本机工作区
+
+Web UI 可以把任务交给用户电脑上的 Connector 执行：模型配置、文件、Shell、
+授权确认和工作区都留在本机，服务器只中继任务、进度和最终结果。
+
+```bash
+# 公网服务器：只提供网页与 Connector 中继，不需要服务器模型密钥
+pip install -e ".[server]"
+synapse serve --connector-only --host 127.0.0.1 --port 8000
+
+# 用户电脑：安装所选模型 Provider，并先运行一次 synapse 完成本机模型配置
+pip install -e ".[deepseek]"
+synapse
+```
+
+在网页点击“连接本机”后，在用户电脑执行下列命令并输入网页显示的一次性配对码：
+
+```bash
+synapse connect --server https://agent.example.com --workspace ~/src/my-project --pair
+```
+
+重新打开网页或更换浏览器时，使用相同的完整命令重新绑定。Connector 只接受启动时传入的
+本机目录，不接受网页传来的路径、模型密钥、MCP、插件、hooks 或安全配置；它会固定关闭
+MCP、插件、hooks 和高权限外部工具，并锁定工作区边界。危险操作仍在用户终端确认，超时或
+无终端时默认拒绝。
+
+配对凭据是单浏览器能力凭据，不是多用户身份系统。公网部署仍必须在反向代理处提供真实
+登录认证和 HTTPS；当前 Connector broker 为单进程内存态，不支持多 worker 或跨进程持久化。
+
 REPL 常用命令：`/help`、`/model`、`/model add`、`/mode`、`/resume`、`/score`、`/checkpoint`、`/rewind`。会话自动持久化到 `~/.synapse/sessions/`。
 
 ## 评测与可视化

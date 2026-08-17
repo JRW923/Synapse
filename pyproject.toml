@@ -67,6 +67,9 @@ synapse = "synapse.adapters.cli:main"
 [tool.setuptools.packages.find]
 include = ["synapse*"]
 
+[tool.setuptools.package-data]
+"synapse.adapters" = ["webui.html"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

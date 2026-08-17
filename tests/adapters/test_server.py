@@ -345,7 +345,17 @@ def test_webui_served_at_root(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
-    assert "run/stream" in response.text
+    for marker in (
+        "run/stream",
+        "tool_call_started",
+        "tool_call_completed",
+        "background_result",
+        "worker_spawned",
+        "swarm_verified",
+        "resetLiveState",
+        "run-summary",
+    ):
+        assert marker in response.text
 
 
 @pytest.mark.asyncio
