@@ -447,6 +447,15 @@ class _LiveRun:
             f"工具完成 · {event.tool_name}" if event.success else f"工具失败 · {event.tool_name}"
         )
 
+    async def _on_background_result(self, event):
+        # 后台 shell 完成时 agent 能轮询到结果，但人之前看不到——补进同一条
+        # RECENT TOOLS 时间线，UI 视角与 agent 视角对齐。
+        mark = "✓" if event.success else "!"
+        tail = _middle((event.stdout or event.stderr or "").strip().replace("\n", " "), 28)
+        line = f"{mark} bg:{event.task_id[:8]:<8} {tail:<28}"
+        self.live.add_timeline(line)
+        self.live.set_label(f"后台任务完成 · {event.task_id[:8]}")
+
     def start(self) -> None:
         self.live.start()
         if self.status_holder is not None:
@@ -459,6 +468,7 @@ class _LiveRun:
             ("llm_token", self._on_token),
             ("tool_call_started", self._on_tool_started),
             ("tool_call_completed", self._on_tool_completed),
+            ("background_result", self._on_background_result),
         ):
             self.event_bus.subscribe(event_type, handler)
             self._handlers.append((event_type, handler))

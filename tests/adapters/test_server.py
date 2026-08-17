@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from synapse.protocols.llm import LLMResponse, Message
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
 from synapse.core.events import EventBus
+from synapse.adapters.server import create_app
 
 
 def test_remote_experiment_config_rejects_host_escape_hatches():
@@ -57,9 +60,11 @@ def mock_synapse():
 
 
 @pytest.fixture
-def client(mock_synapse):
+def client(mock_synapse, tmp_path, monkeypatch):
     """Return a FastAPI TestClient wired to the app with a mocked Synapse."""
-    from synapse.adapters.server import create_app
+    import synapse.adapters.server as server
+    # /run persists sessions to disk — keep the tests out of the real home dir.
+    monkeypatch.setattr(server, "DEFAULT_SESSION_DIR", tmp_path)
 
     app = create_app(synapse_instance=mock_synapse)
     from fastapi.testclient import TestClient
@@ -285,6 +290,147 @@ async def test_run_task_stream_includes_swarm_events():
 # ---------------------------------------------------------------------------
 # Test 3: Session history
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_stream_includes_background_result():
+    """POST /run/stream forwards background_result so finished bg shells are visible."""
+    from synapse.adapters.server import create_app
+    from synapse.protocols.events import BackgroundResult
+
+    bus = EventBus()
+    mock = AsyncMock()
+    mock._container.resolve = MagicMock(return_value=bus)
+    mock.get_run_score = MagicMock(return_value={})
+    canned = AgentResult(status=ResultStatus.SUCCESS, output="ok", metrics=ExecutionMetrics())
+
+    async def _run(task, session=None, confirm_callback=None):
+        await bus.emit(BackgroundResult(
+            session_id=session.id, task_id="task-12345678", success=True, stdout="done"))
+        return canned
+
+    mock.run = _run
+    app = create_app(synapse_instance=mock)
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    response = client.post("/run/stream", json={"task": "bg it"})
+    events = [json.loads(l[len("data: "):]) for l in response.text.splitlines() if l.startswith("data: ")]
+    types = [e["event"]["event_type"] for e in events if e["type"] == "event"]
+    assert "background_result" in types
+
+
+@pytest.mark.asyncio
+async def test_run_continues_saved_session(client, mock_synapse, tmp_path):
+    """session_id continues a prior conversation; unknown ids 404."""
+    from synapse.adapters import server
+
+    first = client.post("/run", json={"task": "Hello"})
+    sid = first.json()["session_id"]
+    client.post("/run", json={"task": "Again", "session_id": sid})
+    # both runs reused the same session object
+    sessions_used = [call.kwargs.get("session") for call in mock_synapse.run.call_args_list]
+    assert sessions_used[0] is sessions_used[1]
+
+    # Fresh app: empty in-memory dict forces the on-disk lookup path.
+    (tmp_path / f"{sid}.json").unlink(missing_ok=True)
+    from fastapi.testclient import TestClient
+    cold_client = TestClient(server.create_app(synapse_instance=mock_synapse))
+    response = cold_client.post("/run", json={"task": "x", "session_id": sid})
+    assert response.status_code == 404
+
+
+def test_webui_served_at_root(client):
+    """GET / returns the built-in single-file web UI."""
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "run/stream" in response.text
+
+
+@pytest.mark.asyncio
+async def test_run_stream_confirm_round_trip():
+    """A confirmation-required call prompts over SSE; POST /confirm answers it."""
+    from synapse.adapters.server import create_app
+    from synapse.protocols.sandbox import AuthRequest
+
+    bus = EventBus()
+    mock = AsyncMock()
+    mock._container.resolve = MagicMock(return_value=bus)
+    mock.get_run_score = MagicMock(return_value={})
+
+    async def _run(task, session=None, confirm_callback=None):
+        assert confirm_callback is not None
+        approved = await confirm_callback(AuthRequest(
+            tool_name="shell", tool_params={"command": "rm -rf /tmp/x"},
+            risk_level="high", session_id=session.id))
+        return AgentResult(status=ResultStatus.SUCCESS,
+                           output="approved" if approved else "denied",
+                           metrics=ExecutionMetrics())
+
+    mock.run = _run
+    app = create_app(synapse_instance=mock)
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    # The SSE body only unblocks when the confirm waiter resolves, so answer
+    # from a side thread: poll the app's confirm_waiters dict until the
+    # prompt appears, then approve it.
+    confirm_waiters = app.state.confirm_waiters
+
+    def _approve_when_pending():
+        for _ in range(200):
+            if confirm_waiters:
+                rid = next(iter(confirm_waiters))
+                client.post(f"/confirm/{rid}", json={"approve": True})
+                return
+            time.sleep(0.05)
+
+    holder = {}
+    def _stream():
+        holder["res"] = client.post("/run/stream", json={"task": "confirm it"})
+    t_stream = threading.Thread(target=_stream)
+    t_answer = threading.Thread(target=_approve_when_pending)
+    t_stream.start(); t_answer.start()
+    t_stream.join(timeout=30); t_answer.join(timeout=10)
+
+    res = holder["res"]
+    assert res.status_code == 200
+    events = [json.loads(l[len("data: "):]) for l in res.text.splitlines() if l.startswith("data: ")]
+    confirms = [e for e in events if e["type"] == "confirm"]
+    assert confirms and confirms[0]["request"]["tool_name"] == "shell"
+    dones = [e for e in events if e["type"] == "done"]
+    assert dones[0]["result"]["output"] == "approved"
+
+
+def test_per_session_synapse_instances(monkeypatch):
+    """Without an injected instance, each session gets its own Synapse."""
+    import synapse.adapters.server as server
+
+    created = []
+
+    class FakeSynapse:
+        def __init__(self):
+            created.append(self)
+            self._container = MagicMock()
+
+        async def run(self, task, session=None, confirm_callback=None):
+            return AgentResult(status=ResultStatus.SUCCESS, output="ok",
+                               metrics=ExecutionMetrics())
+
+        def get_run_score(self):
+            return {}
+
+    monkeypatch.setattr(server, "Synapse", FakeSynapse)
+    app = server.create_app(synapse_instance=None)
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    # Two distinct sessions -> two instances; same session -> cached one.
+    sid1 = client.post("/run", json={"task": "a"}).json()["session_id"]
+    client.post("/run", json={"task": "b", "session_id": sid1})
+    sid2 = client.post("/run", json={"task": "c"}).json()["session_id"]
+    assert len(created) == 2
 
 
 def test_session_history(client):

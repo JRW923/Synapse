@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Synapse</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d;
+    --text: #e6edf3; --dim: #8b949e; --brand: #39c5cf;
+    --ok: #3fb950; --warn: #d29922; --err: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    background: var(--panel); flex: none;
+  }
+  header .logo { color: var(--brand); font-weight: 700; }
+  header .session { color: var(--dim); font-size: 12px; margin-left: auto; }
+  header button {
+    background: none; border: 1px solid var(--border); color: var(--dim);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px;
+  }
+  header button:hover { color: var(--text); border-color: var(--dim); }
+  #chat { flex: 1; overflow-y: auto; padding: 16px; }
+  .msg { max-width: 860px; margin: 0 auto 14px; display: flex; gap: 10px; }
+  .msg .who { flex: none; width: 28px; height: 28px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center; font-weight: 700; }
+  .msg.user .who { background: #21262d; color: var(--dim); }
+  .msg.agent .who { background: rgba(57,197,207,.15); color: var(--brand); }
+  .msg .body { min-width: 0; flex: 1; }
+  .msg .body pre {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; overflow-x: auto; margin: 6px 0; font-size: 13px;
+  }
+  .msg .body code { font-family: Consolas, monospace; }
+  /* streaming panel: live status + token text + tool timeline */
+  #live {
+    max-width: 860px; margin: 0 auto 14px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--panel); padding: 10px 12px;
+    display: none;
+  }
+  #live .status { color: var(--brand); font-size: 13px; }
+  #live .status .spin {
+    display: inline-block; animation: spin 1s steps(10) infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #live .meta { color: var(--dim); font-size: 12px; margin-left: 10px; }
+  #live .stream { margin-top: 6px; white-space: pre-wrap; font-size: 13px;
+    max-height: 220px; overflow-y: auto; }
+  #live .tools { margin-top: 6px; font-size: 12px; color: var(--dim);
+    font-family: Consolas, monospace; }
+  #live .tools .ok { color: var(--ok); }
+  #live .tools .err { color: var(--err); }
+  form {
+    display: flex; gap: 8px; padding: 12px 16px; margin: 12px auto 12px;
+    width: calc(100% - 32px); max-width: 860px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); flex: none;
+  }
+  textarea {
+    flex: 1; background: var(--bg); color: var(--text); resize: none;
+    border: none; outline: none; padding: 8px; font: inherit;
+    max-height: 160px;
+  }
+  form button {
+    background: var(--brand); color: #0d1117; border: none; border-radius: 6px;
+    padding: 6px 16px; font-weight: 600; cursor: pointer; align-self: flex-end;
+  }
+  form button:disabled { opacity: .4; cursor: default; }
+  /* approval prompt for confirmation-required tool calls */
+  #confirm {
+    max-width: 860px; margin: 0 auto 14px; border: 1px solid var(--warn);
+    border-radius: 8px; background: var(--panel); padding: 12px 14px;
+    display: none;
+  }
+  #confirm .title { color: var(--warn); font-weight: 600; }
+  #confirm .detail { margin: 8px 0; font-size: 13px; }
+  #confirm pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; overflow-x: auto; font-size: 12px; margin: 6px 0;
+    max-height: 180px; overflow-y: auto;
+  }
+  #confirm .row { display: flex; gap: 8px; justify-content: flex-end; }
+  #confirm button {
+    border-radius: 6px; padding: 6px 16px; cursor: pointer; font-weight: 600;
+    border: 1px solid var(--border); background: none; color: var(--text);
+  }
+  #confirm button.approve { background: var(--ok); color: #0d1117; border: none; }
+  #confirm button.deny { border-color: var(--err); color: var(--err); }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">◆ synapse</span>
+  <span class="session" id="session"></span>
+  <button onclick="newSession()">新会话</button>
+</header>
+<div id="chat"><div id="live">
+  <div><span class="status"><span class="spin">⠋</span> <span id="label">连接中…</span></span><span class="meta" id="meta"></span></div>
+  <div class="stream" id="stream"></div>
+  <div class="tools" id="tools"></div>
+</div><div id="confirm">
+  <div class="title">⚠ 需要确认的操作</div>
+  <div class="detail" id="confirm-detail"></div>
+  <div class="row">
+    <button class="deny" onclick="answer(false)">拒绝</button>
+    <button class="approve" onclick="answer(true)">批准</button>
+  </div>
+</div></div>
+<form onsubmit="return send(event)">
+  <textarea id="input" rows="1" placeholder="输入任务，Enter 发送，Shift+Enter 换行"
+    onkeydown="return keydown(event)" oninput="grow(this)"></textarea>
+  <button id="sendbtn">发送</button>
+</form>
+<script>
+let sessionId = null, busy = false, spinner = null, elapsed = null, timer = null;
+let pendingConfirm = null;
+const $ = id => document.getElementById(id);
+
+async function answer(approve) {
+  if (pendingConfirm === null) return;
+  const id = pendingConfirm; pendingConfirm = null;
+  $("confirm").style.display = "none";
+  $("label").textContent = "继续执行…";
+  try {
+    await fetch("/confirm/" + id, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approve }),
+    });
+  } catch (e) { /* stream will surface the timeout-deny if this failed */ }
+}
+
+function newSession() {
+  if (busy && !confirm("任务进行中，确定放弃？")) return;
+  sessionId = null; $("session").textContent = "";
+  document.querySelectorAll(".msg").forEach(e => e.remove());
+}
+
+function addMsg(role, text) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  // minimal escaping, then restore <pre>/<code> blocks as elements
+  const esc = s => s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+  div.innerHTML = "<div class='who'>" + (role === "user" ? "你" : "◆") + "</div>" +
+    "<div class='body'>" + esc(text)
+      .split(/```(\w*)\n?/)
+      .reduce((acc, part, i, arr) =>
+        i % 2 === 1 ? acc : acc + (arr[i-1] !== undefined
+          ? "<pre><code>" + part + "</code></pre>" : part),
+        "") + "</div>";
+  $("chat").insertBefore(div, $("live"));
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+function grow(t) { t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
+function keydown(e) {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); return send(e); }
+}
+
+const PHASES = {
+  thinking: "分析任务", calling_llm: "调用模型", done: "任务完成",
+  token_budget: "接近 token 预算", context_timeout: "上下文检索超时",
+};
+
+async function send(e) {
+  e.preventDefault();
+  const text = $("input").value.trim();
+  if (!text || busy) return false;
+  busy = true; $("sendbtn").disabled = true;
+  addMsg("user", text);
+  $("input").value = ""; grow($("input"));
+  $("stream").textContent = ""; $("tools").textContent = "";
+  $("label").textContent = "开始…";
+  $("live").style.display = "block";
+  spinner = setInterval(() => {
+    const s = $("live").querySelector(".spin");
+    const frames = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
+    s.textContent = frames[(frames.indexOf(s.textContent) + 1) % frames.length];
+  }, 100);
+  elapsed = Date.now();
+  timer = setInterval(() => {
+    $("meta").textContent = Math.round((Date.now() - elapsed) / 1000) + "s";
+  }, 1000);
+
+  // POST + manual SSE line parsing via fetch streaming
+  let events = [];
+  try {
+    const res = await fetch("/run/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task: text, auto_approve: true, session_id: sessionId }),
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        if (chunk.startsWith("data: "))
+          handle(JSON.parse(chunk.slice(6)));
+      }
+    }
+  } catch (err) {
+    addMsg("agent", "连接错误：" + err.message);
+  }
+  stopLive();
+  busy = false; $("sendbtn").disabled = false;
+  $("input").focus();
+  return false;
+}
+
+function handle(item) {
+  if (item.type === "event") {
+    const ev = item.event;
+    if (ev.event_type === "agent_progress") {
+      $("label").textContent = PHASES[ev.phase] || ev.message || "处理中";
+      if (ev.phase === "calling_llm") $("stream").textContent = "";
+    } else if (ev.event_type === "llm_token") {
+      $("stream").textContent += ev.text || "";
+      $("stream").scrollTop = $("stream").scrollHeight;
+    } else if (ev.event_type === "tool_call_completed") {
+      const line = document.createElement("div");
+      line.className = ev.success ? "ok" : "err";
+      line.textContent = (ev.success ? "✓ " : "! ") + ev.tool_name +
+        "  " + ev.duration_ms + "ms";
+      $("tools").appendChild(line);
+    }
+  } else if (item.type === "confirm") {
+    pendingConfirm = item.request_id;
+    const r = item.request;
+    $("confirm-detail").innerHTML =
+      "<b>" + r.tool_name + "</b>（风险等级：" + r.risk_level + "）" +
+      "<pre>" + JSON.stringify(r.tool_params, null, 2)
+        .replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])) + "</pre>";
+    $("confirm").style.display = "block";
+    $("label").textContent = "等待确认…";
+  } else if (item.type === "done") {
+    sessionId = item.result.session_id;
+    $("session").textContent = sessionId.slice(0, 8);
+    addMsg("agent", item.result.output || "(无输出)");
+  } else if (item.type === "error") {
+    addMsg("agent", "任务失败：" + item.error);
+  }
+}
+
+function stopLive() {
+  clearInterval(spinner); clearInterval(timer);
+  $("live").style.display = "none";
+  $("confirm").style.display = "none";
+  pendingConfirm = null;
+}
+</script>
+</body>
+</html>

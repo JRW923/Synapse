@@ -14,20 +14,22 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import tempfile
 import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field as PydanticField
 
 from synapse.adapters.library import Synapse
 from synapse.core.events import EventBus
-from synapse.core.session import Session
+from synapse.core.session import DEFAULT_SESSION_DIR, Session
 from synapse.protocols.planner import AgentResult, ExecutionMetrics
 from synapse.eval.experiments import Experiment, ExperimentResult
 from synapse.eval.runner import _runner_comparability_envelope
@@ -52,6 +54,15 @@ _REMOTE_EXPERIMENT_FORBIDDEN_KEYS = {
 }
 
 
+@contextlib.contextmanager
+def _swallow(where: str):
+    """Decoration must never abort the run — same contract as the CLI renderer."""
+    try:
+        yield
+    except Exception:
+        pass
+
+
 def _validate_remote_experiment_config(value: Any, *, _path: str = "config") -> None:
     """Reject request-controlled host/network escape hatches before Synapse builds."""
     if isinstance(value, dict):
@@ -70,6 +81,11 @@ async def _auto_approve(_request) -> bool:
     return True
 
 
+#: How long a streamed run waits for the user to answer a /confirm prompt
+#: before denying by default (fail-safe: the tool call is refused, not lost).
+_CONFIRM_TIMEOUT_S = 300.0
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models for request / response
 # ---------------------------------------------------------------------------
@@ -78,6 +94,11 @@ async def _auto_approve(_request) -> bool:
 class RunRequest(BaseModel):
     task: str
     auto_approve: bool = False  # L.3: approve confirmation-required calls headlessly
+    session_id: str | None = None  # continue a prior conversation (in-memory or saved on disk)
+
+
+class ConfirmDecision(BaseModel):
+    approve: bool
 
 
 class MetricsResponse(BaseModel):
@@ -252,7 +273,85 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
     experiments: dict[str, ExperimentRecord] = {}
     experiment_lock = asyncio.Lock()
 
-    synapse = synapse_instance if synapse_instance is not None else Synapse()
+    # One Synapse per session: each instance serializes runs through its own
+    # _run_lock, so different sessions execute concurrently and each SSE
+    # stream subscribes only to its own EventBus (no cross-talk).
+    # ponytail: unbounded per-session cache — fine for a local single-user
+    # server; upgrade path is LRU eviction + aclose() once multi-tenant.
+    synapse_instances: dict[str, Synapse] = {}
+
+    # request_id -> [asyncio.Event, approved|None] for in-flight confirmations.
+    # The Event lives on the run's event loop; /confirm may arrive on another
+    # thread's loop, so the wakeup must go through call_soon_threadsafe.
+    confirm_waiters: dict[str, list] = {}
+    app.state.confirm_waiters = confirm_waiters
+
+    def _synapse_for(session_id: str) -> Synapse:
+        """Per-session facade; an injected instance (tests) is always reused."""
+        if synapse_instance is not None:
+            return synapse_instance
+        inst = synapse_instances.get(session_id)
+        if inst is None:
+            inst = Synapse()
+            synapse_instances[session_id] = inst
+        return inst
+
+    def _make_confirm_bridge(put):
+        """Turn confirm_callback into an SSE prompt + POST /confirm round-trip.
+
+        ``put`` is the SSE queue's async put, so the prompt rides the same
+        stream as the run's events. Denies on timeout so an abandoned tab
+        refuses the risky call instead of hanging the run forever.
+        """
+        async def _confirm(request) -> bool:
+            request_id = uuid.uuid4().hex
+            waiter = [asyncio.Event(), None]
+            waiter.append(asyncio.get_running_loop())
+            confirm_waiters[request_id] = waiter
+            try:
+                await put({"type": "confirm", "request_id": request_id, "request": {
+                    "tool_name": request.tool_name,
+                    "tool_params": request.tool_params,
+                    "risk_level": request.risk_level,
+                }})
+                await asyncio.wait_for(waiter[0].wait(), timeout=_CONFIRM_TIMEOUT_S)
+                return waiter[1]
+            except asyncio.TimeoutError:
+                return False
+            finally:
+                confirm_waiters.pop(request_id, None)
+        return _confirm
+
+    def _resolve_session(session_id: str | None) -> Session:
+        """New session, or continue one seen earlier in-process / saved on disk."""
+        if not session_id:
+            return Session()
+        if session_id in sessions:
+            return sessions[session_id]
+        path = DEFAULT_SESSION_DIR / f"{session_id}.json"
+        if path.exists():
+            return Session.load(path)
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # ---- GET / — built-in web UI -----------------------------------------
+
+    _WEBUI_HTML = (Path(__file__).with_name("webui.html")).read_text(encoding="utf-8")
+
+    @app.get("/", include_in_schema=False)
+    async def webui():
+        return HTMLResponse(_WEBUI_HTML)
+
+    # ---- POST /confirm/{request_id} — answer an interactive approval ------
+
+    @app.post("/confirm/{request_id}")
+    async def confirm(request_id: str, decision: ConfirmDecision):
+        waiter = confirm_waiters.get(request_id)
+        if waiter is None:
+            raise HTTPException(status_code=404, detail="No pending confirmation")
+        waiter[1] = decision.approve
+        event, _, loop = waiter
+        loop.call_soon_threadsafe(event.set)
+        return {"ok": True}
 
     @app.on_event("shutdown")
     async def _shutdown_experiments() -> None:
@@ -264,9 +363,11 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        close = getattr(synapse, "aclose", None)
-        if close is not None:
-            await close()
+        for inst in [*synapse_instances.values(),
+                     *([synapse_instance] if synapse_instance is not None else [])]:
+            close = getattr(inst, "aclose", None)
+            if close is not None:
+                await close()
 
     # ---- /health ---------------------------------------------------------
 
@@ -278,14 +379,21 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
     @app.post("/run", response_model=RunResponse)
     async def run_task(req: RunRequest):
-        session = Session()
+        session = _resolve_session(req.session_id)
+        synapse = _synapse_for(session.id)
+        # Non-streamed runs have no channel to ask the user: auto_approve
+        # answers yes headlessly, otherwise the engine's default (deny) applies.
         result: AgentResult = await synapse.run(
             req.task, session=session,
             confirm_callback=_auto_approve if req.auto_approve else None,
         )
 
-        # Store the session so it can be queried later
+        # Store the session so it can be queried later.  Pass the directory
+        # explicitly: save()'s default was bound in session.py, so a patched
+        # server.DEFAULT_SESSION_DIR would otherwise be ignored.
         sessions[session.id] = session
+        with _swallow("run: session save"):
+            session.save(DEFAULT_SESSION_DIR)
 
         return RunResponse(
             status=result.status.value,
@@ -318,6 +426,7 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
         "llm_token",
         "tool_call_started",
         "tool_call_completed",
+        "background_result",
         "worker_spawned",
         "worker_completed",
         "review_submitted",
@@ -327,7 +436,8 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
 
     @app.post("/run/stream")
     async def run_task_stream(req: RunRequest):
-        session = Session()
+        session = _resolve_session(req.session_id)
+        synapse = _synapse_for(session.id)
         event_bus = synapse._container.resolve(EventBus)
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -351,9 +461,14 @@ def create_app(synapse_instance: Synapse | None = None) -> FastAPI:
             try:
                 res = await synapse.run(
                     req.task, session=session,
-                    confirm_callback=_auto_approve if req.auto_approve else None,
+                    confirm_callback=(
+                        _auto_approve if req.auto_approve
+                        else _make_confirm_bridge(queue.put)
+                    ),
                 )
                 sessions[session.id] = session
+                with _swallow("run/stream: session save"):
+                    session.save(DEFAULT_SESSION_DIR)
                 await queue.put({"type": "done", "result": {
                     "status": res.status.value,
                     "output": res.output,
