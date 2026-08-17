@@ -197,13 +197,6 @@ The frozen-20 SWE-bench multi-model run is done (three model tiers × 3 repeats,
 
 **Why does thrashing only roll back one file instead of the whole workspace?** When thrashing first trips, only the repeatedly-edited file is proven bad — rolling it back is safe. A full-workspace rollback would also discard half-finished edits elsewhere the model may still build on. Full restores are the user's call (`/rewind`), never the harness default: a recovery action is itself a side effect, so it stays conservative. Restores reset tracked files only; untracked files are always kept because the harness cannot tell "the agent created this" from "the user did".
 
-## Documentation
-
-- Documentation index: [docs/文档索引.md](docs/文档索引.md)
-- Harness review: [docs/架构审查/架构审查与改造记录.md](docs/架构审查/架构审查与改造记录.md)
-- Evaluation guide: [docs/评测/评测基线与接入.md](docs/评测/评测基线与接入.md)
-- UX guide: [docs/产品体验/交互体验评审与改造.md](docs/产品体验/交互体验评审与改造.md)
-
 ## Local verification
 
 ```bash

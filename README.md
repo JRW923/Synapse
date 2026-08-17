@@ -136,7 +136,7 @@ python -m synapse.eval.governance freeze path/to/tasks.jsonl path/to/manifest.js
 # 预注册、run 登记、完整性校验与趋势分析
 python -m synapse.eval.governance preregister prereg-spec.json prereg-frozen.json
 python -m synapse.eval.governance register eval-registry eval-results/repo.json \
-  --report-id run-2026-001 --series harness-v1 --role baseline \
+  --report-id run-001 --series harness-v1 --role baseline \
   --status complete --approval approved
 python -m synapse.eval.governance verify eval-registry eval-results
 python -m synapse.eval.governance trend eval-registry --series harness-v1
@@ -242,13 +242,6 @@ SWE-bench 冻结 20 题多模型正式 run 已完成（见[评测基线](docs/�
 **怎么判断任务真的完成了？** 运行时 gate 看的是工具返回的 exit code，不是模型文本里的「已完成」；评测层的 grader 在 Agent 跑完之后由 Harness 独立执行。正式数据集还必须在入库 preflight 中确认 baseline 失败、目标状态可通过，避免「测试本来就过」的假阳性。
 
 **为什么 thrashing 只回滚单个文件，不自动回滚整个工作区？** thrashing 首次触发时，只有那个反复被改的文件被证明处于坏状态，回滚它是安全的；整区回滚会把其他文件的半成品修改一并丢掉，而模型可能马上要在此基础上继续。整区回滚是用户的决定（`/rewind`），不是 harness 的默认行为——恢复动作本身也是副作用，越保守越好。checkpoint 的 restore 只重置 tracked 文件，untracked 文件一律保留，因为无法区分「agent 建的」和「用户的」。
-
-## 文档
-
-- 文档入口：[docs/文档索引.md](docs/文档索引.md)
-- 架构审查：[docs/架构审查/架构审查与改造记录.md](docs/架构审查/架构审查与改造记录.md)
-- 评测说明：[docs/评测/评测基线与接入.md](docs/评测/评测基线与接入.md)
-- 产品体验：[docs/产品体验/交互体验评审与改造.md](docs/产品体验/交互体验评审与改造.md)
 
 ## 本地验证
 
