@@ -72,7 +72,10 @@ if sys.platform == "win32":
             _ctypes.windll.kernel32.ExitProcess(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        _os.write(2, "\n  再按一次 Ctrl+C 强制退出。\n".encode("utf-8"))
+        # 用控制台实际编码写出：Windows/GBK 控制台上若写死 UTF-8 字节会被当
+        # GBK 解码成乱码（鍐嶆寜…）。sys.stderr.encoding 即控制台代码页。
+        _os.write(2, "\n  再按一次 Ctrl+C 强制退出。\n".encode(
+            sys.stderr.encoding or "utf-8", "replace"))
         # FALSE — let Python's SIGINT machinery run so the per-task handler
         # (request_cancel) fires. Returning TRUE swallowed the event, so a
         # single Ctrl+C never cancelled a task on Windows.
@@ -88,7 +91,8 @@ else:
             _os._exit(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        _os.write(2, "\n  再按一次 Ctrl+C 退出。\n".encode("utf-8"))
+        _os.write(2, "\n  再按一次 Ctrl+C 退出。\n".encode(
+            sys.stderr.encoding or "utf-8", "replace"))
 
     _signal.signal(_signal.SIGINT, _unix_sigint_handler)
 
