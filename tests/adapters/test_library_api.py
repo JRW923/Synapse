@@ -296,17 +296,17 @@ def test_library_api_without_provider_uses_models_json_default(tmp_path, monkeyp
 
     models_file = tmp_path / "models.json"
     upsert_model(
-        "deepseek", "deepseek-chat", api_key="sk-test", path=models_file,
+        "deepseek", "deepseek-v4-pro", api_key="sk-test", path=models_file,
     )
     monkeypatch.setattr(
         "synapse.config.models.models_config_path", lambda: models_file,
     )
 
-    with patch("synapse.modules.providers.deepseek.DeepSeekProvider"):
+    with patch("synapse.modules.providers.anthropic.AnthropicProvider"):
         synapse = Synapse()
 
     assert synapse._config.provider.provider == "deepseek"
-    assert synapse._config.provider.model == "deepseek-chat"
+    assert synapse._config.provider.model == "deepseek-v4-pro"
 
 
 def test_library_api_uses_custom_provider_base_url(tmp_path, monkeypatch):

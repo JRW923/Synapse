@@ -19,7 +19,7 @@ async def test_confirm_callback_reaches_planner(tmp_path):
     # 在 tmp_path 下创建项目，这样写入 tmp_path 外的路径会触发确认
     synapse = Synapse(
         provider="deepseek",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         config_path=None,
         confirm_callback=my_confirm,
     )
@@ -89,7 +89,7 @@ async def test_confirm_callback_deny_blocks_tool(tmp_path):
 
     synapse = Synapse(
         provider="deepseek",
-        model="deepseek-chat",
+        model="deepseek-v4-pro",
         config_path=None,
         confirm_callback=my_confirm,
     )
@@ -134,7 +134,7 @@ async def test_no_confirm_callback_auto_denies(tmp_path):
     from synapse.modules.security.auth import ActionAuthorizer
 
     synapse = Synapse(
-        provider="deepseek", model="deepseek-chat", config_path=None,
+        provider="deepseek", model="deepseek-v4-pro", config_path=None,
         # 注意：不传 confirm_callback
     )
     # 把工作区根设为 tmp_path，使写入 tmp_path 内文件需要确认

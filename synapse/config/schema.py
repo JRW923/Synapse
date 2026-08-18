@@ -32,7 +32,6 @@ _DEFAULT_MODELS: list[dict] = [
     {"provider": "openai",    "model": "gpt-5.5",            "api_key": ""},
     {"provider": "openai",    "model": "gpt-5.4",            "api_key": ""},
     {"provider": "openai",    "model": "o4-mini",            "api_key": ""},
-    {"provider": "deepseek",  "model": "deepseek-chat",      "api_key": ""},
     {"provider": "deepseek",  "model": "deepseek-v4-pro",    "api_key": ""},
     {"provider": "deepseek",  "model": "deepseek-v4-flash",  "api_key": ""},
     {"provider": "google",    "model": "gemini-3-flash",     "api_key": ""},

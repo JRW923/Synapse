@@ -630,7 +630,7 @@ def test_first_run_wizard_plain_writes_models_json(tmp_path, monkeypatch):
     from synapse.config.schema import SynapseConfig
 
     models_file = tmp_path / "models.json"
-    answers = iter(["deepseek", ""])
+    answers = iter(["deepseek", "deepseek-v4-pro"])
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": "sk-test")
@@ -642,7 +642,7 @@ def test_first_run_wizard_plain_writes_models_json(tmp_path, monkeypatch):
     registry = load_models_config(models_file)
     assert registry is not None
     assert registry.default_provider == "deepseek"
-    assert registry.default_model == "deepseek-chat"
+    assert registry.default_model == "deepseek-v4-pro"
     assert registry.providers["deepseek"].api_key == "sk-test"
 
 

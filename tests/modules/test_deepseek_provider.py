@@ -8,11 +8,11 @@ from synapse.core.exceptions import ProviderError
 
 @pytest.fixture
 def provider():
-    return DeepSeekProvider(model="deepseek-chat", api_key="test-key")
+    return DeepSeekProvider(model="deepseek-v4-pro", api_key="test-key")
 
 
 def test_model_id(provider):
-    assert provider.model_id == "deepseek-chat"
+    assert provider.model_id == "deepseek-v4-pro"
 
 
 def test_default_base_url():
@@ -27,7 +27,7 @@ def test_custom_base_url():
 
 @pytest.mark.asyncio
 async def test_chat_basic():
-    provider = DeepSeekProvider(model="deepseek-chat", api_key="test-key")
+    provider = DeepSeekProvider(model="deepseek-v4-pro", api_key="test-key")
 
     mock_message = MagicMock()
     mock_message.content = "Hello, I am DeepSeek"
@@ -59,7 +59,7 @@ async def test_chat_basic():
 
 @pytest.mark.asyncio
 async def test_chat_with_tools():
-    provider = DeepSeekProvider(model="deepseek-chat", api_key="test-key")
+    provider = DeepSeekProvider(model="deepseek-v4-pro", api_key="test-key")
 
     mock_tool_call = MagicMock()
     mock_tool_call.id = "call_1"
@@ -97,7 +97,7 @@ async def test_chat_with_tools():
 @pytest.mark.asyncio
 async def test_chat_skips_empty_user_messages():
     """Empty user messages (tool-result placeholders) should be filtered out."""
-    provider = DeepSeekProvider(model="deepseek-chat", api_key="test-key")
+    provider = DeepSeekProvider(model="deepseek-v4-pro", api_key="test-key")
 
     mock_message = MagicMock()
     mock_message.content = "Got it"
@@ -131,7 +131,7 @@ async def test_chat_skips_empty_user_messages():
 @pytest.mark.asyncio
 async def test_chat_with_system_message():
     """System messages should be passed through in OpenAI format."""
-    provider = DeepSeekProvider(model="deepseek-chat", api_key="test-key")
+    provider = DeepSeekProvider(model="deepseek-v4-pro", api_key="test-key")
 
     mock_message = MagicMock()
     mock_message.content = "I understand"
@@ -164,7 +164,7 @@ async def test_chat_with_system_message():
 @pytest.mark.asyncio
 async def test_chat_api_error():
     """ProviderError should be raised on API failure."""
-    provider = DeepSeekProvider(model="deepseek-chat", api_key="test-key")
+    provider = DeepSeekProvider(model="deepseek-v4-pro", api_key="test-key")
 
     with patch.object(
         provider._client.chat.completions,

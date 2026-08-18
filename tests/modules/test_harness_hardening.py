@@ -57,7 +57,7 @@ async def test_read_rejects_symlink_escape(tmp_path: Path):
 
 def test_tools_enabled_and_retry_config_are_wired():
     synapse = Synapse(
-        provider="deepseek", model="deepseek-chat", config_path=None,
+        provider="deepseek", model="deepseek-v4-pro", config_path=None,
         enabled=["read"], max_retries=7,
     )
     registry = synapse._container.resolve(ToolRegistry)
@@ -69,8 +69,8 @@ def test_tools_enabled_and_retry_config_are_wired():
 def test_sandbox_enforce_fails_closed_but_warn_degrades():
     with patch("synapse.adapters.library.ProcessSandbox", side_effect=OSError("missing")):
         with pytest.raises(RuntimeError, match="enforce"):
-            Synapse(provider="deepseek", model="deepseek-chat", sandbox_mode="enforce")
-        warn = Synapse(provider="deepseek", model="deepseek-chat", sandbox_mode="warn")
+            Synapse(provider="deepseek", model="deepseek-v4-pro", sandbox_mode="enforce")
+        warn = Synapse(provider="deepseek", model="deepseek-v4-pro", sandbox_mode="warn")
         assert warn._container.resolve(Sandbox) is None
 
 

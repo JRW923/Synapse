@@ -23,11 +23,11 @@ def test_models_file_round_trip_uses_user_facing_keys(tmp_path):
     path = tmp_path / "models.json"
     registry = ModelsConfig(
         default_provider="deepseek",
-        default_model="deepseek-chat",
+        default_model="deepseek-v4-pro",
         providers={
             "deepseek": StoredProvider(
                 api_key="sk-test",
-                models=[StoredModel(id="deepseek-chat")],
+                models=[StoredModel(id="deepseek-v4-pro")],
             )
         },
     )
@@ -63,14 +63,14 @@ def test_model_selection_uses_the_selected_providers_credentials(tmp_path):
     path = tmp_path / "models.json"
     upsert_model("openai", "gpt-5.4", api_key="sk-openai", path=path)
     upsert_model(
-        "deepseek", "deepseek-chat", api_key="sk-deepseek",
+        "deepseek", "deepseek-v4-pro", api_key="sk-deepseek",
         path=path, make_default=False,
     )
     config, _ = load_config(
         str(tmp_path / "missing.yaml"), models_path=path,
     )
 
-    apply_model_selection(config, "deepseek", "deepseek-chat")
+    apply_model_selection(config, "deepseek", "deepseek-v4-pro")
 
     assert config.provider.api_key == "sk-deepseek"
 

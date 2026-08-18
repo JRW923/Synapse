@@ -146,10 +146,10 @@ def test_synapse_wires_allow_external_from_config_override():
     from synapse.adapters.library import Synapse
     from synapse.modules.security.auth import ActionAuthorizer
 
-    off = Synapse(provider="deepseek", model="deepseek-chat", config_path=None)
+    off = Synapse(provider="deepseek", model="deepseek-v4-pro", config_path=None)
     assert off._container.resolve(ActionAuthorizer).allow_external is False
 
-    on = Synapse(provider="deepseek", model="deepseek-chat", config_path=None, allow_external=True)
+    on = Synapse(provider="deepseek", model="deepseek-v4-pro", config_path=None, allow_external=True)
     assert on._container.resolve(ActionAuthorizer).allow_external is True
 
 
@@ -160,7 +160,7 @@ def test_enable_external_tools_flag_also_allows_auth():
     from synapse.modules.security.auth import ActionAuthorizer
 
     on = Synapse(
-        provider="deepseek", model="deepseek-chat", config_path=None,
+        provider="deepseek", model="deepseek-v4-pro", config_path=None,
         enable_external_tools=True,
     )
     assert on._container.resolve(ActionAuthorizer).allow_external is True

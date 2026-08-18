@@ -1527,19 +1527,6 @@ def _pick_model(console, entries, initial: int = 0) -> int | None:
 # ---- First-run wizard -----------------------------------------------------
 
 
-def _recommended_model(config, provider: str) -> str:
-    """Return a useful prompt default even when JSON replaced built-in entries."""
-    from synapse.config.schema import _DEFAULT_MODELS
-
-    for entry in config.provider.models:
-        if entry.provider == provider:
-            return entry.model
-    for entry in _DEFAULT_MODELS:
-        if entry["provider"] == provider:
-            return entry["model"]
-    return ""
-
-
 def _wizard_providers(config) -> list[str]:
     from synapse.config.schema import _PROVIDER_ENV_VARS
 
@@ -1638,10 +1625,8 @@ def _first_run_wizard(console, config, *, first_run: bool = True) -> None:
                 break
             console.print("  [red]API key 不能为空；也可以先设置对应环境变量。[/red]")
 
-    default_model = _recommended_model(config, provider)
-    suffix = f" [dim](默认: {default_model})[/dim]" if default_model else ""
     while True:
-        model = console.input(f"  [bold]Model ID[/bold]{suffix}: ").strip() or default_model
+        model = console.input("  [bold]Model ID[/bold]: ").strip()
         if model:
             break
         console.print("  [red]Model ID 不能为空。[/red]")
@@ -1727,10 +1712,8 @@ def _first_run_wizard_plain(config, *, first_run: bool = True) -> None:
                 break
             print("API key 不能为空；也可以先设置对应环境变量。")
 
-    default_model = _recommended_model(config, provider)
-    suffix = f" (默认: {default_model})" if default_model else ""
     while True:
-        model = input(f"Model ID{suffix}: ").strip() or default_model
+        model = input("Model ID: ").strip()
         if model:
             break
         print("Model ID 不能为空。")

@@ -106,9 +106,8 @@ from synapse.protocols.mcp import McpServerConfig
 def _resolve_provider(name: str, custom_providers: list | None = None, model: str = ""):
     """Return *(provider_class, base_url_override)* for *name*.
 
-    Handles model-aware routing: ``deepseek-v4-*`` models use the Anthropic
-    protocol against ``api.deepseek.com/anthropic``, while ``deepseek-chat``
-    keeps the OpenAI-compatible ``api.deepseek.com/v1``.
+    Handles model-aware routing: all ``deepseek-v4-*`` models use the
+    Anthropic protocol against ``api.deepseek.com/anthropic``.
     """
     # DeepSeek v4 models → Anthropic protocol on the Anthropic-compatible endpoint
     if name == "deepseek" and model.startswith("deepseek-v4"):

@@ -44,11 +44,11 @@ def test_models_json_supplies_default_and_env_can_override_key(tmp_path, monkeyp
             {
                 "version": 1,
                 "defaultProvider": "deepseek",
-                "defaultModel": "deepseek-chat",
+                "defaultModel": "deepseek-v4-pro",
                 "providers": {
                     "deepseek": {
                         "apiKey": "sk-file",
-                        "models": [{"id": "deepseek-chat"}],
+                        "models": [{"id": "deepseek-v4-pro"}],
                     }
                 },
             }
@@ -62,7 +62,7 @@ def test_models_json_supplies_default_and_env_can_override_key(tmp_path, monkeyp
     )
 
     assert config.provider.provider == "deepseek"
-    assert config.provider.model == "deepseek-chat"
+    assert config.provider.model == "deepseek-v4-pro"
     assert config.provider.api_key == "sk-env"
     assert source == str(models_file)
 

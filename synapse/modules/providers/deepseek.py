@@ -1,9 +1,9 @@
 """DeepSeek LLM Provider implementation.
 
-For ``deepseek-chat`` this uses the OpenAI-compatible endpoint at
-``api.deepseek.com/v1``.  ``deepseek-v4-*`` models are routed through
-the Anthropic protocol at ``api.deepseek.com/anthropic`` (handled in
-``_resolve_provider`` in library.py).
+``deepseek-v4-*`` models are routed through the Anthropic protocol at
+``api.deepseek.com/anthropic`` (see ``_resolve_provider`` in library.py).
+This OpenAI-compatible class remains as a fallback for custom/legacy
+DeepSeek endpoints on ``api.deepseek.com/v1``.
 """
 
 import os
@@ -20,7 +20,7 @@ class DeepSeekProvider(OpenAICompatibleProvider):
 
     def __init__(
         self,
-        model: str = "deepseek-v4-pro",
+        model: str = "",
         api_key: str = "",
         max_tokens: int = 4096,
         base_url: str = DEEPSEEK_BASE_URL,
