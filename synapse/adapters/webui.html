@@ -375,7 +375,7 @@
     <hr class="sep">
     <div id="cfg-switch">
       <div class="side-title">本会话运行时设置</div>
-      <div class="hint">切换模型 / 规划模式仅对当前会话生效，不写回服务器配置文件。</div>
+      <div class="hint">规划模式仅对当前会话生效，不写回配置文件。模型由上方全局配置决定，此处不再重复设置。</div>
       <label>规划模式</label>
       <select id="cfg-mode">
         <option value="react">react</option>
@@ -383,12 +383,6 @@
         <option value="hierarchical">hierarchical</option>
         <option value="swarm">swarm</option>
       </select>
-      <label>Provider（可选覆盖）</label>
-      <input id="cfg-switch-provider" autocomplete="off" placeholder="留空则用当前">
-      <label>Model（可选覆盖）</label>
-      <input id="cfg-switch-model" autocomplete="off" placeholder="留空则用当前">
-      <label>API Key（可选，切换到新 provider 时填）</label>
-      <input id="cfg-switch-key" type="password" autocomplete="off" placeholder="留空则不变">
       <div class="err" id="cfg-switch-err"></div>
       <div class="row">
         <button onclick="closeSettings()">关闭</button>
@@ -737,12 +731,10 @@ function showCustomModel() {
 }
 function openSettings() {
   $("settings").classList.add("show");
-  // 预填本会话运行时设置
+  // 预填本会话规划模式
   fetch("/status" + (sessionId ? "?session_id=" + sessionId : ""))
     .then(r => r.json()).then(st => {
       if (st && st.mode) $("cfg-mode").value = st.mode;
-      if (st && st.provider) $("cfg-switch-provider").placeholder = "留空则用 " + st.provider;
-      if (st && st.model) $("cfg-switch-model").placeholder = "留空则用 " + st.model;
     }).catch(() => {});
   showChoice();
 }
@@ -867,23 +859,15 @@ async function saveConfig() {
     $("cfg-err").textContent = _saveError(e);
   }
 }
-// 运行时切换模型 / 规划模式（仅本会话）
+// 运行时切换规划模式（仅本会话；模型由全局配置决定）
 async function applySwitch() {
   if (!sessionId) { $("cfg-switch-err").textContent = "请先发送一次任务以创建会话"; return; }
   const mode = $("cfg-mode").value;
-  const provider = $("cfg-switch-provider").value.trim();
-  const model = $("cfg-switch-model").value.trim();
-  const api_key = $("cfg-switch-key").value.trim();
-  const body = {};
-  if (provider) body.provider = provider;
-  if (model) body.model = model;
-  if (mode) body.mode = mode;
-  if (api_key) body.api_key = api_key;
   try {
     const res = await fetch("/sessions/" + sessionId + "/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ mode }),
     });
     if (!res.ok) { $("cfg-switch-err").textContent = await _saveErrorDetail(res); return; }
     closeSettings();

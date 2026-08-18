@@ -545,17 +545,16 @@ def test_context_report_endpoint(client):
     assert blocks[0]["zone"] == "core"
 
 
-def test_session_config_switch_stores_override_and_validates_mode():
+def test_session_config_switch_stores_mode_and_validates():
     import synapse.adapters.server as server
     from fastapi.testclient import TestClient
 
     app = server.create_app()
     c = TestClient(app)
 
-    # Switching model/mode for a session stores the per-session override.
-    r = c.post("/sessions/s1/config", json={"model": "gpt-4o", "mode": "swarm"})
+    # 本会话运行时仅覆盖规划模式;模型由 web 端全局配置决定。
+    r = c.post("/sessions/s1/config", json={"mode": "swarm"})
     assert r.status_code == 200
-    assert app.state.session_runtime["s1"]["model"] == "gpt-4o"
     assert app.state.session_runtime["s1"]["mode"] == "swarm"
 
     # Unknown planning mode is rejected.

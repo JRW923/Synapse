@@ -167,12 +167,13 @@ class ConfirmDecision(BaseModel):
 
 
 class SessionConfig(BaseModel):
-    """Per-session runtime overrides set from the web UI (switch model/mode)."""
+    """Per-session runtime override set from the web UI.
 
-    provider: str | None = None
-    model: str | None = None
+    模型/provider/api_key 一律由 web 端全局配置(``/config`` → ``runtime_key``)
+    决定,本会话运行时只可覆盖规划模式 ``mode``,避免两处都能配模型造成冲突。
+    """
+
     mode: str | None = None
-    api_key: str | None = None
 
 
 _VALID_MODES = {"react", "plan_execute", "hierarchical", "swarm"}
@@ -397,10 +398,11 @@ def create_app(
             return synapse_instance
         ov = app.state.session_runtime.get(session_id) or {}
         rc = app.state.runtime_key
-        # Resolution order: per-session override > global browser key > models.json.
-        provider = ov.get("provider") or (rc["provider"] if rc else None)
-        model = ov.get("model") or (rc["model"] if rc else None)
-        api_key = ov.get("api_key") or (rc["api_key"] if rc else None)
+        # 模型/provider/api_key 以 web 端全局配置(runtime_key)为准;
+        # 本会话运行时仅可覆盖规划模式 mode,不重复提供模型配置入口。
+        provider = rc["provider"] if rc else None
+        model = rc["model"] if rc else None
+        api_key = rc["api_key"] if rc else None
         mode = ov.get("mode")
 
         build_kwargs: dict = {}
@@ -927,8 +929,9 @@ def create_app(
     async def get_status(session_id: str | None = None):
         ov = app.state.session_runtime.get(session_id) if session_id else None
         rc = app.state.runtime_key
-        provider = (ov or {}).get("provider") or (rc["provider"] if rc else None)
-        model = (ov or {}).get("model") or (rc["model"] if rc else None)
+        # 模型以 web 端全局配置为准;本会话运行时仅覆盖 mode。
+        provider = rc["provider"] if rc else None
+        model = rc["model"] if rc else None
         mode = (ov or {}).get("mode")
         config, _ = load_config()
         if provider is None:
@@ -983,16 +986,10 @@ def create_app(
     @app.post("/sessions/{session_id}/config")
     async def set_session_config(session_id: str, cfg: SessionConfig):
         ov = dict(app.state.session_runtime.get(session_id) or {})
-        if cfg.provider is not None:
-            ov["provider"] = cfg.provider
-        if cfg.model is not None:
-            ov["model"] = cfg.model
         if cfg.mode is not None:
+            if cfg.mode not in _VALID_MODES:
+                raise HTTPException(status_code=422, detail="未知规划模式：" + cfg.mode)
             ov["mode"] = cfg.mode
-        if cfg.api_key is not None:
-            ov["api_key"] = cfg.api_key
-        if ov.get("mode") is not None and ov["mode"] not in _VALID_MODES:
-            raise HTTPException(status_code=422, detail="未知规划模式：" + ov["mode"])
         # Evict the cached instance so the next run rebuilds with the new
         # config; best-effort async cleanup (fire-and-forget) on the loop.
         inst = synapse_instances.pop(session_id, None)
