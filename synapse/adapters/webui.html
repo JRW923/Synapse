@@ -516,6 +516,23 @@ async function saveConfig() {
   }
 }
 checkConfig();
+checkLocalConnector();
+
+// 单进程「synapse web」模式：服务端已自动建好本地 connector 并绑定，
+// 无需手动点「连接本机」或输入配对码，直接认领即可。
+async function checkLocalConnector() {
+  try {
+    const res = await fetch("/connectors/local");
+    const d = await res.json();
+    if (!d.connector_id) return;
+    connectorId = d.connector_id;
+    connectorToken = d.browser_token;
+    $("connector").textContent = "本机：" + (d.name || "已连接");
+    $("pair").style.display = "none";
+    const btn = document.querySelector("button[onclick='pairLocalWorkspace()']");
+    if (btn) btn.style.display = "none";
+  } catch (e) { /* 非本地模式或尚未就绪，忽略 */ }
+}
 
 async function answer(approve) {
   if (pendingConfirm === null) return;

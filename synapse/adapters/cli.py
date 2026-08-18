@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import os as _os
 import signal as _signal
@@ -501,6 +502,33 @@ def main():
         help="输入网页配对码（首次连接或重新绑定）",
     )
 
+    web_parser = sub.add_parser(
+        "web", help="单进程启动网页并自动连接本机工作区",
+    )
+    web_parser.add_argument(
+        "--workspace",
+        required=True,
+        metavar="PATH",
+        help="网页任务允许操作的本机目录（自动连接，无需配对码）",
+    )
+    web_parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8000,
+        help="监听端口（默认：8000）",
+    )
+    web_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="绑定地址（默认：127.0.0.1，本机专用）",
+    )
+    web_parser.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help="网页显示的本地工作区名称（默认使用目录名）",
+    )
+
     chat_parser = sub.add_parser("chat", help="Start an interactive chat session")
     chat_parser.add_argument(
         "--provider", "-p",
@@ -820,6 +848,117 @@ def main():
             print("已停止本地 Connector。")
         except ConnectorError as exc:
             print(f"Connector 启动失败：{exc}")
+        return
+
+    if args.command == "web":
+        import webbrowser
+
+        from synapse.adapters.connector import ConnectorError, run_connector
+        from synapse.adapters.server import create_app
+
+        app = create_app()
+        broker = app.state.connector_broker
+        # 自动建好配对并绑定本地 connector，省去手动配对码与第二个终端。
+        pairing = broker.create_pairing()
+        local_browser_token = pairing["browser_token"]
+
+        host = args.host
+        bind_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        server_url = f"http://{bind_host}:{args.port}"
+
+        import uvicorn
+        config = uvicorn.Config(
+            app, host=host, port=args.port,
+            log_level="warning", access_log=False,
+        )
+        server = uvicorn.Server(config)
+
+        async def _web():
+            # uvicorn 在独立线程运行，隔离其 SystemExit（如端口占用）与信号安装；
+            # 主线程的 asyncio 循环只跑本地 connector。
+            def _run_server():
+                try:
+                    asyncio.run(server.serve())
+                except SystemExit:
+                    pass  # 启动失败（端口占用等）已在主线程给出清晰提示
+            server_thread = threading.Thread(target=_run_server, daemon=True)
+            server_thread.start()
+            # 等 uvicorn 真正开始监听后再让 connector 注册，否则首注册会失败。
+            for _ in range(200):
+                if getattr(server, "started", False):
+                    break
+                if not server_thread.is_alive():
+                    break
+                await asyncio.sleep(0.05)
+
+            # 服务起不来（如端口被占用）时给出清晰错误，而非 uvicorn 堆栈。
+            if not getattr(server, "started", False):
+                print(f"Web 启动失败：服务未能在 {host}:{args.port} 启动"
+                      f"（可能端口被占用或地址无效）")
+                return
+
+            print()
+            print("  Synapse Web 已启动")
+            print(f"  地址：  {server_url}")
+            print(f"  工作区：{args.workspace}")
+            print("  Ctrl+C 退出")
+            print(flush=True)
+            try:
+                webbrowser.open(server_url)
+            except Exception:
+                pass
+
+            def _on_registered(connection):
+                app.state.local_connector = {
+                    "connector_id": connection.connector_id,
+                    "browser_token": local_browser_token,
+                    "name": connection.name,
+                }
+
+            # 单 Ctrl+C 干净退出：关服务 + 取消 connector。
+            loop = asyncio.get_running_loop()
+            exiting: list[bool] = [False]
+            connector_task = asyncio.create_task(run_connector(
+                server=server_url,
+                workspace=args.workspace,
+                name=args.name,
+                config_path=args.config,
+                pair_code=pairing["pair_code"],
+                on_registered=_on_registered,
+            ))
+
+            def _on_sigint():
+                exiting[0] = True
+                server.should_exit = True
+                connector_task.cancel()
+
+            try:
+                loop.add_signal_handler(_signal.SIGINT, _on_sigint)
+            except (NotImplementedError, ValueError):
+                pass  # 不支持时回退到默认的两次 Ctrl+C 退出
+            try:
+                await connector_task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                try:
+                    loop.remove_signal_handler(_signal.SIGINT)
+                except (NotImplementedError, ValueError):
+                    pass
+                server.should_exit = True
+                # 被信号终止时直接退出：被取消的轮询线程会滞留，沿用全局
+                # 处理器同款的 os._exit 让终端立即返回（should_exit 已让服务
+                # 停止接收新连接，进程随即结束）。
+                if exiting[0]:
+                    _os._exit(0)
+                server_thread.join(timeout=5)
+
+        try:
+            asyncio.run(_web())
+        except KeyboardInterrupt:
+            pass
+        except ConnectorError as exc:
+            print(f"Web 启动失败：{exc}")
         return
 
     if args.command == "eval":

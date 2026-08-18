@@ -357,6 +357,13 @@ def create_app(
     # models.json (or a friendly 400 if that's also absent).
     app.state.runtime_key = None
 
+    # Local single-process connector (``synapse web``): when set, holds the
+    # {connector_id, browser_token, name} so the web UI can auto-bind without
+    # a manual pairing code. None means no local connector is registered.
+    # ponytail: only meaningful for an unauthenticated local-only server;
+    # the ``web`` command binds 127.0.0.1 and never exposes this publicly.
+    app.state.local_connector = None
+
     # request_id -> [asyncio.Event, approved|None] for in-flight confirmations.
     # The Event lives on the run's event loop; /confirm may arrive on another
     # thread's loop, so the wakeup must go through call_soon_threadsafe.
@@ -524,6 +531,14 @@ def create_app(
     @app.post("/connectors/pair")
     async def create_connector_pairing():
         return connector_broker.create_pairing()
+
+    @app.get("/connectors/local", include_in_schema=False)
+    async def local_connector():
+        """Return the auto-bound local connector, if ``synapse web`` registered one."""
+        local = app.state.local_connector
+        if local is None:
+            return {"connector_id": None}
+        return local
 
     @app.get("/connectors/pair/{pair_id}")
     async def connector_pairing_status(

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from synapse.adapters.library import Synapse
@@ -1052,9 +1052,17 @@ async def run_connector(
     name: str | None = None,
     config_path: str | None = None,
     pair: bool = False,
+    pair_code: str | None = None,
+    on_registered: Callable[[LocalConnection], None] | None = None,
     store_path: Path = CONNECTIONS_PATH,
 ) -> None:
-    """Start a foreground connector; Ctrl+C only disconnects the client."""
+    """Start a foreground connector; Ctrl+C only disconnects the client.
+
+    ``pair_code`` lets a launcher supply the one-time code programmatically
+    (e.g. the ``synapse web`` single-process mode) instead of prompting.
+    ``on_registered`` fires once the connector is bound, carrying the
+    connection so callers can publish local-only credentials to the web UI.
+    """
     if not models_config_path().exists():
         raise ConnectorError(
             f"尚未配置模型。请先运行 synapse，完成本机模型配置：{models_config_path()}"
@@ -1065,8 +1073,7 @@ async def run_connector(
     store = ConnectionStore(store_path)
     connection = store.find(normalized_server, root)
     needs_pair = pair or connection is None
-    pair_code = None
-    if needs_pair:
+    if pair_code is None and needs_pair:
         pair_code = getpass.getpass("请输入网页显示的一次性配对码：")
         if not _normalize_pair_code(pair_code):
             raise ConnectorPairingError("未输入配对码")
@@ -1090,4 +1097,6 @@ async def run_connector(
     changed = await client.register(pair_code)
     if changed or needs_pair:
         store.upsert(connection)
+    if on_registered is not None:
+        on_registered(connection)
     await client.run_forever()
