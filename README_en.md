@@ -69,9 +69,23 @@ Evaluation does not accept a final `SUCCESS` string as proof:
 
 ### Install
 
+Install the SDK for the provider you use (combine with commas to install several):
+
 ```bash
-# Choose a provider: anthropic / openai / deepseek / google / ollama
-pip install -e ".[deepseek]"
+# DeepSeek v4 — uses the Anthropic protocol (api.deepseek.com/anthropic)
+pip install -e ".[deepseek]"     # = anthropic SDK
+
+# Anthropic
+pip install -e ".[anthropic]"
+
+# OpenAI / Ollama — OpenAI-compatible protocol
+pip install -e ".[openai]"
+
+# Google
+pip install -e ".[google]"
+
+# All of them
+pip install -e ".[anthropic,openai,google]"
 ```
 
 ### First run and model configuration

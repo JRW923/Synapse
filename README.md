@@ -73,9 +73,23 @@ Token、工具、授权、Agent、Swarm、过程质量等事件统一进入 Even
 
 ### 安装
 
+按你使用的模型供应商选装对应 SDK（可多个一起装，逗号分隔）：
+
 ```bash
-# 选择一个模型供应商：anthropic / openai / deepseek / google / ollama
-pip install -e ".[deepseek]"
+# DeepSeek v4 —— 走 Anthropic 协议（api.deepseek.com/anthropic）
+pip install -e ".[deepseek]"     # 即 anthropic SDK
+
+# Anthropic
+pip install -e ".[anthropic]"
+
+# OpenAI / Ollama —— OpenAI 兼容协议
+pip install -e ".[openai]"
+
+# Google
+pip install -e ".[google]"
+
+# 全部都要
+pip install -e ".[anthropic,openai,google]"
 ```
 
 ### 首次启动与模型配置
