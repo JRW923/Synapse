@@ -18,7 +18,7 @@ dependencies = [
 # ---- LLM Providers -------------------------------------------------
 anthropic = ["anthropic>=0.40.0"]
 openai     = ["openai>=1.0.0", "tiktoken>=0.7.0"]
-deepseek   = ["openai>=1.0.0", "tiktoken>=0.7.0"]    # OpenAI-compatible API
+deepseek   = ["anthropic>=0.40.0"]                    # Anthropic protocol (api.deepseek.com/anthropic)
 google     = ["google-genai>=2.0"]
 ollama     = ["openai>=1.0.0", "tiktoken>=0.7.0"]    # OpenAI-compatible API
 
