@@ -1680,14 +1680,42 @@ def _has_stored_provider_key(config, provider: str) -> bool:
     )
 
 
-def _save_free_model(api_key) -> None:
+def _check_openrouter_free_model(model: str) -> str | None:
+    """best-effort 校验模型是否仍是 OpenRouter 免费模型。
+
+    网络不可达/被墙/接口变更均视为「跳过校验」返回 None，绝不让配置卡住。
+    命中则返回一句中文警告；仅在用户主动填了自定义模型名时调用。
+    """
+    import json
+    import urllib.request
+
+    try:
+        req = urllib.request.Request("https://openrouter.ai/api/v1/models")
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+    hits = [m for m in data.get("models", data.get("data", [])) if m.get("id") == model]
+    if not hits:
+        return f"模型 {model} 在 OpenRouter 不存在，请检查名称"
+    m = hits[0]
+    pricing = m.get("pricing") or {}
+    is_zero = lambda v: v in (0, "0", "0.0")  # noqa: E731
+    if not (m.get("id", "").endswith(":free") or (is_zero(pricing.get("prompt")) and is_zero(pricing.get("completion")))):
+        return f"模型 {model} 不是免费模型（需付费），请更换"
+    return None
+
+
+def _save_free_model(api_key, model: str | None = None) -> None:
     """Persist the OpenRouter free model as the persisted default."""
     from synapse.config.models import upsert_model
     from synapse.config.schema import OPENROUTER_BASE_URL, OPENROUTER_DEFAULT_MODEL
 
+    # 复用 schema.py 常量，不在此写第二份硬编码；model 为空时回退默认。
+    chosen = model or OPENROUTER_DEFAULT_MODEL
     upsert_model(
         "openrouter",
-        OPENROUTER_DEFAULT_MODEL,
+        chosen,
         api_key=api_key,
         base_url=OPENROUTER_BASE_URL,
         protocol="openai",
@@ -1720,6 +1748,7 @@ def _first_run_wizard(console, config, *, first_run: bool = True) -> None:
         if mode == "1":
             env_var = _PROVIDER_ENV_VARS["openrouter"]
             console.print(f"\n  [{_HINT}]将使用 OpenRouter 免费模型 {OPENROUTER_DEFAULT_MODEL}。[/{_HINT}]")
+            console.print(f"  [{_HINT}]可用免费模型见 https://openrouter.ai/models?q=free[/{_HINT}]")
             console.print(f"  [{_HINT}]需要 OpenRouter API Key（在 openrouter.ai 免费注册获取）。[/{_HINT}]")
             if _os.environ.get(env_var):
                 api_key = None
@@ -1730,9 +1759,14 @@ def _first_run_wizard(console, config, *, first_run: bool = True) -> None:
                     if api_key:
                         break
                     console.print("  [red]API key 不能为空；也可以先设置对应环境变量。[/red]")
-            _save_free_model(api_key)
+            model = console.input(f"  模型 ID（可选，回车用默认 {OPENROUTER_DEFAULT_MODEL}）: ").strip()
+            if model:
+                warn = _check_openrouter_free_model(model)
+                if warn:
+                    console.print(f"  [yellow]{warn}[/{_HINT}]")
+            _save_free_model(api_key, model=model or None)
             console.print(f"\n  [green]已保存到 {models_config_path()}[/green]")
-            console.print(f"  [dim]默认模型：openrouter/{OPENROUTER_DEFAULT_MODEL}[/dim]\n")
+            console.print(f"  [dim]默认模型：openrouter/{model or OPENROUTER_DEFAULT_MODEL}[/dim]\n")
             return
         console.print()
 
@@ -1844,6 +1878,7 @@ def _first_run_wizard_plain(config, *, first_run: bool = True) -> None:
         if mode == "1":
             env_var = _PROVIDER_ENV_VARS["openrouter"]
             print(f"\n将使用 OpenRouter 免费模型 {OPENROUTER_DEFAULT_MODEL}。")
+            print(f"可用免费模型见 https://openrouter.ai/models?q=free")
             print(f"需要 OpenRouter API Key（在 openrouter.ai 免费注册获取）。")
             if _os.environ.get(env_var):
                 api_key = None
@@ -1854,9 +1889,14 @@ def _first_run_wizard_plain(config, *, first_run: bool = True) -> None:
                     if api_key:
                         break
                     print("API key 不能为空；也可以先设置对应环境变量。")
-            _save_free_model(api_key)
+            model = input(f"模型 ID（可选，回车用默认 {OPENROUTER_DEFAULT_MODEL}）: ").strip()
+            if model:
+                warn = _check_openrouter_free_model(model)
+                if warn:
+                    print(f"警告：{warn}")
+            _save_free_model(api_key, model=model or None)
             print(f"\n已保存到 {models_config_path()}")
-            print(f"默认模型：openrouter/{OPENROUTER_DEFAULT_MODEL}\n")
+            print(f"默认模型：openrouter/{model or OPENROUTER_DEFAULT_MODEL}\n")
             return
         print()
 
