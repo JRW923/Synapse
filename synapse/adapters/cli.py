@@ -47,6 +47,34 @@ else:
         except UnicodeDecodeError:
             return ""
 
+def _write_stderr_text(text: str) -> None:
+    """向 stderr 写出文本，正确处理控制台编码（杜绝 GBK 终端中文乱码）。
+
+    Windows 控制台字节代码页常为 GBK(936)，与 sys.stderr.encoding 报告的不
+    一致，裸写 UTF-8 字节会被当 GBK 解码成乱码。故 Windows 直接用
+    WriteConsoleW 写宽字符，绕过字节代码页；失败时降级到文本流/原始字节。
+    """
+    if sys.platform == "win32":
+        try:
+            kernel32 = _ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)  # STD_ERROR_HANDLE
+            if handle and handle != -1:
+                buf = _ctypes.create_unicode_buffer(text)
+                written = _ctypes.c_uint()
+                if kernel32.WriteConsoleW(handle, buf, len(text), _ctypes.byref(written), None):
+                    return
+        except Exception:
+            pass
+    try:
+        sys.stderr.write(text)
+        sys.stderr.flush()
+    except Exception:
+        try:
+            _os.write(2, text.encode(sys.stderr.encoding or "utf-8", "replace"))
+        except Exception:
+            pass
+
+
 # ── Two-step Ctrl+C (double-press to exit) ───────────────────────────
 # Python's ``signal.signal(SIGINT, ...)`` on Windows is unreliable
 # because ``GenerateConsoleCtrlEvent`` / ``os.kill`` can terminate the
@@ -72,10 +100,7 @@ if sys.platform == "win32":
             _ctypes.windll.kernel32.ExitProcess(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        # 用控制台实际编码写出：Windows/GBK 控制台上若写死 UTF-8 字节会被当
-        # GBK 解码成乱码（鍐嶆寜…）。sys.stderr.encoding 即控制台代码页。
-        _os.write(2, "\n  再按一次 Ctrl+C 强制退出。\n".encode(
-            sys.stderr.encoding or "utf-8", "replace"))
+        _write_stderr_text("\n  再按一次 Ctrl+C 强制退出。\n")
         # FALSE — let Python's SIGINT machinery run so the per-task handler
         # (request_cancel) fires. Returning TRUE swallowed the event, so a
         # single Ctrl+C never cancelled a task on Windows.
@@ -91,8 +116,7 @@ else:
             _os._exit(0)
         _last_ctrl_c = now
         _ctrl_c_pressed = True
-        _os.write(2, "\n  再按一次 Ctrl+C 退出。\n".encode(
-            sys.stderr.encoding or "utf-8", "replace"))
+        _write_stderr_text("\n  再按一次 Ctrl+C 退出。\n")
 
     _signal.signal(_signal.SIGINT, _unix_sigint_handler)
 
