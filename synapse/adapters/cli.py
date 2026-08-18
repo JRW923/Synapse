@@ -925,6 +925,7 @@ def main():
                 config_path=args.config,
                 pair_code=pairing["pair_code"],
                 on_registered=_on_registered,
+                fresh=True,
             ))
 
             def _on_sigint():

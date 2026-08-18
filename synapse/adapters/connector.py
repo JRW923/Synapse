@@ -1054,6 +1054,7 @@ async def run_connector(
     pair: bool = False,
     pair_code: str | None = None,
     on_registered: Callable[[LocalConnection], None] | None = None,
+    fresh: bool = False,
     store_path: Path = CONNECTIONS_PATH,
 ) -> None:
     """Start a foreground connector; Ctrl+C only disconnects the client.
@@ -1071,7 +1072,10 @@ async def run_connector(
     root = resolve_workspace(workspace)
     display_name = _display_name(name or root.name or "workspace")
     store = ConnectionStore(store_path)
-    connection = store.find(normalized_server, root)
+    # ``synapse web`` spins up a brand-new in-process broker every run, so any
+    # credentials persisted from a previous run belong to a dead broker and
+    # would make register() fail with 403. Force a fresh registration there.
+    connection = None if fresh else store.find(normalized_server, root)
     needs_pair = pair or connection is None
     if pair_code is None and needs_pair:
         pair_code = getpass.getpass("请输入网页显示的一次性配对码：")
@@ -1095,7 +1099,9 @@ async def run_connector(
         config_path=_discover_config_path(root, config_path),
     )
     changed = await client.register(pair_code)
-    if changed or needs_pair:
+    # Don't persist credentials for an ephemeral broker: they can never
+    # reconnect and would only poison the next run's register() into a 403.
+    if not fresh and (changed or needs_pair):
         store.upsert(connection)
     if on_registered is not None:
         on_registered(connection)

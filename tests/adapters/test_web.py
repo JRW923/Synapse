@@ -148,3 +148,45 @@ def test_web_command_without_models_exits_cleanly(tmp_path: Path):
 
     assert proc.returncode is not None
     assert "尚未配置模型" in out
+
+
+def test_web_command_ignores_stale_saved_connection(tmp_path: Path):
+    # 回归：connections.json 里残留了上一次运行（已销毁的内存 broker）的
+    # connector_id/device_token。web 模式每次都是全新 broker，旧凭据必然
+    # 对不上，register 会回 403。web 命令必须忽略落盘凭据、用本次新建的
+    # 配对码重新注册，否则重复运行 synapse web 必现 403。
+    home = tmp_path / "home_stale"
+    _temp_models_json(home)
+    workspace = tmp_path / "ws3"
+    workspace.mkdir()
+    port = _free_port()
+    server = f"http://127.0.0.1:{port}"
+    (home / ".synapse").mkdir(parents=True, exist_ok=True)
+    (home / ".synapse" / "connections.json").write_text(json.dumps({
+        "version": 1,
+        "connections": [{
+            "server": server,
+            "workspace": str(workspace),
+            "connector_id": "deadbeef" * 4,
+            "device_token": "stale-token",
+            "name": "ws3",
+        }],
+    }), encoding="utf-8")
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "synapse", "web",
+         "--workspace", str(workspace), "--port", str(port)],
+        env={**os.environ, "HOME": str(home), "BROWSER": "/bin/true"},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        bound = _wait_for_local_connector(port)
+        assert bound is not None, "残留凭据不应导致 403，web 应忽略它并重新注册"
+        assert bound["connector_id"]
+    finally:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
