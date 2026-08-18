@@ -371,6 +371,20 @@
     </div>
 
     <hr class="sep">
+    <div id="cfg-confirm">
+      <div class="side-title">确认模式</div>
+      <div class="hint">需要审批的工具调用（写文件 / 执行命令等）如何处理。</div>
+      <label>确认模式</label>
+      <select id="cfg-confirm-mode">
+        <option value="ask">每次询问（仅重要操作提示）</option>
+        <option value="auto">全部允许（不再逐个点击）</option>
+      </select>
+      <div class="row">
+        <button onclick="closeSettings()">关闭</button>
+        <button class="save" onclick="applyConfirmMode()">应用</button>
+      </div>
+    </div>
+    <hr class="sep">
     <div id="cfg-switch">
       <div class="side-title">本会话运行时设置</div>
       <div id="cfg-switch-body">
@@ -742,7 +756,24 @@ function openSettings() {
     .then(r => r.json()).then(st => {
       if (st && st.mode) $("cfg-mode").value = st.mode;
     }).catch(() => {});
+  // 预填确认模式
+  fetch("/confirm-mode").then(r => r.json()).then(d => {
+    if (d && d.mode) $("cfg-confirm-mode").value = d.mode;
+  }).catch(() => {});
   showChoice();
+}
+
+async function applyConfirmMode() {
+  const mode = $("cfg-confirm-mode").value;
+  try {
+    const res = await fetch("/confirm-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    if (!res.ok) { alert("确认模式保存失败（" + res.status + "）"); return; }
+    closeSettings();
+  } catch (e) { alert("确认模式保存失败：" + e.message); }
 }
 function closeSettings() {
   $("settings").classList.remove("show");

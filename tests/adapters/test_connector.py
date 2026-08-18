@@ -120,6 +120,7 @@ async def test_broker_relays_command_events_and_completion():
         "job_id": job.id,
         "session_id": session_id,
         "task": "add a focused test",
+        "confirm_mode": "ask",
     }
 
     await broker.publish_events(
@@ -176,6 +177,7 @@ async def test_broker_relays_confirm_to_browser_and_resolves_via_command_channel
         "job_id": job.id,
         "session_id": session_id,
         "task": "delete a file",
+        "confirm_mode": "ask",
     }
     # 确认事件经 publish_events 透传并登记 request_id 归属
     await broker.publish_events(
@@ -578,7 +580,7 @@ async def test_connector_forwards_safe_tool_params_summary(monkeypatch, tmp_path
 
     workspace = tmp_path / "project"
     workspace.mkdir()
-    monkeypatch.setattr(connector_module, "CONNECTOR_SESSION_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(connector_module, "DEFAULT_SESSION_DIR", tmp_path / "sessions")
     bus = EventBus()
     forwarded: list[tuple[str, dict]] = []
 

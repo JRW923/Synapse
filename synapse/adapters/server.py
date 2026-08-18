@@ -173,6 +173,12 @@ class StopRequest(BaseModel):
     connector_token: str | None = None
 
 
+class ConfirmModeRequest(BaseModel):
+    """Global confirmation policy for connector runs."""
+
+    mode: str  # "ask" | "auto"
+
+
 class SessionConfig(BaseModel):
     """Per-session runtime override set from the web UI.
 
@@ -399,6 +405,10 @@ def create_app(
     confirm_waiters: dict[str, list] = {}
     app.state.confirm_waiters = confirm_waiters
 
+    # 全局确认模式:ask=每次询问(仅确认受限操作才弹窗);auto=全部允许。
+    # 随 run 命令下发给本地 connector,由 confirm 回调兑现。
+    app.state.confirm_mode = "ask"
+
     def _synapse_for(session_id: str) -> Synapse:
         """Per-session facade; an injected instance (tests) is always reused."""
         if synapse_instance is not None:
@@ -518,6 +528,7 @@ def create_app(
                 browser_token=req.connector_token,
                 task=req.task,
                 session_id=session_id,
+                confirm_mode=app.state.confirm_mode,
             )
         except ConnectorError as exc:
             _raise_connector_error(exc)
@@ -554,6 +565,20 @@ def create_app(
             "api_key": cfg.api_key.strip(),
         }
         return {"ok": True, "provider": cfg.provider}
+
+    # ---- GET/POST /confirm-mode — 浏览器确认策略 -------------------------
+    # ask=每次询问(仅确认受限操作才弹窗);auto=全部允许。全局生效。
+
+    @app.get("/confirm-mode")
+    async def get_confirm_mode():
+        return {"mode": app.state.confirm_mode}
+
+    @app.post("/confirm-mode")
+    async def set_confirm_mode(req: ConfirmModeRequest):
+        if req.mode not in ("ask", "auto"):
+            raise HTTPException(status_code=422, detail="mode 仅支持 ask / auto")
+        app.state.confirm_mode = req.mode
+        return {"ok": True, "mode": req.mode}
 
     # ---- POST /confirm/{request_id} — answer an interactive approval ------
 
@@ -825,6 +850,9 @@ def create_app(
                     req.task, session=session,
                     confirm_callback=_make_confirm_bridge(queue.put),
                 )
+                report = synapse.get_citation_report()
+                if report is not None:
+                    session.metadata["citation_report"] = report
                 sessions[session.id] = session
                 with _swallow("run/stream: session save"):
                     session.save(DEFAULT_SESSION_DIR)
@@ -898,6 +926,11 @@ def create_app(
     async def get_session(session_id: str):
         session = sessions.get(session_id)
         if session is None:
+            # connector 会话只在磁盘上,不在进程内存缓存
+            p = DEFAULT_SESSION_DIR / f"{session_id}.json"
+            if p.exists():
+                session = Session.load(p)
+        if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
         return SessionInfo(
             id=session.id,
@@ -911,6 +944,10 @@ def create_app(
     @app.get("/sessions/{session_id}/messages", response_model=list[MessageResponse])
     async def get_session_messages(session_id: str):
         session = sessions.get(session_id)
+        if session is None:
+            p = DEFAULT_SESSION_DIR / f"{session_id}.json"
+            if p.exists():
+                session = Session.load(p)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
         return [
@@ -996,11 +1033,13 @@ def create_app(
 
     @app.get("/sessions/{session_id}/context-report")
     async def get_context_report(session_id: str):
-        synapse = _synapse_for(session_id)
-        report = synapse.get_citation_report()
-        if report is None:
+        # 报告在运行后持久化到 session.metadata,这里读磁盘而非新建 synapse
+        # (新建实例没有 citation 追踪器,会永远返回空)
+        path = DEFAULT_SESSION_DIR / f"{session_id}.json"
+        if not path.exists():
             return {"blocks": []}
-        return report
+        session = Session.load(path)
+        return session.metadata.get("citation_report") or {"blocks": []}
 
     # ---- GET /todos — 待办清单 (WebUI 侧栏) -------------------------------
 

@@ -30,7 +30,7 @@ from urllib.parse import urlsplit
 from synapse.adapters.library import Synapse
 from synapse.config.models import models_config_path
 from synapse.core.events import EventBus
-from synapse.core.session import Session
+from synapse.core.session import DEFAULT_SESSION_DIR, Session
 from synapse.protocols.events import EventType
 from synapse.protocols.planner import Planner
 
@@ -44,7 +44,6 @@ COMPLETED_JOB_TTL_SECONDS = 5 * 60
 # ponytail: 浏览器确认超时(秒)。超时即拒绝,避免危险调用卡死整个任务。
 CONFIRM_TIMEOUT_S = 300.0
 CONNECTIONS_PATH = Path.home() / ".synapse" / "connections.json"
-CONNECTOR_SESSION_DIR = Path.home() / ".synapse" / "connector-sessions"
 
 
 class ConnectorError(RuntimeError):
@@ -288,6 +287,7 @@ class ConnectorBroker:
         browser_token: str,
         task: str,
         session_id: str,
+        confirm_mode: str = "ask",
     ) -> ConnectorJob:
         self._sweep()
         record = self._authenticate_browser(connector_id, browser_token)
@@ -313,6 +313,7 @@ class ConnectorBroker:
             "job_id": job.id,
             "session_id": session_id,
             "task": task,
+            "confirm_mode": confirm_mode,
         })
         return job
 
@@ -788,11 +789,16 @@ def _safe_tool_params_summary(params: Any) -> dict[str, str]:
     return summary
 
 
-def _make_confirm(event_queue: asyncio.Queue, pending: dict) -> Callable:
+def _make_confirm(event_queue: asyncio.Queue, pending: dict, mode: str = "ask") -> Callable:
     """Browser confirm bridge: push a confirm event onto the SSE stream and
-    block until the answer arrives over the broker command channel."""
+    block until the answer arrives over the broker command channel.
+
+    mode="auto" 直接放行(全权同意);mode="ask" 才弹窗等浏览器回答。
+    """
 
     async def _confirm(request) -> bool:
+        if mode == "auto":
+            return True
         request_id = uuid.uuid4().hex
         params = getattr(request, "tool_params", {}) or {}
         item = {
@@ -917,7 +923,9 @@ class ConnectorClient:
             await self._complete_error(job_id, session_id, "本地 Connector 正在执行另一个任务")
             return
         self._active_job_id = job_id
-        self._active_task = asyncio.create_task(self._run_job(job_id, session_id, task))
+        self._active_task = asyncio.create_task(
+            self._run_job(job_id, session_id, task, str(command.get("confirm_mode", "ask"))),
+        )
 
     def _cancel_active_job(self, job_id: str) -> None:
         if job_id != self._active_job_id or self._active_task is None:
@@ -963,7 +971,7 @@ class ConnectorClient:
         cached = self._sessions.get(session_id)
         if cached is not None:
             return cached
-        path = CONNECTOR_SESSION_DIR / f"{session_id}.json"
+        path = DEFAULT_SESSION_DIR / f"{session_id}.json"
         if path.exists():
             session = Session.load(path)
         else:
@@ -971,7 +979,9 @@ class ConnectorClient:
         self._sessions[session_id] = session
         return session
 
-    async def _run_job(self, job_id: str, session_id: str, task: str) -> None:
+    async def _run_job(
+        self, job_id: str, session_id: str, task: str, confirm_mode: str = "ask",
+    ) -> None:
         self._pending_confirms.clear()
         event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(EVENT_QUEUE_SIZE)
         sender = asyncio.create_task(self._forward_events(job_id, event_queue))
@@ -1009,9 +1019,16 @@ class ConnectorClient:
             result = await synapse.run(
                 task,
                 session=session,
-                confirm_callback=_make_confirm(event_queue, self._pending_confirms),
+                confirm_callback=_make_confirm(
+                    event_queue, self._pending_confirms, confirm_mode,
+                ),
             )
-            session.save(CONNECTOR_SESSION_DIR)
+            # 持久化上下文引用报告,供 /sessions/{id}/context-report 读取
+            # (端点读磁盘 session,不能依赖新建 synapse 的内存追踪器)
+            report = synapse.get_citation_report()
+            if report is not None:
+                session.metadata["citation_report"] = report
+            session.save(DEFAULT_SESSION_DIR)
             payload = self._result_payload(result, synapse, session_id)
         except asyncio.CancelledError:
             payload = _error_result(session_id, "本地 Connector 已停止任务")

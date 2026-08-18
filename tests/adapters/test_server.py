@@ -537,12 +537,41 @@ def test_todos_endpoint(client, monkeypatch, tmp_path):
     assert r.json() == []
 
 
-def test_context_report_endpoint(client):
+def test_context_report_endpoint(client, tmp_path):
+    # 不存在的会话返回空报告
+    r = client.get("/sessions/missing/context-report")
+    assert r.status_code == 200
+    assert r.json()["blocks"] == []
+
+    # 报告在运行后持久化到 session.metadata,端点从磁盘读取
+    (tmp_path / "abc.json").write_text(
+        __import__("json").dumps({
+            "id": "abc",
+            "metadata": {"citation_report": {"blocks": [{
+                "zone": "core", "id": "x", "source": "file", "priority": 1,
+                "tokens": 10, "usage": 1, "cited": 0, "citation_rate": "0/0",
+            }]}},
+            "messages": [],
+        }),
+        encoding="utf-8",
+    )
     r = client.get("/sessions/abc/context-report")
     assert r.status_code == 200
     blocks = r.json()["blocks"]
     assert isinstance(blocks, list) and blocks
     assert blocks[0]["zone"] == "core"
+
+
+def test_confirm_mode_endpoint(client):
+    # 默认 ask
+    assert client.get("/confirm-mode").json()["mode"] == "ask"
+    # 切换到 auto
+    assert client.post("/confirm-mode", json={"mode": "auto"}).json()["mode"] == "auto"
+    assert client.get("/confirm-mode").json()["mode"] == "auto"
+    # 非法 mode 被拒
+    assert client.post("/confirm-mode", json={"mode": "nope"}).status_code == 422
+    # 切回 ask 不影响其他状态
+    assert client.post("/confirm-mode", json={"mode": "ask"}).status_code == 200
 
 
 def test_session_config_switch_stores_mode_and_validates():
