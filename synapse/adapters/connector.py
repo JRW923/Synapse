@@ -41,6 +41,8 @@ POLL_TIMEOUT_SECONDS = 25
 EVENT_BATCH_SIZE = 20
 EVENT_QUEUE_SIZE = 256
 COMPLETED_JOB_TTL_SECONDS = 5 * 60
+# ponytail: 浏览器确认超时(秒)。超时即拒绝,避免危险调用卡死整个任务。
+CONFIRM_TIMEOUT_S = 300.0
 CONNECTIONS_PATH = Path.home() / ".synapse" / "connections.json"
 CONNECTOR_SESSION_DIR = Path.home() / ".synapse" / "connector-sessions"
 
@@ -179,6 +181,8 @@ class ConnectorBroker:
         self._connectors: dict[str, _ConnectorRecord] = {}
         self._pairings: dict[str, _PairingRecord] = {}
         self._jobs: dict[str, ConnectorJob] = {}
+        # request_id -> connector_id:浏览器确认请求的归属,answer 经命令通道回传
+        self._pending_confirms: dict[str, str] = {}
 
     def create_pairing(self) -> dict[str, str]:
         self._sweep()
@@ -325,9 +329,15 @@ class ConnectorBroker:
         if job.completion.done():
             raise ConnectorJobError("任务已结束")
         for item in events:
-            event = item.get("event") if isinstance(item, dict) else None
+            if not isinstance(item, dict):
+                continue
+            event = item.get("event")
             if isinstance(event, dict):
                 self._enqueue_event(job, {"type": "event", "event": event})
+            elif item.get("type") == "confirm" and isinstance(item.get("request_id"), str):
+                # 浏览器确认:登记 request_id→connector,answer 由命令通道回传
+                self._pending_confirms[item["request_id"]] = job.connector_id
+                self._enqueue_event(job, item)
 
     async def complete_job(
         self,
@@ -368,13 +378,49 @@ class ConnectorBroker:
             except asyncio.TimeoutError:
                 await self._fail_if_offline(job)
 
-    async def cancel_job(self, job: ConnectorJob) -> None:
+    async def cancel_job(
+        self,
+        job: ConnectorJob,
+        reason: str = "网页已断开，已取消本地任务",
+        *,
+        stopped: bool = False,
+    ) -> None:
         if job.completion.done():
             return
         record = self._connectors.get(job.connector_id)
         if record is not None and record.active_job_id == job.id:
             await record.commands.put({"type": "cancel", "job_id": job.id})
-        await self._fail_job(job.id, "网页已断开，已取消本地任务")
+        if stopped:
+            # 用户主动停止:作为正常完成返回,而非错误
+            payload = _error_result(job.session_id, reason)
+            payload["status"] = "stopped"
+            self._finish_job(job, payload, {"type": "done", "result": payload})
+        else:
+            await self._fail_job(job.id, reason)
+
+    def active_job_for(
+        self, connector_id: str, browser_token: str,
+    ) -> ConnectorJob | None:
+        """Return the connector's in-flight job, or None when idle."""
+        record = self._authenticate_browser(connector_id, browser_token)
+        if record.active_job_id is None:
+            return None
+        return self._jobs.get(record.active_job_id)
+
+    async def resolve_confirm(self, request_id: str, approve: bool) -> bool:
+        """Relay a browser confirm answer back to the connector over the command channel."""
+        connector_id = self._pending_confirms.pop(request_id, None)
+        if connector_id is None:
+            return False
+        record = self._connectors.get(connector_id)
+        if record is None:
+            return False
+        await record.commands.put({
+            "type": "confirm_result",
+            "request_id": request_id,
+            "approve": bool(approve),
+        })
+        return True
 
     async def disconnect(self, connector_id: str, device_token: str) -> None:
         record = self._authenticate_device(connector_id, device_token)
@@ -742,6 +788,38 @@ def _safe_tool_params_summary(params: Any) -> dict[str, str]:
     return summary
 
 
+def _make_confirm(event_queue: asyncio.Queue, pending: dict) -> Callable:
+    """Browser confirm bridge: push a confirm event onto the SSE stream and
+    block until the answer arrives over the broker command channel."""
+
+    async def _confirm(request) -> bool:
+        request_id = uuid.uuid4().hex
+        params = getattr(request, "tool_params", {}) or {}
+        item = {
+            "type": "confirm",
+            "request_id": request_id,
+            "request": {
+                "tool_name": getattr(request, "tool_name", "tool"),
+                "risk_level": getattr(request, "risk_level", ""),
+                "tool_params": _safe_tool_params_summary(params),
+            },
+        }
+        try:
+            event_queue.put_nowait(item)
+        except asyncio.QueueFull:
+            await event_queue.put(item)
+        waiter = (asyncio.Event(), [False])
+        pending[request_id] = waiter
+        try:
+            await asyncio.wait_for(waiter[0].wait(), timeout=CONFIRM_TIMEOUT_S)
+            return bool(waiter[1][0])
+        except asyncio.TimeoutError:
+            pending.pop(request_id, None)
+            return False
+
+    return _confirm
+
+
 class ConnectorClient:
     """Long-polling client that runs hosted jobs in one local Synapse runtime."""
 
@@ -762,6 +840,8 @@ class ConnectorClient:
         self._sessions: dict[str, Session] = {}
         self._active_task: asyncio.Task[None] | None = None
         self._active_job_id: str | None = None
+        # request_id -> (asyncio.Event, [answer]);浏览器确认等待器,由命令通道唤醒
+        self._pending_confirms: dict[str, tuple[asyncio.Event, list[bool]]] = {}
 
     async def register(self, pair_code: str | None = None) -> bool:
         payload: dict[str, Any] = {"workspace_name": self.connection.name}
@@ -809,6 +889,11 @@ class ConnectorClient:
                     await self._start_job(command)
                 elif kind == "cancel":
                     self._cancel_active_job(str(command.get("job_id", "")))
+                elif kind == "confirm_result":
+                    self._resolve_confirm(
+                        str(command.get("request_id", "")),
+                        bool(command.get("approve", False)),
+                    )
         finally:
             if self._active_task is not None and not self._active_task.done():
                 self._active_task.cancel()
@@ -843,6 +928,14 @@ class ConnectorClient:
                 if hasattr(planner, "request_cancel"):
                     planner.request_cancel()
         self._active_task.cancel()
+
+    def _resolve_confirm(self, request_id: str, approve: bool) -> None:
+        waiter = self._pending_confirms.pop(request_id, None)
+        if waiter is None:
+            return
+        event, answer = waiter
+        answer[0] = approve
+        event.set()
 
     def _get_synapse(self) -> Synapse:
         if self._synapse is None:
@@ -879,6 +972,7 @@ class ConnectorClient:
         return session
 
     async def _run_job(self, job_id: str, session_id: str, task: str) -> None:
+        self._pending_confirms.clear()
         event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(EVENT_QUEUE_SIZE)
         sender = asyncio.create_task(self._forward_events(job_id, event_queue))
         subscriptions: list[tuple[str, Any]] = []
@@ -915,7 +1009,7 @@ class ConnectorClient:
             result = await synapse.run(
                 task,
                 session=session,
-                confirm_callback=self._confirm_local,
+                confirm_callback=_make_confirm(event_queue, self._pending_confirms),
             )
             session.save(CONNECTOR_SESSION_DIR)
             payload = self._result_payload(result, synapse, session_id)
@@ -994,20 +1088,6 @@ class ConnectorClient:
             finally:
                 for _ in range(consumed):
                     queue.task_done()
-
-    async def _confirm_local(self, request) -> bool:
-        params = getattr(request, "tool_params", {}) or {}
-        detail = json.dumps(params, ensure_ascii=False, default=str)
-        prompt = (
-            f"\n[本地确认] {getattr(request, 'tool_name', 'tool')} "
-            f"[{getattr(request, 'risk_level', '')}]\n{detail}\n"
-            "批准此操作？[y/N] "
-        )
-        try:
-            answer = await asyncio.to_thread(input, prompt)
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
 
     def _result_payload(self, result, synapse: Synapse, session_id: str) -> dict[str, Any]:
         metrics = result.metrics

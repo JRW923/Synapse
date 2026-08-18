@@ -158,6 +158,75 @@ async def test_broker_relays_command_events_and_completion():
 
 
 @pytest.mark.asyncio
+async def test_broker_relays_confirm_to_browser_and_resolves_via_command_channel():
+    broker = ConnectorBroker()
+    pairing, registration = _pair_connector(broker)
+    connector_id = registration["connector_id"]
+    session_id = str(uuid.uuid4())
+
+    job = await broker.start_job(
+        connector_id=connector_id,
+        browser_token=pairing["browser_token"],
+        task="delete a file",
+        session_id=session_id,
+    )
+    # start_job 已把 run 命令放进队列,先取走(模拟 connector 开始执行)
+    assert await broker.poll(connector_id, registration["device_token"]) == {
+        "type": "run",
+        "job_id": job.id,
+        "session_id": session_id,
+        "task": "delete a file",
+    }
+    # 确认事件经 publish_events 透传并登记 request_id 归属
+    await broker.publish_events(
+        connector_id=connector_id,
+        device_token=registration["device_token"],
+        job_id=job.id,
+        events=[{
+            "type": "confirm",
+            "request_id": "r1",
+            "request": {"tool_name": "write_file", "risk_level": "high"},
+        }],
+    )
+    assert await job.events.get() == {
+        "type": "confirm",
+        "request_id": "r1",
+        "request": {"tool_name": "write_file", "risk_level": "high"},
+    }
+    # 浏览器批准后,answer 经命令通道回传
+    assert await broker.resolve_confirm("r1", True) is True
+    assert await broker.poll(connector_id, registration["device_token"]) == {
+        "type": "confirm_result",
+        "request_id": "r1",
+        "approve": True,
+    }
+    # 未知 request_id 不应报错
+    assert await broker.resolve_confirm("nope", True) is False
+
+
+@pytest.mark.asyncio
+async def test_broker_stop_delivers_done_with_stopped_status():
+    broker = ConnectorBroker()
+    pairing, registration = _pair_connector(broker)
+    connector_id = registration["connector_id"]
+    session_id = str(uuid.uuid4())
+    job = await broker.start_job(
+        connector_id=connector_id,
+        browser_token=pairing["browser_token"],
+        task="long task",
+        session_id=session_id,
+    )
+    assert broker.active_job_for(connector_id, pairing["browser_token"]) is job
+    await broker.cancel_job(job, reason="已在网页端手动停止", stopped=True)
+    assert job.completion.done()
+    result = await job.completion
+    assert result["status"] == "stopped"
+    assert await job.events.get() == {"type": "done", "result": result}
+    # 停止后 connector 已空闲
+    assert broker.active_job_for(connector_id, pairing["browser_token"]) is None
+
+
+@pytest.mark.asyncio
 async def test_broker_rejects_offline_and_busy_connectors():
     broker = ConnectorBroker(offline_seconds=10)
     pairing, registration = _pair_connector(broker)

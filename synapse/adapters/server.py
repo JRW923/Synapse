@@ -166,6 +166,13 @@ class ConfirmDecision(BaseModel):
     approve: bool
 
 
+class StopRequest(BaseModel):
+    """Browser-initiated interrupt for a local Connector run."""
+
+    connector_id: str | None = None
+    connector_token: str | None = None
+
+
 class SessionConfig(BaseModel):
     """Per-session runtime override set from the web UI.
 
@@ -553,12 +560,16 @@ def create_app(
     @app.post("/confirm/{request_id}")
     async def confirm(request_id: str, decision: ConfirmDecision):
         waiter = confirm_waiters.get(request_id)
-        if waiter is None:
-            raise HTTPException(status_code=404, detail="No pending confirmation")
-        waiter[1] = decision.approve
-        event, _, loop = waiter
-        loop.call_soon_threadsafe(event.set)
-        return {"ok": True}
+        if waiter is not None:
+            waiter[1] = decision.approve
+            event, _, loop = waiter
+            loop.call_soon_threadsafe(event.set)
+            return {"ok": True}
+        # 本地 connector 模式:确认请求由 connector 进程持有,经 broker 命令通道转发
+        broker = app.state.connector_broker
+        if broker is not None and await broker.resolve_confirm(request_id, decision.approve):
+            return {"ok": True}
+        raise HTTPException(status_code=404, detail="No pending confirmation")
 
     @app.on_event("shutdown")
     async def _shutdown_experiments() -> None:
@@ -864,6 +875,23 @@ def create_app(
 
         return StreamingResponse(_event_stream(), media_type="text/event-stream")
 
+    # ---- POST /run/stop — browser-initiated interrupt -------------------
+    # 本地 connector 模式:取消对应 connector 的活跃任务(命令通道转发到本地进程)
+
+    @app.post("/run/stop")
+    async def stop_run(req: StopRequest):
+        broker = app.state.connector_broker
+        if not req.connector_id or not req.connector_token:
+            raise HTTPException(status_code=422, detail="缺少 connector 凭据")
+        try:
+            job = broker.active_job_for(req.connector_id, req.connector_token)
+        except ConnectorError as exc:
+            _raise_connector_error(exc)
+        if job is None or job.completion.done():
+            return {"ok": True, "cancelled": False}
+        await broker.cancel_job(job, reason="已在网页端手动停止", stopped=True)
+        return {"ok": True, "cancelled": True}
+
     # ---- GET /sessions/{session_id} --------------------------------------
 
     @app.get("/sessions/{session_id}", response_model=SessionInfo)
@@ -896,6 +924,9 @@ def create_app(
     async def list_sessions():
         out = []
         for s in Session.list_sessions():
+            # 过滤空会话:未持久化消息历史的会话无法恢复,留着只会刷屏
+            if not s.messages:
+                continue
             path = DEFAULT_SESSION_DIR / f"{s.id}.json"
             mtime = path.stat().st_mtime if path.exists() else 0
             out.append({

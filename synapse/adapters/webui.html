@@ -316,6 +316,7 @@
       <textarea id="input" rows="1" placeholder="输入任务，Enter 发送，Shift+Enter 换行"
         onkeydown="return keydown(event)" oninput="grow(this)"></textarea>
       <button id="sendbtn">发送</button>
+      <button id="stopbtn" type="button" onclick="stopTask()" style="display:none">停止</button>
     </form>
   </main>
 </div>
@@ -410,6 +411,7 @@
 <script>
 let sessionId = null, busy = false, spinner = null, elapsed = null, timer = null;
 let pendingConfirm = null;
+let abortController = null;
 let connectorId = null, connectorToken = null, currentPairing = null;
 let liveState = null;
 const $ = id => document.getElementById(id);
@@ -1079,6 +1081,7 @@ async function send(e) {
   const text = $("input").value.trim();
   if (!text || busy) return false;
   busy = true; $("sendbtn").disabled = true;
+  $("stopbtn").style.display = "inline-block";
   addMsg("user", text);
   $("input").value = ""; grow($("input"));
   resetLiveState();
@@ -1110,6 +1113,7 @@ async function send(e) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(request),
+      signal: (abortController = new AbortController()).signal,
     });
     if (!res.ok) {
       let msg = "模型未配置，请先点击「设置」填入你的 API Key。";
@@ -1134,7 +1138,11 @@ async function send(e) {
       }
     }
   } catch (err) {
-    addMsg("agent", "连接错误：" + err.message);
+    if (err && err.name === "AbortError") {
+      addMsg("agent", "已停止任务。");
+    } else {
+      addMsg("agent", "连接错误：" + err.message);
+    }
   }
   stopLive();
   busy = false; $("sendbtn").disabled = false;
@@ -1255,6 +1263,28 @@ function stopLive() {
   $("live").style.display = "none";
   $("confirm").style.display = "none";
   pendingConfirm = null;
+  $("sendbtn").disabled = false;
+  $("stopbtn").style.display = "none";
+  abortController = null;
+}
+
+async function stopTask() {
+  if (!busy) return;
+  if (abortController) {
+    try { abortController.abort(); } catch (e) {}
+  }
+  if (connectorId && connectorToken) {
+    try {
+      await fetch("/run/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          connector_id: connectorId,
+          connector_token: connectorToken,
+        }),
+      });
+    } catch (e) { /* 服务端取消会经由 SSE 结束流;忽略网络抖动 */ }
+  }
 }
 
 // 首次进入即加载侧栏
