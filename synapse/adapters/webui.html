@@ -142,6 +142,12 @@
     font-weight: 600; border: 1px solid var(--border); background: none; color: var(--text); }
   #settings button.save { background: var(--brand); color: #0d1117; border: none; }
   #settings .err { color: var(--err); font-size: 12px; min-height: 16px; margin-top: 8px; }
+  #settings .choice-btn { display: block; width: 100%; text-align: left; padding: 10px 12px;
+    margin-bottom: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); cursor: pointer; }
+  #settings .choice-btn:hover { border-color: var(--brand); }
+  #settings .choice-btn .choice-title { font-weight: 600; font-size: 14px; }
+  #settings .choice-btn .choice-desc { color: var(--dim); font-size: 12px; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -187,18 +193,46 @@
 </form>
 <div id="settings">
   <div class="box">
-    <h3>设置你的 API Key</h3>
+    <h3>开始使用</h3>
     <div class="hint">Key 仅保存在本机进程内存，不写入任何服务器文件。每次启动需重新填写（本地优先用法）。</div>
-    <label>Provider</label>
-    <input id="cfg-provider" value="openai" autocomplete="off">
-    <label>Model</label>
-    <input id="cfg-model" value="gpt-4o-mini" autocomplete="off">
-    <label>API Key</label>
-    <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="off">
-    <div class="err" id="cfg-err"></div>
-    <div class="row">
-      <button onclick="closeSettings()">取消</button>
-      <button class="save" onclick="saveConfig()">保存</button>
+
+    <div id="cfg-choice">
+      <button class="choice-btn" onclick="showFreeModel()">
+        <div class="choice-title">使用免费模型</div>
+        <div class="choice-desc">OpenRouter 小模型，无需付费，推荐试用</div>
+      </button>
+      <button class="choice-btn" onclick="showCustomModel()">
+        <div class="choice-title">配置我自己的模型</div>
+        <div class="choice-desc">填 Provider / Model / API Key</div>
+      </button>
+      <div class="row">
+        <button onclick="closeSettings()">取消</button>
+      </div>
+    </div>
+
+    <div id="cfg-free" hidden>
+      <label>OpenRouter API Key</label>
+      <input id="cfg-free-key" type="password" placeholder="sk-or-..." autocomplete="off">
+      <div class="hint">将使用 OpenRouter 免费模型（在 openrouter.ai 免费注册获取 key）。</div>
+      <div class="err" id="cfg-free-err"></div>
+      <div class="row">
+        <button onclick="showChoice()">返回</button>
+        <button class="save" onclick="saveFreeModel()">保存</button>
+      </div>
+    </div>
+
+    <div id="cfg-custom" hidden>
+      <label>Provider</label>
+      <input id="cfg-provider" autocomplete="off" placeholder="如 openai / anthropic / deepseek / google / ollama">
+      <label>Model</label>
+      <input id="cfg-model" autocomplete="off" placeholder="模型 ID">
+      <label>API Key</label>
+      <input id="cfg-key" type="password" placeholder="sk-..." autocomplete="off">
+      <div class="err" id="cfg-err"></div>
+      <div class="row">
+        <button onclick="showChoice()">返回</button>
+        <button class="save" onclick="saveConfig()">保存</button>
+      </div>
     </div>
   </div>
 </div>
@@ -414,20 +448,55 @@ async function pollPairing(pairing) {
 }
 
 // Browser-supplied API key: if the server has no key configured, prompt for it.
+let freeModel = { provider: "openrouter", model: "openai/gpt-oss-20b:free" };
 async function checkConfig() {
   try {
     const r = await fetch("/config");
     const d = await r.json();
+    if (d.free_model) freeModel = d.free_model;
     if (!d.configured) openSettings();
   } catch (e) { /* server error surfaces on first send instead */ }
 }
-function openSettings() {
-  $("settings").classList.add("show");
+function showChoice() {
+  $("cfg-choice").hidden = false;
+  $("cfg-free").hidden = true;
+  $("cfg-custom").hidden = true;
+}
+function showFreeModel() {
+  $("cfg-choice").hidden = true;
+  $("cfg-free").hidden = false;
+  $("cfg-custom").hidden = true;
+  $("cfg-free-err").textContent = "";
+  $("cfg-free-key").focus();
+}
+function showCustomModel() {
+  $("cfg-choice").hidden = true;
+  $("cfg-free").hidden = true;
+  $("cfg-custom").hidden = false;
   $("cfg-err").textContent = "";
   $("cfg-key").focus();
 }
+function openSettings() {
+  $("settings").classList.add("show");
+  showChoice();
+}
 function closeSettings() {
   $("settings").classList.remove("show");
+}
+async function saveFreeModel() {
+  const api_key = $("cfg-free-key").value.trim();
+  if (!api_key) { $("cfg-free-err").textContent = "API Key 不能为空"; return; }
+  try {
+    const res = await fetch("/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: freeModel.provider, model: freeModel.model, api_key }),
+    });
+    if (!res.ok) { $("cfg-free-err").textContent = "保存失败"; return; }
+    closeSettings();
+  } catch (e) {
+    $("cfg-free-err").textContent = "保存失败：" + e.message;
+  }
 }
 async function saveConfig() {
   const provider = $("cfg-provider").value.trim();

@@ -465,8 +465,14 @@ def create_app(
 
     @app.get("/config", include_in_schema=False)
     async def get_config():
+        from synapse.config.schema import OPENROUTER_DEFAULT_MODEL
+
         rc = app.state.runtime_key
-        return {"configured": rc is not None, "provider": rc["provider"] if rc else None}
+        return {
+            "configured": rc is not None,
+            "provider": rc["provider"] if rc else None,
+            "free_model": {"provider": "openrouter", "model": OPENROUTER_DEFAULT_MODEL},
+        }
 
     @app.post("/config", include_in_schema=False)
     async def set_config(cfg: KeyConfig):
