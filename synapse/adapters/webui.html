@@ -319,7 +319,7 @@
     </form>
   </main>
 </div>
-<div id="settings">
+<div id="settings" onclick="if(event.target===this)closeSettings()">
   <div class="box">
     <h3>开始使用</h3>
     <div class="hint">Key 仅保存在本机进程内存，不写入任何服务器文件。每次启动需重新填写（本地优先用法）。</div>
@@ -333,9 +333,6 @@
         <div class="choice-title">配置我自己的模型</div>
         <div class="choice-desc">填 Provider / Model / API Key</div>
       </button>
-      <div class="row">
-        <button onclick="closeSettings()">取消</button>
-      </div>
     </div>
 
     <div id="cfg-free" hidden>
@@ -375,19 +372,22 @@
     <hr class="sep">
     <div id="cfg-switch">
       <div class="side-title">本会话运行时设置</div>
-      <div class="hint">规划模式仅对当前会话生效，不写回配置文件。模型由上方全局配置决定，此处不再重复设置。</div>
-      <label>规划模式</label>
-      <select id="cfg-mode">
-        <option value="react">react</option>
-        <option value="plan_execute">plan_execute</option>
-        <option value="hierarchical">hierarchical</option>
-        <option value="swarm">swarm</option>
-      </select>
-      <div class="err" id="cfg-switch-err"></div>
-      <div class="row">
-        <button onclick="closeSettings()">关闭</button>
-        <button class="save" onclick="applySwitch()">应用</button>
+      <div id="cfg-switch-body">
+        <div class="hint">规划模式仅对当前会话生效，不写回配置文件。模型由上方全局配置决定，此处不再重复设置。</div>
+        <label>规划模式</label>
+        <select id="cfg-mode">
+          <option value="react">react</option>
+          <option value="plan_execute">plan_execute</option>
+          <option value="hierarchical">hierarchical</option>
+          <option value="swarm">swarm</option>
+        </select>
+        <div class="err" id="cfg-switch-err"></div>
+        <div class="row">
+          <button onclick="closeSettings()">关闭</button>
+          <button class="save" onclick="applySwitch()">应用</button>
+        </div>
       </div>
+      <div id="cfg-switch-empty" hidden class="hint">发送任务创建会话后，可在此切换规划模式。</div>
     </div>
   </div>
 </div>
@@ -731,6 +731,10 @@ function showCustomModel() {
 }
 function openSettings() {
   $("settings").classList.add("show");
+  // 本会话模式切换需先有会话;无会话时仅显示提示,不暴露可操作的控件
+  const hasSession = !!sessionId;
+  $("cfg-switch-body").hidden = !hasSession;
+  $("cfg-switch-empty").hidden = hasSession;
   // 预填本会话规划模式
   fetch("/status" + (sessionId ? "?session_id=" + sessionId : ""))
     .then(r => r.json()).then(st => {
