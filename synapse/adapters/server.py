@@ -27,6 +27,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
+from synapse import __version__
 from synapse.adapters.library import Synapse
 from synapse.adapters.connector import (
     ConnectorAuthenticationError,
@@ -38,8 +39,10 @@ from synapse.adapters.connector import (
     ConnectorOfflineError,
     ConnectorPairingError,
 )
+from synapse.config import load_config
 from synapse.core.events import EventBus
 from synapse.core.session import DEFAULT_SESSION_DIR, Session
+from synapse.modules.todo import DEFAULT_TODO_DIR, TodoStore, get_default_todo_store
 from synapse.protocols.planner import AgentResult, ExecutionMetrics
 from synapse.eval.experiments import Experiment, ExperimentResult
 from synapse.eval.runner import _runner_comparability_envelope
@@ -161,6 +164,18 @@ class KeyConfig(BaseModel):
 
 class ConfirmDecision(BaseModel):
     approve: bool
+
+
+class SessionConfig(BaseModel):
+    """Per-session runtime overrides set from the web UI (switch model/mode)."""
+
+    provider: str | None = None
+    model: str | None = None
+    mode: str | None = None
+    api_key: str | None = None
+
+
+_VALID_MODES = {"react", "plan_execute", "hierarchical", "swarm"}
 
 
 class MetricsResponse(BaseModel):
@@ -351,6 +366,12 @@ def create_app(
     # server; upgrade path is LRU eviction + aclose() once multi-tenant.
     synapse_instances: dict[str, Synapse] = {}
 
+    # Per-session runtime overrides (provider/model/mode/api_key) set via the
+    # web UI "switch model / mode" control. Session-scoped on purpose — we do
+    # NOT persist to models.json, so the CLI default is never silently changed.
+    # ponytail: same unbounded-cache ceiling as synapse_instances.
+    app.state.session_runtime: dict[str, dict] = {}
+
     # Browser-set API key (local single-user). In-memory only; set via POST
     # /config from the web UI. When set, every session is built with it so the
     # user runs on their own key. None means fall back to the server's
@@ -374,13 +395,39 @@ def create_app(
         """Per-session facade; an injected instance (tests) is always reused."""
         if synapse_instance is not None:
             return synapse_instance
+        ov = app.state.session_runtime.get(session_id) or {}
         rc = app.state.runtime_key
-        if rc is not None:
+        # Resolution order: per-session override > global browser key > models.json.
+        provider = ov.get("provider") or (rc["provider"] if rc else None)
+        model = ov.get("model") or (rc["model"] if rc else None)
+        api_key = ov.get("api_key") or (rc["api_key"] if rc else None)
+        mode = ov.get("mode")
+
+        build_kwargs: dict = {}
+        if provider:
+            build_kwargs["provider"] = provider
+        if model:
+            build_kwargs["model"] = model
+        if api_key:
+            build_kwargs["api_key"] = api_key
+        if mode:
+            build_kwargs["mode"] = mode
+
+        if build_kwargs:
             inst = synapse_instances.get(session_id)
-            if inst is None:
-                inst = Synapse(
-                    provider=rc["provider"], model=rc["model"], api_key=rc["api_key"],
-                )
+            # Rebuild only when the cached instance was built under a different
+            # override set (e.g. a model/mode switch evicted it). The POST
+            # /sessions/{id}/config handler also evicts, so this is a belt-and-
+            # braces guard against returning a stale instance.
+            if inst is None or getattr(inst, "_synapse_override", None) != build_kwargs:
+                if inst is not None:
+                    with _swallow("evict stale synapse instance"):
+                        try:
+                            asyncio.ensure_future(inst.aclose())
+                        except Exception:
+                            pass
+                inst = Synapse(**build_kwargs)
+                inst._synapse_override = build_kwargs
                 synapse_instances[session_id] = inst
             return inst
         # Fallback to the server's models.json; fail friendly if absent so the
@@ -426,13 +473,20 @@ def create_app(
     def _resolve_session(session_id: str | None) -> Session:
         """New session, or continue one seen earlier in-process / saved on disk."""
         if not session_id:
-            return Session()
-        if session_id in sessions:
-            return sessions[session_id]
-        path = DEFAULT_SESSION_DIR / f"{session_id}.json"
-        if path.exists():
-            return Session.load(path)
-        raise HTTPException(status_code=404, detail="Session not found")
+            session = Session()
+        elif session_id in sessions:
+            session = sessions[session_id]
+        else:
+            path = DEFAULT_SESSION_DIR / f"{session_id}.json"
+            if path.exists():
+                session = Session.load(path)
+            else:
+                raise HTTPException(status_code=404, detail="Session not found")
+        # Bind the process-global todo store to this session so the agent's
+        # TodoWrite persists under the right id (mirrors the CLI REPL).
+        with _swallow("resolve_session: bind todo store"):
+            get_default_todo_store().bind_session(session.id)
+        return session
 
     async def _connector_job_for(req: RunRequest) -> ConnectorJob | None:
         if req.connector_id is None and req.connector_token is None:
@@ -833,6 +887,123 @@ def create_app(
             MessageResponse(role=m.role, content=m.content)
             for m in session.messages
         ]
+
+    # ---- GET /sessions — 历史会话列表 (WebUI 侧栏) ------------------------
+
+    @app.get("/sessions", response_model=list)
+    async def list_sessions():
+        out = []
+        for s in Session.list_sessions():
+            path = DEFAULT_SESSION_DIR / f"{s.id}.json"
+            mtime = path.stat().st_mtime if path.exists() else 0
+            out.append({
+                "id": s.id,
+                "message_count": len(s.messages),
+                "estimated_tokens": s.estimated_tokens,
+                "modified_at": mtime,
+            })
+        return out
+
+    # ---- DELETE /sessions/{session_id} — 删除会话 (WebUI 侧栏) ------------
+
+    @app.delete("/sessions/{session_id}")
+    async def delete_session(session_id: str):
+        path = DEFAULT_SESSION_DIR / f"{session_id}.json"
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="Session not found")
+        with _swallow("delete session file"):
+            path.unlink()
+        todo_path = DEFAULT_TODO_DIR / f"{session_id}.json"
+        with _swallow("delete todo file"):
+            if todo_path.exists():
+                todo_path.unlink()
+        sessions.pop(session_id, None)
+        synapse_instances.pop(session_id, None)
+        return {"ok": True}
+
+    # ---- GET /status — 工作区状态栏 (WebUI) -------------------------------
+
+    @app.get("/status")
+    async def get_status(session_id: str | None = None):
+        ov = app.state.session_runtime.get(session_id) if session_id else None
+        rc = app.state.runtime_key
+        provider = (ov or {}).get("provider") or (rc["provider"] if rc else None)
+        model = (ov or {}).get("model") or (rc["model"] if rc else None)
+        mode = (ov or {}).get("mode")
+        config, _ = load_config()
+        if provider is None:
+            provider = config.provider.provider
+        if model is None:
+            model = config.provider.model
+        if mode is None:
+            mode = config.planning.mode
+        used_tokens = 0
+        if session_id:
+            sess = sessions.get(session_id)
+            if sess is None:
+                p = DEFAULT_SESSION_DIR / f"{session_id}.json"
+                if p.exists():
+                    sess = Session.load(p)
+            if sess is not None:
+                used_tokens = sess.estimated_tokens
+        return {
+            "version": __version__,
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "workspace": str(Path.cwd()),
+            "tools_count": len(getattr(config.tools, "enabled", []) or []),
+            "configured": rc is not None,
+            "used_tokens": used_tokens,
+            "budget": config.planning.max_tokens_per_task,
+        }
+
+    # ---- GET /sessions/{session_id}/context-report — 上下文引用热力图 -----
+
+    @app.get("/sessions/{session_id}/context-report")
+    async def get_context_report(session_id: str):
+        synapse = _synapse_for(session_id)
+        report = synapse.get_citation_report()
+        if report is None:
+            return {"blocks": []}
+        return report
+
+    # ---- GET /todos — 待办清单 (WebUI 侧栏) -------------------------------
+
+    @app.get("/todos", response_model=list)
+    async def get_todos(session_id: str):
+        # Read-only: a fresh store (not the global singleton) avoids the
+        # per-session todo list being clobbered by a concurrent session.
+        store = TodoStore()
+        store.bind_session(session_id)
+        return store.list()
+
+    # ---- POST /sessions/{session_id}/config — 运行期切换模型/模式 ---------
+
+    @app.post("/sessions/{session_id}/config")
+    async def set_session_config(session_id: str, cfg: SessionConfig):
+        ov = dict(app.state.session_runtime.get(session_id) or {})
+        if cfg.provider is not None:
+            ov["provider"] = cfg.provider
+        if cfg.model is not None:
+            ov["model"] = cfg.model
+        if cfg.mode is not None:
+            ov["mode"] = cfg.mode
+        if cfg.api_key is not None:
+            ov["api_key"] = cfg.api_key
+        if ov.get("mode") is not None and ov["mode"] not in _VALID_MODES:
+            raise HTTPException(status_code=422, detail="未知规划模式：" + ov["mode"])
+        # Evict the cached instance so the next run rebuilds with the new
+        # config; best-effort async cleanup (fire-and-forget) on the loop.
+        inst = synapse_instances.pop(session_id, None)
+        if inst is not None:
+            with _swallow("evict synapse instance on config change"):
+                try:
+                    asyncio.ensure_future(inst.aclose())
+                except Exception:
+                    pass
+        app.state.session_runtime[session_id] = ov
+        return {"ok": True, "config": ov}
 
     # ---- POST /eval/experiment -------------------------------------------
 

@@ -56,6 +56,13 @@ def mock_synapse():
         "efficiency": {},
         "process_hint": "复用率偏低，下次先检索现有实现。",
     })
+    # /sessions/{id}/context-report returns this via get_citation_report().
+    mock.get_citation_report = MagicMock(return_value={
+        "blocks": [
+            {"zone": "core", "source": "main.py", "priority": 1, "tokens": 10,
+             "usage": 2, "cited": 1, "citation_rate": 0.5},
+        ],
+    })
     return mock
 
 
@@ -474,3 +481,84 @@ def test_session_history(client):
     assert msgs_response.status_code == 200
     messages = msgs_response.json()
     assert isinstance(messages, list)
+
+
+# ---------------------------------------------------------------------------
+# WebUI enhancement endpoints (session list / status / todos / context-report)
+# ---------------------------------------------------------------------------
+
+
+def test_list_sessions_empty(client, monkeypatch):
+    import synapse.core.session as session_mod
+
+    # list_sessions() binds DEFAULT_SESSION_DIR as a default arg at import
+    # time, so patch the method itself for a deterministic empty list.
+    monkeypatch.setattr(
+        session_mod.Session, "list_sessions",
+        classmethod(lambda cls: []),
+    )
+
+    r = client.get("/sessions")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_status_endpoint(client, monkeypatch):
+    import synapse.adapters.server as server
+
+    fake = MagicMock()
+    fake.provider.provider = "openai"
+    fake.provider.model = "gpt-4o-mini"
+    fake.provider.api_key = "x"
+    fake.planning.mode = "react"
+    fake.planning.max_tokens_per_task = 200000
+    fake.tools.enabled = ["read", "write"]
+    monkeypatch.setattr(server, "load_config", lambda *a, **k: (fake, None))
+
+    r = client.get("/status")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["provider"] == "openai"
+    assert data["model"] == "gpt-4o-mini"
+    assert data["mode"] == "react"
+    assert data["budget"] == 200000
+    assert data["tools_count"] == 2
+    assert "version" in data
+
+
+def test_todos_endpoint(client, monkeypatch, tmp_path):
+    import synapse.adapters.server as server
+
+    # Keep the read-only todo lookup out of the real home dir.
+    monkeypatch.setattr(server, "DEFAULT_TODO_DIR", tmp_path)
+
+    r = client.get("/todos?session_id=does-not-exist")
+    assert r.status_code == 200
+    assert r.json() == []
+
+
+def test_context_report_endpoint(client):
+    r = client.get("/sessions/abc/context-report")
+    assert r.status_code == 200
+    blocks = r.json()["blocks"]
+    assert isinstance(blocks, list) and blocks
+    assert blocks[0]["zone"] == "core"
+
+
+def test_session_config_switch_stores_override_and_validates_mode():
+    import synapse.adapters.server as server
+    from fastapi.testclient import TestClient
+
+    app = server.create_app()
+    c = TestClient(app)
+
+    # Switching model/mode for a session stores the per-session override.
+    r = c.post("/sessions/s1/config", json={"model": "gpt-4o", "mode": "swarm"})
+    assert r.status_code == 200
+    assert app.state.session_runtime["s1"]["model"] == "gpt-4o"
+    assert app.state.session_runtime["s1"]["mode"] == "swarm"
+
+    # Unknown planning mode is rejected.
+    bad = c.post("/sessions/s2/config", json={"mode": "nope"})
+    assert bad.status_code == 422
+
