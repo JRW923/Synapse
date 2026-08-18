@@ -142,9 +142,12 @@
     font-weight: 600; border: 1px solid var(--border); background: none; color: var(--text); }
   #settings button.save { background: var(--brand); color: #0d1117; border: none; }
   #settings .err { color: var(--err); font-size: 12px; min-height: 16px; margin-top: 8px; }
-  #settings .with-copy { display: flex; gap: 6px; align-items: center; }
-  #settings .with-copy input { flex: 1; }
-  #settings .copy-mini { padding: 6px 10px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+  #settings select { width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit; }
+  #settings .model-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  #settings .model-chip { padding: 4px 10px; font-size: 12px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; }
+  #settings .model-chip:hover { border-color: var(--brand); }
   #settings .choice-btn { display: block; width: 100%; text-align: left; padding: 10px 12px;
     margin-bottom: 10px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border);
     color: var(--text); cursor: pointer; }
@@ -217,13 +220,11 @@
       <label>OpenRouter API Key</label>
       <input id="cfg-free-key" type="password" placeholder="sk-or-..." autocomplete="off">
       <label>模型（可选，留空用默认免费模型）</label>
-      <div class="with-copy">
-        <input id="cfg-free-model" autocomplete="off" placeholder="openai/gpt-oss-20b:free">
-        <button type="button" class="copy-mini" data-copy-target="cfg-free-model">复制</button>
-        <button type="button" class="copy-mini" onclick="pasteInto('cfg-free-model')">粘贴</button>
-      </div>
-      <div class="hint">将使用 OpenRouter 免费模型（在 openrouter.ai 免费注册获取 key）。
-        可用免费模型见 <a href="https://openrouter.ai/models?q=free" target="_blank" rel="noopener">openrouter.ai/models?q=free</a>。</div>
+      <input id="cfg-free-model" autocomplete="off" placeholder="openai/gpt-oss-20b:free" list="free-model-list">
+      <datalist id="free-model-list"></datalist>
+      <div class="model-list" id="cfg-free-models"></div>
+      <div class="hint">点列表或输入框即可选用 OpenRouter 当前免费模型（实时获取，可能因下架/限流失效，以
+        <a href="https://openrouter.ai/models?q=free" target="_blank" rel="noopener">官网</a> 为准）；留空则用默认。</div>
       <div class="err" id="cfg-free-err"></div>
       <div class="row">
         <button onclick="showChoice()">返回</button>
@@ -232,8 +233,15 @@
     </div>
 
     <div id="cfg-custom" hidden>
-      <label>Provider</label>
-      <input id="cfg-provider" autocomplete="off" placeholder="如 openai / anthropic / deepseek / google / ollama">
+      <label>Provider（API 格式，不可自定义）</label>
+      <select id="cfg-provider">
+        <option value="openai">OpenAI（OpenAI 兼容）</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="google">Google</option>
+        <option value="openrouter">OpenRouter（OpenAI 兼容网关）</option>
+        <option value="ollama">Ollama（本地，无需 Key）</option>
+      </select>
       <label>Model</label>
       <input id="cfg-model" autocomplete="off" placeholder="模型 ID">
       <label>API Key</label>
@@ -478,6 +486,7 @@ function showFreeModel() {
   $("cfg-custom").hidden = true;
   $("cfg-free-err").textContent = "";
   $("cfg-free-model").value = freeModel.model;
+  renderFreeModelList();   // 实时拉取可用免费模型，填充列表/datalist
   $("cfg-free-key").focus();
 }
 function showCustomModel() {
@@ -494,16 +503,6 @@ function openSettings() {
 function closeSettings() {
   $("settings").classList.remove("show");
 }
-// 复制/粘贴：原生 Clipboard API，无依赖。
-function pasteInto(id) {
-  navigator.clipboard.readText().then(t => { $(id).value = t; }).catch(() => {});
-}
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest("[data-copy-target]");
-  if (!btn) return;
-  const el = $(btn.dataset.copyTarget);
-  if (el) navigator.clipboard.writeText(el.value).catch(() => {});
-});
 async function saveFreeModel() {
   const api_key = $("cfg-free-key").value.trim();
   if (!api_key) { $("cfg-free-err").textContent = "API Key 不能为空"; return; }
@@ -520,11 +519,60 @@ async function saveFreeModel() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider: freeModel.provider, model, api_key }),
     });
-    if (!res.ok) { $("cfg-free-err").textContent = "保存失败"; return; }
+    if (!res.ok) { $("cfg-free-err").textContent = await _saveErrorDetail(res); return; }
     freeModel.model = model;
     closeSettings();
   } catch (e) {
-    $("cfg-free-err").textContent = "保存失败：" + e.message;
+    $("cfg-free-err").textContent = _saveError(e);
+  }
+}
+// 实时可用免费模型列表（best-effort）：拉取 OpenRouter 列表、筛免费，渲染为
+// 可点击 chip 填入模型框；网络不可达则用内置降级列表。
+const FALLBACK_FREE_MODELS = [
+  "openai/gpt-oss-20b:free",
+  "openai/gpt-oss-120b:free",
+  "deepseek/deepseek-v4-flash:free",
+  "z-ai/glm-4.5-air:free",
+  "poolside/laguna-m.1:free",
+];
+function isZeroPrice(p) {
+  if (!p) return false;
+  const z = (v) => [0, "0", "0.0"].includes(v);
+  return z(p.prompt) && z(p.completion);
+}
+async function renderFreeModelList() {
+  const box = $("cfg-free-models");
+  const list = $("free-model-list");
+  if (!box) return;
+  let models = FALLBACK_FREE_MODELS;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch("https://openrouter.ai/api/v1/models", { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      const free = (data.data || [])
+        .filter((m) => m.id.endsWith(":free") || isZeroPrice(m.pricing))
+        .map((m) => m.id)
+        .slice(0, 12);
+      if (free.length) models = free;
+    }
+  } catch (e) { /* 用降级列表 */ }
+  box.innerHTML = "";
+  if (list) list.innerHTML = "";
+  for (const id of models) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "model-chip";
+    chip.textContent = id;
+    chip.onclick = () => { $("cfg-free-model").value = id; };
+    box.appendChild(chip);
+    if (list) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      list.appendChild(opt);
+    }
   }
 }
 // ④ best-effort 校验：模型是否仍在 OpenRouter 免费列表（免 key、CORS *）。
@@ -538,14 +586,28 @@ async function _checkFreeModel(model) {
     const data = await res.json();
     const hit = (data.data || []).find((m) => m.id === model);
     if (!hit) return `模型 ${model} 在 OpenRouter 不存在，请检查名称`;
-    const pricing = hit.pricing || {};
-    const isZero = (v) => [0, "0", "0.0"].includes(v);
-    const free = hit.id.endsWith(":free") || (isZero(pricing.prompt) && isZero(pricing.completion));
+    const free = hit.id.endsWith(":free") || isZeroPrice(hit.pricing);
     if (!free) return `模型 ${model} 不是免费模型（需付费），请更换或在"自定义模型"面板配置`;
     return null;
   } catch (e) {
     return null;  // 网络不可达/被墙：跳过校验
   }
+}
+// 保存失败：把 fetch 网络错误等翻译成用户能看懂的中文提示。
+function _saveError(err) {
+  if (err && err.name === "AbortError") return "请求超时，请重试。";
+  const msg = (err && err.message) || String(err);
+  if (err && err.name === "TypeError" || /failed to fetch|networkerror/i.test(msg)) {
+    return "无法连接到 Synapse 服务：请确认服务已启动，且你是通过 synapse web / synapse serve 打开的本页面（地址与端口需一致）。";
+  }
+  return "保存失败：" + msg;
+}
+async function _saveErrorDetail(res) {
+  try {
+    const d = await res.json();
+    if (d && d.detail) return "保存失败：" + d.detail;
+  } catch (e) { /* 非 JSON 响应 */ }
+  return "保存失败（" + res.status + "）";
 }
 async function saveConfig() {
   const provider = $("cfg-provider").value.trim();
@@ -558,10 +620,10 @@ async function saveConfig() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider, model, api_key }),
     });
-    if (!res.ok) { $("cfg-err").textContent = "保存失败"; return; }
+    if (!res.ok) { $("cfg-err").textContent = await _saveErrorDetail(res); return; }
     closeSettings();
   } catch (e) {
-    $("cfg-err").textContent = "保存失败：" + e.message;
+    $("cfg-err").textContent = _saveError(e);
   }
 }
 checkConfig();
