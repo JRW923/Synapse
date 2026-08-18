@@ -115,6 +115,12 @@ def _resolve_provider(name: str, custom_providers: list | None = None, model: st
         mod = importlib.import_module("synapse.modules.providers.anthropic")
         return getattr(mod, "AnthropicProvider"), "https://api.deepseek.com/anthropic"
 
+    # OpenRouter → OpenAI-compatible protocol via the OpenRouter gateway
+    if name == "openrouter":
+        import importlib
+        mod = importlib.import_module("synapse.modules.providers.openai")
+        return getattr(mod, "OpenAIProvider"), "https://openrouter.ai/api/v1"
+
     _provider_modules: dict[str, str] = {
         "anthropic": "synapse.modules.providers.anthropic",
         "openai": "synapse.modules.providers.openai",

@@ -204,15 +204,10 @@ def _check_api_key(config):
     if config.provider.api_key:
         return
 
+    from synapse.config.schema import _PROVIDER_ENV_VARS
+
     provider = config.provider.provider
-    env_vars = {
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "google": "GOOGLE_API_KEY",
-        "ollama": None,  # Ollama runs locally, no key needed
-    }
-    env_var = env_vars.get(provider)
+    env_var = _PROVIDER_ENV_VARS.get(provider)
 
     if env_var:
         import os

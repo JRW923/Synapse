@@ -46,6 +46,7 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
     "ollama": "",  # Ollama runs locally, no key needed
 }
 
@@ -66,8 +67,8 @@ def _default_models() -> list[ModelEntry]:
 
 class ProviderConfig(BaseModel):
     """LLM provider configuration."""
-    provider: str = "anthropic"
-    model: str = "claude-sonnet-4-6"
+    provider: str = "openrouter"
+    model: str = "openai/gpt-oss-20b:free"
     api_key: str = ""
     base_url: str = ""
     max_retries: int = 3
