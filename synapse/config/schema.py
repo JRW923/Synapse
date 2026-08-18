@@ -40,6 +40,10 @@ _DEFAULT_MODELS: list[dict] = [
     {"provider": "ollama",    "model": "llama4:8b",          "api_key": ""},
 ]
 
+# OpenRouter 免费兜底模型（用户不配置时的默认；OpenAI 兼容协议网关）
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+OPENROUTER_DEFAULT_MODEL = "openai/gpt-oss-20b:free"
+
 # env var name for each provider
 _PROVIDER_ENV_VARS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -68,7 +72,7 @@ def _default_models() -> list[ModelEntry]:
 class ProviderConfig(BaseModel):
     """LLM provider configuration."""
     provider: str = "openrouter"
-    model: str = "openai/gpt-oss-20b:free"
+    model: str = OPENROUTER_DEFAULT_MODEL
     api_key: str = ""
     base_url: str = ""
     max_retries: int = 3

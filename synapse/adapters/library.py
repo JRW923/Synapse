@@ -118,8 +118,9 @@ def _resolve_provider(name: str, custom_providers: list | None = None, model: st
     # OpenRouter → OpenAI-compatible protocol via the OpenRouter gateway
     if name == "openrouter":
         import importlib
+        from synapse.config.schema import OPENROUTER_BASE_URL
         mod = importlib.import_module("synapse.modules.providers.openai")
-        return getattr(mod, "OpenAIProvider"), "https://openrouter.ai/api/v1"
+        return getattr(mod, "OpenAIProvider"), OPENROUTER_BASE_URL
 
     _provider_modules: dict[str, str] = {
         "anthropic": "synapse.modules.providers.anthropic",

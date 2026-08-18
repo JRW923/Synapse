@@ -630,7 +630,7 @@ def test_first_run_wizard_plain_writes_models_json(tmp_path, monkeypatch):
     from synapse.config.schema import SynapseConfig
 
     models_file = tmp_path / "models.json"
-    answers = iter(["deepseek", "deepseek-v4-pro"])
+    answers = iter(["2", "deepseek", "deepseek-v4-pro"])
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
     monkeypatch.setattr("getpass.getpass", lambda _prompt="": "sk-test")

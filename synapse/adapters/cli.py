@@ -1540,6 +1540,20 @@ def _has_stored_provider_key(config, provider: str) -> bool:
     )
 
 
+def _save_free_model(api_key) -> None:
+    """Persist the OpenRouter free model as the persisted default."""
+    from synapse.config.models import upsert_model
+    from synapse.config.schema import OPENROUTER_BASE_URL, OPENROUTER_DEFAULT_MODEL
+
+    upsert_model(
+        "openrouter",
+        OPENROUTER_DEFAULT_MODEL,
+        api_key=api_key,
+        base_url=OPENROUTER_BASE_URL,
+        protocol="openai",
+    )
+
+
 def _first_run_wizard(console, config, *, first_run: bool = True) -> None:
     """Rich-powered model setup used by first run and ``/model add``."""
     from urllib.parse import urlparse
@@ -1552,6 +1566,35 @@ def _first_run_wizard(console, config, *, first_run: bool = True) -> None:
     detail = "首次启动只需配置一次，之后将自动使用默认模型。" if first_run else "新配置会保存并设为默认模型。"
     console.print(f"  [bold {_BRAND}]{title}[/bold {_BRAND}]")
     console.print(f"  [{_HINT}]{detail}[/{_HINT}]\n")
+
+    if first_run:
+        from synapse.config.schema import OPENROUTER_DEFAULT_MODEL
+
+        console.print(f"  [bold {_BRAND}]1.[/bold {_BRAND}] [{_LABEL}]使用免费模型[/{_LABEL}] [{_HINT}](OpenRouter，无需付费，推荐试用)[/{_HINT}]")
+        console.print(f"  [bold {_BRAND}]2.[/bold {_BRAND}] [{_LABEL}]配置我自己的模型[/{_LABEL}]")
+        while True:
+            mode = console.input(f"\n  [bold]选择 [1-2]:[/bold] ").strip()
+            if mode in {"1", "2"}:
+                break
+            console.print("  [red]请输入 1 或 2。[/red]")
+        if mode == "1":
+            env_var = _PROVIDER_ENV_VARS["openrouter"]
+            console.print(f"\n  [{_HINT}]将使用 OpenRouter 免费模型 {OPENROUTER_DEFAULT_MODEL}。[/{_HINT}]")
+            console.print(f"  [{_HINT}]需要 OpenRouter API Key（在 openrouter.ai 免费注册获取）。[/{_HINT}]")
+            if _os.environ.get(env_var):
+                api_key = None
+                console.print(f"  [dim]已检测到环境变量 {env_var}，无需重复输入。[/dim]")
+            else:
+                while True:
+                    api_key = console.input(f"  API key ({env_var}): ", password=True).strip()
+                    if api_key:
+                        break
+                    console.print("  [red]API key 不能为空；也可以先设置对应环境变量。[/red]")
+            _save_free_model(api_key)
+            console.print(f"\n  [green]已保存到 {models_config_path()}[/green]")
+            console.print(f"  [dim]默认模型：openrouter/{OPENROUTER_DEFAULT_MODEL}[/dim]\n")
+            return
+        console.print()
 
     providers = _wizard_providers(config)
     for i, name in enumerate(providers, 1):
@@ -1647,6 +1690,36 @@ def _first_run_wizard_plain(config, *, first_run: bool = True) -> None:
 
     print("\n欢迎使用 Synapse" if first_run else "\n添加模型")
     print("首次启动只需配置一次，之后将自动使用默认模型。\n" if first_run else "新配置会保存并设为默认模型。\n")
+
+    if first_run:
+        from synapse.config.schema import OPENROUTER_DEFAULT_MODEL
+
+        print("  1. 使用免费模型（OpenRouter，无需付费，推荐试用）")
+        print("  2. 配置我自己的模型")
+        while True:
+            mode = input("\n选择 [1-2]: ").strip()
+            if mode in {"1", "2"}:
+                break
+            print("请输入 1 或 2。")
+        if mode == "1":
+            env_var = _PROVIDER_ENV_VARS["openrouter"]
+            print(f"\n将使用 OpenRouter 免费模型 {OPENROUTER_DEFAULT_MODEL}。")
+            print(f"需要 OpenRouter API Key（在 openrouter.ai 免费注册获取）。")
+            if _os.environ.get(env_var):
+                api_key = None
+                print(f"已检测到环境变量 {env_var}，无需重复输入。")
+            else:
+                while True:
+                    api_key = getpass.getpass(f"API key ({env_var}): ").strip()
+                    if api_key:
+                        break
+                    print("API key 不能为空；也可以先设置对应环境变量。")
+            _save_free_model(api_key)
+            print(f"\n已保存到 {models_config_path()}")
+            print(f"默认模型：openrouter/{OPENROUTER_DEFAULT_MODEL}\n")
+            return
+        print()
+
     providers = _wizard_providers(config)
     for i, name in enumerate(providers, 1):
         env = _PROVIDER_ENV_VARS.get(name, "")
