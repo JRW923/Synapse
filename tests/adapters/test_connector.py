@@ -1,6 +1,7 @@
 """Focused tests for the hosted Web UI local-workspace connector."""
 
 import json
+import asyncio
 import time
 import uuid
 from pathlib import Path
@@ -195,15 +196,84 @@ async def test_broker_relays_confirm_to_browser_and_resolves_via_command_channel
         "request_id": "r1",
         "request": {"tool_name": "write_file", "risk_level": "high"},
     }
-    # 浏览器批准后,answer 经命令通道回传
+    # 浏览器批准后,answer 经命令通道回传(默认不记住)
     assert await broker.resolve_confirm("r1", True) is True
     assert await broker.poll(connector_id, registration["device_token"]) == {
         "type": "confirm_result",
         "request_id": "r1",
         "approve": True,
+        "remember": False,
     }
     # 未知 request_id 不应报错
     assert await broker.resolve_confirm("nope", True) is False
+
+
+@pytest.mark.asyncio
+async def test_broker_relays_confirm_remember_flag():
+    broker = ConnectorBroker()
+    pairing, registration = _pair_connector(broker)
+    connector_id = registration["connector_id"]
+    session_id = str(uuid.uuid4())
+    job = await broker.start_job(
+        connector_id=connector_id,
+        browser_token=pairing["browser_token"],
+        task="delete a file",
+        session_id=session_id,
+    )
+    await broker.poll(connector_id, registration["device_token"])  # 取走 run 命令
+    # 先经 publish_events 透传确认事件并登记 request_id 归属
+    await broker.publish_events(
+        connector_id=connector_id,
+        device_token=registration["device_token"],
+        job_id=job.id,
+        events=[{
+            "type": "confirm",
+            "request_id": "r1",
+            "request": {"tool_name": "write_file", "risk_level": "high"},
+        }],
+    )
+    # 浏览器选择「总是允许此类」,remember 随命令回传
+    assert await broker.resolve_confirm("r1", True, remember=True) is True
+    assert await broker.poll(connector_id, registration["device_token"]) == {
+        "type": "confirm_result",
+        "request_id": "r1",
+        "approve": True,
+        "remember": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_connector_resolve_confirm_remembers_signature():
+    from synapse.adapters.connector import ConnectorClient, LocalConnection
+
+    remembered = []
+    class _Auth:
+        def remember_approval(self, request):
+            remembered.append(request)
+    class _Container:
+        def resolve(self, _t):
+            return _Auth()
+
+    client = ConnectorClient(
+        server="http://x",
+        workspace=Path("/tmp"),
+        connection=LocalConnection(
+            server="http://x", workspace="/tmp",
+            connector_id="c", device_token="d", name="n",
+        ),
+        config_path=None,
+    )
+    client._synapse = type("S", (), {"_container": _Container()})()
+    event = asyncio.Event()
+    request = type("R", (), {"tool_name": "write_file"})()
+    waiter = (event, [False], request)
+    client._pending_confirms["r1"] = waiter
+
+    client._resolve_confirm("r1", True, remember=True)
+
+    assert remembered == [request]
+    assert event.is_set()
+    assert waiter[1][0] is True
 
 
 @pytest.mark.asyncio

@@ -191,6 +191,7 @@
     border: 1px solid var(--border); background: none; color: var(--text);
   }
   #confirm button.approve { background: var(--ok); color: #0d1117; border: none; }
+  #confirm button.allow-once { border-color: var(--ok); color: var(--ok); }
   #confirm button.deny { border-color: var(--err); color: var(--err); }
   #pair {
     max-width: 860px; margin: 0 auto 14px; border: 1px solid var(--brand);
@@ -304,7 +305,8 @@
       <div class="detail" id="confirm-detail"></div>
       <div class="row">
         <button class="deny" onclick="answer(false)">拒绝</button>
-        <button class="approve" onclick="answer(true)">批准</button>
+        <button class="allow-once" onclick="answer(true,false)">允许一次</button>
+        <button class="approve" onclick="answer(true,true)">总是允许此类</button>
       </div>
     </div><div id="pair">
       <div class="title">本机配对</div>
@@ -933,7 +935,7 @@ async function checkLocalConnector() {
   } catch (e) { /* 非本地模式或尚未就绪，忽略 */ }
 }
 
-async function answer(approve) {
+async function answer(approve, remember = false) {
   if (pendingConfirm === null) return;
   const id = pendingConfirm; pendingConfirm = null;
   $("confirm").style.display = "none";
@@ -942,7 +944,7 @@ async function answer(approve) {
     await fetch("/confirm/" + id, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ approve }),
+      body: JSON.stringify({ approve, remember }),
     });
   } catch (e) { /* stream will surface the timeout-deny if this failed */ }
 }

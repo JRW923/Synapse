@@ -408,7 +408,9 @@ class ConnectorBroker:
             return None
         return self._jobs.get(record.active_job_id)
 
-    async def resolve_confirm(self, request_id: str, approve: bool) -> bool:
+    async def resolve_confirm(
+        self, request_id: str, approve: bool, *, remember: bool = False,
+    ) -> bool:
         """Relay a browser confirm answer back to the connector over the command channel."""
         connector_id = self._pending_confirms.pop(request_id, None)
         if connector_id is None:
@@ -420,6 +422,7 @@ class ConnectorBroker:
             "type": "confirm_result",
             "request_id": request_id,
             "approve": bool(approve),
+            "remember": bool(remember),
         })
         return True
 
@@ -814,7 +817,7 @@ def _make_confirm(event_queue: asyncio.Queue, pending: dict, mode: str = "ask") 
             event_queue.put_nowait(item)
         except asyncio.QueueFull:
             await event_queue.put(item)
-        waiter = (asyncio.Event(), [False])
+        waiter = (asyncio.Event(), [False], request)
         pending[request_id] = waiter
         try:
             await asyncio.wait_for(waiter[0].wait(), timeout=CONFIRM_TIMEOUT_S)
@@ -899,6 +902,7 @@ class ConnectorClient:
                     self._resolve_confirm(
                         str(command.get("request_id", "")),
                         bool(command.get("approve", False)),
+                        bool(command.get("remember", False)),
                     )
         finally:
             if self._active_task is not None and not self._active_task.done():
@@ -937,11 +941,18 @@ class ConnectorClient:
                     planner.request_cancel()
         self._active_task.cancel()
 
-    def _resolve_confirm(self, request_id: str, approve: bool) -> None:
+    def _resolve_confirm(self, request_id: str, approve: bool, remember: bool = False) -> None:
         waiter = self._pending_confirms.pop(request_id, None)
         if waiter is None:
             return
-        event, answer = waiter
+        event, answer, request = waiter
+        # 按操作类型记住允许:写入 ActionAuthorizer 的会话级白名单,
+        # 之后同签名调用会被 authorizer 直接放行(不再触发 confirm 回调)。
+        if remember and request is not None and self._synapse is not None:
+            with contextlib.suppress(Exception):
+                from synapse.modules.security.auth import ActionAuthorizer
+                auth = self._synapse._container.resolve(ActionAuthorizer)
+                auth.remember_approval(request)
         answer[0] = approve
         event.set()
 

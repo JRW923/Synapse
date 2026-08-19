@@ -164,6 +164,7 @@ class KeyConfig(BaseModel):
 
 class ConfirmDecision(BaseModel):
     approve: bool
+    remember: bool = False  # 按操作类型记住允许(仅 approve 时有意义)
 
 
 class StopRequest(BaseModel):
@@ -592,7 +593,9 @@ def create_app(
             return {"ok": True}
         # 本地 connector 模式:确认请求由 connector 进程持有,经 broker 命令通道转发
         broker = app.state.connector_broker
-        if broker is not None and await broker.resolve_confirm(request_id, decision.approve):
+        if broker is not None and await broker.resolve_confirm(
+            request_id, decision.approve, remember=decision.remember,
+        ):
             return {"ok": True}
         raise HTTPException(status_code=404, detail="No pending confirmation")
 
