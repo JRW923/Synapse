@@ -162,6 +162,7 @@ class KeyConfig(BaseModel):
     provider: str = "openai"
     model: str = "gpt-4o-mini"
     api_key: str
+    base_url: str = ""  # 自定义兼容端点(留空则用内置默认地址)
 
 
 class ConfirmDecision(BaseModel):
@@ -434,6 +435,11 @@ def create_app(
             build_kwargs["api_key"] = api_key
         if mode:
             build_kwargs["mode"] = mode
+        # 自定义兼容端点(base_url)透传给 Synapse 的 overrides,经 config.provider
+        # 自动下传到真实 LLM 客户端,零新增路由。
+        base_url = rc.get("base_url") if rc else None
+        if base_url:
+            build_kwargs["base_url"] = base_url
 
         if build_kwargs:
             inst = synapse_instances.get(session_id)
@@ -555,6 +561,8 @@ def create_app(
         return {
             "configured": rc is not None,
             "provider": rc["provider"] if rc else None,
+            "model": rc["model"] if rc else None,
+            "base_url": rc.get("base_url", "") if rc else "",
             "free_model": {"provider": "openrouter", "model": OPENROUTER_DEFAULT_MODEL},
         }
 
@@ -566,6 +574,7 @@ def create_app(
             "provider": cfg.provider.strip(),
             "model": cfg.model.strip(),
             "api_key": cfg.api_key.strip(),
+            "base_url": cfg.base_url.strip(),
         }
         return {"ok": True, "provider": cfg.provider}
 

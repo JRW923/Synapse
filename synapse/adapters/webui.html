@@ -111,7 +111,7 @@
     display: flex; align-items: center; justify-content: center; font-weight: 700; }
   .msg.user .who { background: #21262d; color: var(--dim); }
   .msg.agent .who { background: rgba(57,197,207,.15); color: var(--brand); }
-  .msg .body { min-width: 0; flex: 1; }
+  .msg .body { min-width: 0; flex: 1; white-space: pre-wrap; word-break: break-word; }
   .msg .body pre {
     background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
     padding: 8px 10px; overflow-x: auto; margin: 6px 0; font-size: 13px;
@@ -356,13 +356,23 @@
     </div>
 
     <div id="cfg-custom" hidden>
-      <label>Provider（API 格式，不可自定义）</label>
-      <select id="cfg-provider">
+      <label>Provider</label>
+      <select id="cfg-provider" onchange="onProviderChange()">
         <option value="openai">OpenAI（OpenAI 兼容）</option>
         <option value="anthropic">Anthropic</option>
         <option value="deepseek">DeepSeek</option>
         <option value="google">Google</option>
+        <option value="custom">自定义（填 Base URL）</option>
       </select>
+      <div id="cfg-custom-ep" hidden>
+        <label>Base URL（自定义端点地址）</label>
+        <input id="cfg-base-url" autocomplete="off" placeholder="https://your-gateway.example/v1">
+        <label>协议</label>
+        <select id="cfg-protocol">
+          <option value="openai">OpenAI 兼容</option>
+          <option value="anthropic">Anthropic</option>
+        </select>
+      </div>
       <label>Model</label>
       <input id="cfg-model" autocomplete="off" placeholder="模型 ID">
       <label>API Key</label>
@@ -383,10 +393,6 @@
         <option value="ask">每次询问（仅重要操作提示）</option>
         <option value="auto">全部允许（不再逐个点击）</option>
       </select>
-      <div class="row">
-        <button onclick="closeSettings()">关闭</button>
-        <button class="save" onclick="applyConfirmMode()">应用</button>
-      </div>
     </div>
     <hr class="sep">
     <div id="cfg-switch">
@@ -401,12 +407,12 @@
           <option value="swarm">swarm</option>
         </select>
         <div class="err" id="cfg-switch-err"></div>
-        <div class="row">
-          <button onclick="closeSettings()">关闭</button>
-          <button class="save" onclick="applySwitch()">应用</button>
-        </div>
       </div>
       <div id="cfg-switch-empty" hidden class="hint">发送任务创建会话后，可在此切换规划模式。</div>
+    </div>
+    <div class="row" id="cfg-footer">
+      <button onclick="closeSettings()">关闭</button>
+      <button class="save" onclick="applySettings()">应用</button>
     </div>
   </div>
 </div>
@@ -764,20 +770,55 @@ function openSettings() {
   fetch("/confirm-mode").then(r => r.json()).then(d => {
     if (d && d.mode) $("cfg-confirm-mode").value = d.mode;
   }).catch(() => {});
+  // 预填 Provider / Base URL(自定义端点回填)
+  fetch("/config").then(r => r.json()).then(c => {
+    if (c && c.provider) {
+      // 自定义端点以协议 + base_url 形式存回,这里反向还原成"自定义"选项
+      if (c.base_url && ["openai", "anthropic"].includes(c.provider)) {
+        $("cfg-provider").value = "custom";
+        $("cfg-base-url").value = c.base_url;
+        $("cfg-protocol").value = c.provider;
+        onProviderChange();
+      } else {
+        $("cfg-provider").value = c.provider;
+        onProviderChange();
+      }
+    }
+  }).catch(() => {});
   showChoice();
 }
+// 选择"自定义"时显示 Base URL + 协议输入
+function onProviderChange() {
+  $("cfg-custom-ep").hidden = $("cfg-provider").value !== "custom";
+}
 
-async function applyConfirmMode() {
-  const mode = $("cfg-confirm-mode").value;
+// 底部统一"应用":同时保存确认模式与(有会话时)本会话规划模式。
+async function applySettings() {
+  // 1) 确认模式(全局)
+  const cmode = $("cfg-confirm-mode").value;
   try {
     const res = await fetch("/confirm-mode", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
+      body: JSON.stringify({ mode: cmode }),
     });
     if (!res.ok) { alert("确认模式保存失败（" + res.status + "）"); return; }
-    closeSettings();
-  } catch (e) { alert("确认模式保存失败：" + e.message); }
+  } catch (e) { alert("确认模式保存失败：" + e.message); return; }
+  // 2) 本会话规划模式(仅在有会话时)
+  if (sessionId) {
+    const mode = $("cfg-mode").value;
+    try {
+      const res = await fetch("/sessions/" + sessionId + "/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!res.ok) { alert("规划模式保存失败（" + res.status + "）"); return; }
+    } catch (e) { alert("规划模式保存失败：" + e.message); return; }
+  }
+  closeSettings();
+  loadStatus();
+  loadSessions();
 }
 function closeSettings() {
   $("settings").classList.remove("show");
@@ -883,7 +924,15 @@ async function _saveErrorDetail(res) {
   return "保存失败（" + res.status + "）";
 }
 async function saveConfig() {
-  const provider = $("cfg-provider").value.trim();
+  let provider = $("cfg-provider").value.trim();
+  const isCustom = provider === "custom";
+  // 自定义端点:provider 折叠成所选协议,并带 base_url(对齐 CLI 的自定义兼容接口)。
+  let base_url = "";
+  if (isCustom) {
+    base_url = $("cfg-base-url").value.trim();
+    if (!base_url) { $("cfg-err").textContent = "自定义端点需填写 Base URL"; return; }
+    provider = $("cfg-protocol").value.trim() || "openai";
+  }
   const model = $("cfg-model").value.trim();
   const api_key = $("cfg-key").value.trim();
   if (!api_key) { $("cfg-err").textContent = "API Key 不能为空"; return; }
@@ -891,31 +940,13 @@ async function saveConfig() {
     const res = await fetch("/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, model, api_key }),
+      body: JSON.stringify({ provider, model, api_key, base_url }),
     });
     if (!res.ok) { $("cfg-err").textContent = await _saveErrorDetail(res); return; }
     closeSettings();
     loadStatus();
   } catch (e) {
     $("cfg-err").textContent = _saveError(e);
-  }
-}
-// 运行时切换规划模式（仅本会话；模型由全局配置决定）
-async function applySwitch() {
-  if (!sessionId) { $("cfg-switch-err").textContent = "请先发送一次任务以创建会话"; return; }
-  const mode = $("cfg-mode").value;
-  try {
-    const res = await fetch("/sessions/" + sessionId + "/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode }),
-    });
-    if (!res.ok) { $("cfg-switch-err").textContent = await _saveErrorDetail(res); return; }
-    closeSettings();
-    loadStatus();
-    loadSessions();
-  } catch (e) {
-    $("cfg-switch-err").textContent = _saveError(e);
   }
 }
 checkConfig();
@@ -959,18 +990,89 @@ function newSession() {
   loadSessions(); loadStatus(); loadTodos();
 }
 
+// 自写极简 markdown 渲染器:依赖无关、XSS 安全(先转义再只产出已知安全标签)。
+function _escHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
+}
+function _safeUrl(u) {
+  // 仅放行 http(s)/mailto,拒绝 javascript: 等注入。
+  return /^(https?:|mailto:)/i.test(u) ? u : "#";
+}
+function _renderInline(s) {
+  // 行内代码优先处理,避免其中的 * _ 被后续规则误吞
+  s = s.replace(/`([^`]+)`/g, (_, c) => "<code>" + c + "</code>");
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,
+    (_, t, u) => "<a href=\"" + _safeUrl(u) + "\" target=\"_blank\" rel=\"noopener\">" + t + "</a>");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+       .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+       .replace(/(^|[^_])_([^_]+)_(?!_)/g, "$1<em>$2</em>");
+  return s;
+}
+function _renderProse(text) {
+  const lines = String(text).split("\n");
+  let out = "", listType = null, listBuf = [];
+  const flushList = () => {
+    if (!listType) return;
+    out += "<" + listType + ">" +
+      listBuf.map(li => "<li>" + _renderInline(_escHtml(li)) + "</li>").join("") +
+      "</" + listType + ">";
+    listType = null; listBuf = [];
+  };
+  let para = [];
+  const flushPara = () => {
+    if (!para.length) return;
+    out += "<p>" + _renderInline(_escHtml(para.join("\n"))) + "</p>";
+    para = [];
+  };
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (t === "") { flushList(); flushPara(); continue; }
+    let m;
+    if ((m = /^(#{1,6})\s+(.*)$/.exec(t))) {
+      flushList(); flushPara();
+      const lvl = m[1].length;
+      out += "<h" + lvl + ">" + _renderInline(_escHtml(m[2])) + "</h" + lvl + ">";
+    } else if (/^(-{3,}|\*{3,})$/.test(t)) {
+      flushList(); flushPara(); out += "<hr>";
+    } else if ((m = /^>\s?(.*)$/.exec(t))) {
+      flushList(); flushPara(); out += "<blockquote>" + _renderInline(_escHtml(m[1])) + "</blockquote>";
+    } else if ((m = /^[-*]\s+(.*)$/.exec(t))) {
+      flushPara(); if (listType !== "ul") { flushList(); listType = "ul"; }
+      listBuf.push(m[1]);
+    } else if ((m = /^\d+\.\s+(.*)$/.exec(t))) {
+      flushPara(); if (listType !== "ol") { flushList(); listType = "ol"; }
+      listBuf.push(m[1]);
+    } else {
+      flushList(); para.push(raw);
+    }
+  }
+  flushList(); flushPara();
+  return out;
+}
+function renderMarkdown(src) {
+  if (src == null) return "";
+  // 先按围栏代码块切分,代码块内容转义后包 <pre><code>,其余走 prose 渲染。
+  const parts = String(src).split("```");
+  let html = "";
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) {
+      let body = parts[i];
+      const nl = body.indexOf("\n");
+      let code = nl >= 0 ? body.slice(nl + 1) : body;
+      code = code.replace(/\n+$/, "");  // 去掉结尾围栏残留的空行
+      html += "<pre><code>" + _escHtml(code) + "</code></pre>";
+    } else if (parts[i].length) {
+      html += _renderProse(parts[i]);
+    }
+  }
+  return html;
+}
 function addMsg(role, text) {
   const div = document.createElement("div");
   div.className = "msg " + role;
-  // minimal escaping, then restore <pre>/<code> blocks as elements
-  const esc = s => s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
   div.innerHTML = "<div class='who'>" + (role === "user" ? "你" : "◆") + "</div>" +
-    "<div class='body'>" + esc(text)
-      .split(/```(\w*)\n?/)
-      .reduce((acc, part, i, arr) =>
-        i % 2 === 1 ? acc : acc + (arr[i-1] !== undefined
-          ? "<pre><code>" + part + "</code></pre>" : part),
-        "") + "</div>";
+    "<div class='body'>" + renderMarkdown(text) + "</div>";
   $("chat").insertBefore(div, $("live"));
   $("chat").scrollTop = $("chat").scrollHeight;
 }

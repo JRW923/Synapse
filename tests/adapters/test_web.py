@@ -154,6 +154,28 @@ def test_list_sessions_includes_active_connector_session(tmp_path: Path, monkeyp
     assert sid in ids
 
 
+def test_config_accepts_base_url(tmp_path: Path, monkeypatch):
+    # 允许用户自定义兼容端点(base_url),POST 后落入 runtime_key,
+    # 之后 _synapse_for 会透传给 Synapse 的 overrides,而非被忽略。
+    home = tmp_path / "home"
+    _temp_models_json(home)
+    monkeypatch.setenv("HOME", str(home))
+    app = create_app()
+    client = TestClient(app)
+
+    resp = client.post("/config", json={
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "api_key": "sk-test-dummy",
+        "base_url": "https://my-self-hosted.example/v1",
+    })
+    assert resp.status_code == 200
+
+    data = client.get("/config").json()
+    assert data["configured"] is True
+    assert data["base_url"] == "https://my-self-hosted.example/v1"
+
+
 def _wait_for_local_connector(port: int, timeout: float = 12.0) -> dict | None:
     deadline = time.time() + timeout
     while time.time() < deadline:

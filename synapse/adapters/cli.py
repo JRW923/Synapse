@@ -141,14 +141,18 @@ from synapse.adapters.cli_render import (  # terminal rendering layer
 )
 
 
-def _install_cancel_handler(synapse, status_holder=None) -> object:
+def _install_cancel_handler(synapse, status_holder=None, task_holder=None) -> object:
     """Install a SIGINT handler that requests cancellation on the active planner
     (instead of hard-killing the process) so a long task stops at the next
     iteration boundary. Returns the previous handler to restore afterwards.
 
-    ponytail: only the ReAct/PlanExecute planners implement request_cancel();
-    for others we fall back to the default handler (which raises
-    KeyboardInterrupt, caught and saved by the caller).
+    *task_holder* 可选：传入一个可变容器(如 ``[]``),运行协程在开始执行时把自身
+    asyncio.Task 句柄放进去。有它时,首次 Ctrl+C 在置取消标志的同时 ``task.cancel()``
+    立即从当前 await 跳出(对齐 connector 的取消);并保留"3 秒内再按一次 Ctrl+C 强杀"。
+    不传(REPL 交互循环)则只置标志 + 双按强杀,避免取消整个 REPL。
+
+    ponytail: 仅 ReAct/PlanExecute planner 实现 request_cancel();其余回退到默认
+    处理器(双按强杀)。
     """
     planner = None
     try:
@@ -163,8 +167,19 @@ def _install_cancel_handler(synapse, status_holder=None) -> object:
             if hasattr(display, "set_label"):
                 display.set_label("正在取消...（等待当前步骤结束）")
         if planner is not None and hasattr(planner, "request_cancel"):
+            # 双按强杀:3 秒内再次 Ctrl+C 直接退出,找回运行期被替换掉的硬退通道。
+            now = _time.monotonic()
+            global _last_ctrl_c
+            if now - _last_ctrl_c < 3.0:
+                _os._exit(0)
+            _last_ctrl_c = now
             planner.request_cancel()
+            # 有 task 句柄时立即中断当前 await(LLM/工具调用),不必苦等迭代边界。
+            if task_holder and task_holder[0] is not None and not task_holder[0].cancelled():
+                task_holder[0].cancel()
         elif callable(prev):
+            # 无 request_cancel 的 planner(hierarchical/swarm):回退默认处理器,
+            # 它已实现双按强杀,不会静默。
             prev(signum, frame)
 
     try:
@@ -341,7 +356,7 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None, a
     return _confirm
 
 
-async def _run_task_streamed(synapse, task, session, console, use_rich, status_holder=None):
+async def _run_task_streamed(synapse, task, session, console, use_rich, status_holder=None, task_holder=None):
     """Run *task* with a Rich live panel (REPL-style streaming).
 
     Shared by the REPL and the ``run`` subcommand so a one-shot task shows the
@@ -353,6 +368,9 @@ async def _run_task_streamed(synapse, task, session, console, use_rich, status_h
     (so the REPL keeps its Ctrl+C / error semantics, and ``run`` can print a
     friendly message instead of a raw traceback).
     """
+    # 把主任务句柄交给 SIGINT 处理器,使其能 task.cancel() 立即中断当前 await。
+    if task_holder is not None:
+        task_holder[0] = asyncio.current_task()
     if not use_rich or console is None:
         return await synapse.run(task, session=session)
     live_run = _LiveRun(synapse, console, status_holder, persist_final=True)
@@ -806,12 +824,15 @@ def main():
         from synapse.modules.todo import get_default_todo_store
         get_default_todo_store().bind_session(session.id)
         status_holder: list = []
-        prev_handler = _install_cancel_handler(synapse, status_holder)
+        task_holder: list = []
+        prev_handler = _install_cancel_handler(synapse, status_holder, task_holder)
         try:
             result = asyncio.run(
-                _run_task_streamed(synapse, task, session, console, use_rich, status_holder)
+                _run_task_streamed(
+                    synapse, task, session, console, use_rich, status_holder, task_holder
+                )
             )
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, asyncio.CancelledError):
             with _swallow("run: session save on interrupt"):
                 session.save()
             print("任务已中断，当前会话已保存；可用 synapse --resume 继续。")
