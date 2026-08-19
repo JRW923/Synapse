@@ -1052,7 +1052,7 @@ _SLASH_COMMANDS: tuple = (
     ("/memory",          "查看会话信息与 token 用量"),
     ("/session",         "显示会话路径"),
     ("/sessions",        "列出已保存的会话"),
-    ("/resume",          "恢复会话（默认最近一次）"),
+    ("/resume",          "恢复会话（无参数则列表选择）"),
     ("/reset",           "清空会话"),
     ("/clear",           "/reset 的别名"),
     ("/model",           "显示/切换模型"),
@@ -1135,7 +1135,7 @@ def _make_prompt_session():
             multiline=True,
             key_bindings=merge_key_bindings([load_key_bindings(), kb]),
             complete_while_typing=True,
-            bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 ",
+            bottom_toolbar=" Enter 发送 · Esc+Enter 换行 · Tab 补全 · ↑↓/Ctrl+R 历史 · /exit 退出 ",
             show_frame=True,
             style=Style.from_dict({
                 "frame": "fg:ansibrightcyan",
@@ -1420,7 +1420,7 @@ def _show_help(console):
     t.add_row("  /memory", "查看会话信息与 token 用量")
     t.add_row("  /session", "显示会话路径")
     t.add_row("  /sessions", "列出已保存的会话")
-    t.add_row("  /resume [id]", "恢复会话（默认最近一次）")
+    t.add_row("  /resume [id]", "恢复会话（无参数则列表选择）")
     t.add_row("  /reset, /clear", "清空会话")
     t.add_row("  /model [name|num]", "显示/切换模型（切换会保存为默认）")
     t.add_row("  /model add", "添加模型配置")
@@ -1707,6 +1707,83 @@ def _pick_model(console, entries, initial: int = 0) -> int | None:
                 num = int(key)
                 if 1 <= num <= n:
                     return num - 1
+
+
+def _preview_session(s, limit: int) -> str:
+    """取会话首条用户消息作为预览，便于在列表里辨识要恢复哪一条。"""
+    limit = max(0, limit)
+    for m in s.messages:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        c = content.strip().replace("\n", " ")
+        if m.role == "user" and c:
+            return _middle(c, limit)
+    # 没有用户消息时退回任意非空消息首行
+    for m in s.messages:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        c = content.strip().replace("\n", " ")
+        if c:
+            return _middle(c, limit)
+    return "(空会话)"
+
+
+def _pick_session(console, sessions, initial: int = 0):
+    """交互式选择已保存会话（Rich Live）。返回选中的 Session 或 None（取消）。"""
+    n = len(sessions)
+    if n == 0:
+        return None
+    idx = max(0, min(initial, n - 1))
+    from rich.text import Text
+    from rich.live import Live
+
+    width = max(getattr(console, "width", 80), 40)
+    limit = max(0, width - 14)
+
+    def _render():
+        lines = [Text("  选择要恢复的会话（↑↓ 移动，Enter 选择，Esc 取消）", style="dim")]
+        for i, s in enumerate(sessions):
+            head = Text(f"  {'▶' if i == idx else ' '} ")
+            head.append(s.id[:8], style="bold bright_cyan" if i == idx else "bright_cyan")
+            head.append(f"  ·  {len(s.messages)} msgs\n", style=_HINT)
+            tail = Text(f"      {_preview_session(s, limit)}\n", style=_SYSTEM)
+            line = Text()
+            line.append_text(head)
+            line.append_text(tail)
+            lines.append(line)
+        return Text("\n").join(lines)
+
+    console.print()
+    with Live(_render(), console=console, refresh_per_second=30, transient=True) as live:
+        while True:
+            key = _get_key()
+            if key == "up" and idx > 0:
+                idx -= 1
+                live.update(_render())
+            elif key == "down" and idx < n - 1:
+                idx += 1
+                live.update(_render())
+            elif key in ("enter", "\r", "\n", " "):
+                return sessions[idx]
+            elif key == "\x1b":
+                return None
+            elif key.isdigit():
+                num = int(key)
+                if 1 <= num <= n:
+                    return sessions[num - 1]
+    return None
+
+
+def _pick_session_plain(sessions):
+    """无 Rich 时的编号选择。返回选中的 Session 或 None（取消）。"""
+    print("已保存的会话：")
+    for i, s in enumerate(sessions, 1):
+        print(f"  {i}. {s.id[:8]}  ·  {len(s.messages)} msgs  ·  {_preview_session(s, 60)}")
+    while True:
+        choice = input("选择编号（直接回车取消）: ").strip()
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(sessions):
+            return sessions[int(choice) - 1]
+        print("无效选择，请重试。")
 
 
 # ---- First-run wizard -----------------------------------------------------
@@ -2177,7 +2254,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         _show_welcome(console, config, config_source, session)
         _last_cols = console.width
     else:
-        print(f"输入任务开始工作，输入 /help 查看命令\n")
+        print(f"输入任务开始工作，输入 /help 查看命令，/exit 退出\n")
 
     # Deferred — created on first user input.
     _synapse: object = None
@@ -2347,10 +2424,27 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 else:
                     print(msg)
             elif cmd == "/resume":
-                session = _resolve_session(arg or "__latest__")
+                if arg:
+                    session = _resolve_session(arg)
+                    note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
+                else:
+                    sessions = Session.list_sessions()
+                    if not sessions:
+                        note = "没有已保存的会话。"
+                        chosen = None
+                    else:
+                        chosen = (_pick_session(console, sessions)
+                                  if use_rich else _pick_session_plain(sessions))
+                        if chosen is None:
+                            if use_rich:
+                                console.print("[dim]已取消恢复。[/dim]")
+                            else:
+                                print("已取消恢复。")
+                            continue
+                        session = chosen
+                        note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
                 from synapse.modules.todo import get_default_todo_store
                 get_default_todo_store().bind_session(session.id)
-                note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
                 if use_rich:
                     console.print(f"[dim]{note}[/dim]")
                 else:

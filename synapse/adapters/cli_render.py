@@ -149,14 +149,13 @@ class _LiveDisplay:
     # 200ms so a fast provider cannot monopolize the terminal.
     _MIN_REFRESH_INTERVAL = 0.05
 
-    def __init__(self, console, fmt_tokens, fmt_elapsed, fmt_stats=None, fmt_progress=None):
+    def __init__(self, console, fmt_tokens, fmt_elapsed, fmt_stats=None):
         from rich.live import Live
 
         self._console = console
         self._fmt_tokens = fmt_tokens
         self._fmt_elapsed = fmt_elapsed
         self._fmt_stats = fmt_stats
-        self._fmt_progress = fmt_progress
         self._buf: list[str] = []
         self._buf_len = 0
         self._label = "Thinking..."
@@ -306,10 +305,6 @@ class _LiveDisplay:
         text = Text()
         if self._fmt_stats:
             text.append(self._fmt_stats() + "\n", style=_SYSTEM)
-        if self._fmt_progress:
-            progress = self._fmt_progress()
-            if progress:
-                text.append(progress + "\n", style=_SYSTEM)
         if lines:
             text.append("\n".join(lines), style="none")
         else:
@@ -348,7 +343,6 @@ class _LiveRun:
             self._fmt_tokens,
             self._fmt_elapsed,
             self._fmt_token_stats,
-            self._fmt_progress,
         )
         self.event_bus = None
         self.swarm_tracker = None
@@ -365,13 +359,6 @@ class _LiveRun:
             f"out {_format_token_count(self.tokens['output'])} · "
             f"total {_format_token_count(self.tokens['input'] + self.tokens['output'])} tok"
         )
-
-    def _fmt_progress(self) -> str:
-        if not self.max_iterations or not self.iteration:
-            return ""
-        ratio = min(1.0, self.iteration / self.max_iterations)
-        filled = int(round(ratio * 24))
-        return "  " + "━" * filled + "░" * (24 - filled)
 
     def _fmt_elapsed(self) -> str:
         seconds = _time.monotonic() - self.elapsed["start"]

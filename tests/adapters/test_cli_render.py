@@ -1,5 +1,7 @@
 """Tests for CLI result rendering helpers (status color + _print_result)."""
 
+from types import SimpleNamespace
+
 from synapse.adapters.cli import _print_result
 from synapse.adapters.cli_render import _status_style_for
 from synapse.protocols.planner import ResultStatus, AgentResult, ExecutionMetrics
@@ -293,7 +295,6 @@ def test_live_display_renders_token_breakdown_and_iteration():
         lambda: "2.0k",
         lambda: "4s",
         lambda: "tokens  in 1.2k · out 840 · total 2.0k tok",
-        lambda: "  ━━━━━━━░░░░░░░░░░░░░",
     )
     display.set_iteration(3, 50)
     display.set_label("调用模型")
@@ -303,7 +304,6 @@ def test_live_display_renders_token_breakdown_and_iteration():
     assert "in 1.2k" in plain
     assert "out 840" in plain
     assert "2.0k tok" in plain
-    assert "━" in plain
 
 
 def test_live_system_metadata_uses_a_distinct_neutral_style():
@@ -316,7 +316,6 @@ def test_live_system_metadata_uses_a_distinct_neutral_style():
         lambda: "2.0k",
         lambda: "4s",
         lambda: "tokens  in 1.2k · out 840 · total 2.0k tok",
-        lambda: "  ━━━━━━━━━━━━━━━━━━━━━━━━",
     )
     display.set_iteration(3, 50)
     display.add_timeline("✓ shell                         12ms")
@@ -342,3 +341,58 @@ def test_token_count_format_is_compact_and_stable():
     assert _format_token_count(42) == "42"
     assert _format_token_count(1_200) == "1.2k"
     assert _format_token_count(1_200_000) == "1.2M"
+
+
+# ---- /resume interactive history picker ----------------------------------
+
+
+def _fake_session(sid: str, messages: list) -> object:
+    """Minimal Session stand-in carrying id + messages for picker tests."""
+    return SimpleNamespace(id=sid, messages=messages)
+
+
+def test_preview_session_prefers_first_user_message():
+    from synapse.adapters.cli import _preview_session
+
+    s = _fake_session("abc12345", [
+        SimpleNamespace(role="system", content="你是助手"),
+        SimpleNamespace(role="user", content="帮我把登录页改成深色模式\n第二行"),
+        SimpleNamespace(role="assistant", content="好的，我来改"),
+    ])
+    assert _preview_session(s, 200) == "帮我把登录页改成深色模式 第二行"
+
+
+def test_preview_session_falls_back_when_no_user_message():
+    from synapse.adapters.cli import _preview_session
+
+    s = _fake_session("def67890", [
+        SimpleNamespace(role="assistant", content="任务已完成"),
+    ])
+    assert _preview_session(s, 200) == "任务已完成"
+
+
+def test_preview_session_empty_returns_placeholder():
+    from synapse.adapters.cli import _preview_session
+
+    s = _fake_session("zero0000", [])
+    assert _preview_session(s, 200) == "(空会话)"
+
+
+def test_pick_session_plain_returns_chosen_index(monkeypatch):
+    from synapse.adapters.cli import _pick_session_plain
+
+    sessions = [
+        _fake_session("aaa11111", [SimpleNamespace(role="user", content="X")]),
+        _fake_session("bbb22222", [SimpleNamespace(role="user", content="Y")]),
+    ]
+    monkeypatch.setattr("builtins.input", lambda _="": "2")
+    assert _pick_session_plain(sessions).id == "bbb22222"
+
+
+def test_pick_session_plain_empty_input_cancels(monkeypatch):
+    from synapse.adapters.cli import _pick_session_plain
+
+    sessions = [_fake_session("aaa11111", [SimpleNamespace(role="user", content="X")])]
+    monkeypatch.setattr("builtins.input", lambda _="": "")
+    assert _pick_session_plain(sessions) is None
+
