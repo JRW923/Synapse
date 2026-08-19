@@ -55,8 +55,14 @@ class Session:
             ],
         }
 
-    def save(self, directory: Path | str = DEFAULT_SESSION_DIR) -> Path:
-        """Persist the session to ``<directory>/<id>.json`` and return the path."""
+    def save(self, directory: Path | str = DEFAULT_SESSION_DIR) -> Path | None:
+        """Persist the session to ``<directory>/<id>.json`` and return the path.
+
+        空会话直接跳过：没有任何消息的会话文件没有恢复价值，只会把
+        /resume 的选择列表越堆越长。返回 None 表示未落盘。
+        """
+        if not self.messages:
+            return None
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{self.id}.json"

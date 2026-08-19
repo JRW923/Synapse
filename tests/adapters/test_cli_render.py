@@ -396,3 +396,100 @@ def test_pick_session_plain_empty_input_cancels(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _="": "")
     assert _pick_session_plain(sessions) is None
 
+
+# ---- 确认（审批）信息展示 --------------------------------------------------
+
+
+def _run_confirm(request, answer: str, capsys, monkeypatch) -> str:
+    """跑一次确认回调,返回打印的提示文本。"""
+    import asyncio
+
+    from synapse.adapters.cli import _make_confirm_callback
+
+    monkeypatch.setattr("builtins.input", lambda _="": answer)
+    cb = _make_confirm_callback()
+    assert asyncio.run(cb(request)) is (answer == "a" or answer == "y")
+    return capsys.readouterr().out
+
+
+def test_confirm_prompt_renders_structured_block(capsys, monkeypatch):
+    request = SimpleNamespace(
+        tool_name="shell",
+        tool_params={"command": 'python3 -c "print(1)"'},
+        risk_level="execute",
+        session_id="s1",
+    )
+    out = _run_confirm(request, "a", capsys, monkeypatch)
+
+    assert "工具" in out and "shell" in out and "执行" in out
+    assert "命令" in out and 'python3 -c "print(1)"' in out
+    assert "允许(a) / 拒绝(d) / 一律允许(y)" in out
+    assert "─" in out  # 分隔线
+
+
+def test_confirm_prompt_wraps_long_command(capsys, monkeypatch):
+    request = SimpleNamespace(
+        tool_name="shell",
+        tool_params={"command": "echo " + "x" * 150},
+        risk_level="execute",
+        session_id="s1",
+    )
+    out = _run_confirm(request, "d", capsys, monkeypatch)
+
+    # 长命令必须续行,每行不超过 64+8 列,不依赖终端软折行
+    cmd_lines = [l for l in out.splitlines() if l.startswith(("  命令", "        "))]
+    assert len(cmd_lines) >= 3
+    assert all(len(l) <= 72 for l in cmd_lines)
+
+
+def test_confirm_prompt_shows_write_target_and_content(capsys, monkeypatch):
+    request = SimpleNamespace(
+        tool_name="write",
+        tool_params={"path": "/tmp/new_module.py", "content": "import os\n\ndef f():\n    ..."},
+        risk_level="write_local",
+        session_id="s1",
+    )
+    out = _run_confirm(request, "a", capsys, monkeypatch)
+
+    assert "目标" in out and "/tmp/new_module.py" in out
+    assert "内容" in out and "import os" in out
+    assert "def f()" not in out  # 只预览首行,不灌屏
+
+
+# ---- 恢复会话后的历史摘要 --------------------------------------------------
+
+
+def test_print_session_history_shows_recent_conversation(capsys):
+    from synapse.adapters.cli import _print_session_history
+
+    messages = [SimpleNamespace(role="user", content="帮我把登录页改成深色模式")]
+    messages += [SimpleNamespace(role="assistant", content=f"第 {i} 步已完成") for i in range(8)]
+    messages.append(SimpleNamespace(role="user", content="再加个切换按钮"))
+    s = SimpleNamespace(id="abc12345", messages=messages)
+
+    _print_session_history(None, s, use_rich=False)
+    out = capsys.readouterr().out
+
+    assert "最近对话" in out and "共 10 条消息" in out
+    assert "用户: 再加个切换按钮" in out
+    assert "第 0 步已完成" not in out  # 只显示最后几条,不灌屏
+    assert "助手: 第 7 步已完成" in out
+
+
+def test_print_session_history_skips_tool_noise(capsys):
+    from synapse.adapters.cli import _print_session_history
+
+    # tool 消息与空内容不进摘要,避免刷屏
+    s = SimpleNamespace(id="abc12345", messages=[
+        SimpleNamespace(role="tool", content="exit_code: 0"),
+        SimpleNamespace(role="assistant", content=""),
+        SimpleNamespace(role="user", content="跑一下测试"),
+        SimpleNamespace(role="assistant", content="3 passed"),
+    ])
+    _print_session_history(None, s, use_rich=False)
+    out = capsys.readouterr().out
+
+    assert "exit_code" not in out
+    assert "用户: 跑一下测试" in out
+    assert "助手: 3 passed" in out
+

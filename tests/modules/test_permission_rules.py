@@ -38,8 +38,13 @@ def test_ask_rule_falls_through_to_default_logic():
 
 
 def test_remembered_signature_skips_confirmation():
+    # python3 属于 CONFIRM_REQUIRED:未记忆时必须确认;记忆后跳过确认。
+    # (此前用 pytest 当示例,但普通 allowlist 命令现已不要求确认,
+    # 无法再借此考察记忆-跳过路径。)
     a = _auth()
-    req = a.create_request("shell", {"command": "pytest -q"}, RiskLevel.EXECUTE, "s")
+    req = a.create_request("shell", {"command": 'python3 -c "print(1)"'},
+                           RiskLevel.EXECUTE, "s")
+    assert a.authorize(req).requires_confirmation  # 未记忆 → 必须确认
     a.remember_approval(req)
     d = a.authorize(req)
     assert d.allowed and not d.requires_confirmation

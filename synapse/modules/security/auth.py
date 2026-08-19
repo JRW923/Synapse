@@ -250,10 +250,14 @@ class ActionAuthorizer:
                     reason=f"Command '{self._first_token(command)}' can spawn code/network — confirmation required",
                     requires_confirmation=True,
                 )
+            # 到这里的必然是普通 allowlist 命令：python/curl/wget/$() 等
+            # 高危形态已在上面分支拦截并要求确认。若此处仍强制确认，没有
+            # confirm callback 的路径（synapse run 不带 --yes、非流式 /run）
+            # 会把 echo/ls 这类无害命令也自动拒绝，shell 工具形同虚设。
             return AuthDecision(
                 allowed=True,
                 reason="Command in allowlist",
-                requires_confirmation=self.confirmation_enabled,
+                requires_confirmation=False,
             )
 
         # --- EXTERNAL ---------------------------------------------------------------

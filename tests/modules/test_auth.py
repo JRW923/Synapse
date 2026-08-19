@@ -214,3 +214,37 @@ def test_shell_redirection_outside_workspace_denied():
 def test_shell_redirection_relative_ok():
     auth, req = _shell_req("echo hi > out.txt")
     assert auth.authorize(req).allowed
+
+
+def test_plain_allowlisted_command_runs_silently():
+    """回归：普通 allowlist 命令（echo/ls/pwd）必须静默放行。此前它们一律
+    requires_confirmation=confirmation_enabled，没有 confirm callback 的路径
+    （synapse run 不带 --yes、非流式 /run）会把 echo 也自动拒绝——shell 工具
+    形同虚设，用户侧表现为"shell 命令总失败"。"""
+    auth, req = _shell_req("echo hello")
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert not decision.requires_confirmation
+
+    auth2, req2 = _shell_req("pwd")
+    decision2 = auth2.authorize(req2)
+    assert decision2.allowed
+    assert not decision2.requires_confirmation
+
+
+def test_python3_allowlisted_but_gated_by_confirmation():
+    """python3 属于 CONFIRM_REQUIRED：可执行（不再被 allowlist 硬拒），
+    但必须经用户确认，绝不静默运行。"""
+    auth, req = _shell_req('python3 -c "print(1)"')
+    decision = auth.authorize(req)
+    assert decision.allowed
+    assert decision.requires_confirmation
+
+
+def test_schema_default_allowlist_falls_back_to_builtin_set():
+    """回归：ToolsConfig.allowlist_commands 默认值必须是 None（回落到
+    ActionAuthorizer 内置集）。此前 schema 内联了一份不完整的副本，装配时
+    覆盖内置集，python3/head/tail/rm/pwd 等常见命令被硬拒且无确认机会。"""
+    from synapse.config.schema import ToolsConfig
+
+    assert ToolsConfig().allowlist_commands is None

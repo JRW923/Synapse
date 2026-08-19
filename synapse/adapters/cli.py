@@ -288,20 +288,37 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None, a
             return a.approval_signature(request)
         return getattr(request, "tool_name", "unknown")
 
+    _RISK_LABELS = {
+        "read_only": "只读", "write_local": "写入", "execute": "执行",
+        "external": "外部访问", "meta": "元操作",
+    }
+
     def _describe(request) -> str:
-        """Human-readable summary of the risky call: tool, risk level, target."""
+        """结构化多行确认块：工具(风险) / 命令(续行) / 目标 / 内容预览。"""
         params = getattr(request, "tool_params", {}) or {}
         risk = getattr(request, "risk_level", "") or ""
-        target = params.get("path") or params.get("command") or ""
-        desc = f"{request.tool_name}"
+        rows = []
+        tool = f"{request.tool_name}"
         if risk:
-            desc += f" [{risk}]"
-        if target:
-            desc += f"  →  {target}"
-        return desc
+            tool += f"（{_RISK_LABELS.get(risk, risk)}）"
+        rows.append(f"  工具  {tool}")
+        cmd = str(params.get("command") or "")
+        if cmd:
+            # 长命令按 64 列续行缩进排，避免终端折行错乱
+            for i in range(0, len(cmd), 64):
+                rows.append(("  命令  " if i == 0 else "        ") + cmd[i:i + 64])
+        path = params.get("path")
+        if path:
+            rows.append(f"  目标  {path}")
+        content = params.get("content") or params.get("new_content") or ""
+        if content:
+            first = content.strip().splitlines()[0] if content.strip() else ""
+            if first:
+                rows.append(f"  内容  {_middle(first, 56)}")
+        bar = "  " + "─" * 44
+        return "\n".join(["", bar, *rows, bar])
 
     async def _confirm(request):
-        tool_name = getattr(request, "tool_name", "unknown")
         sig = _signature(request)
 
         # Permanent allow list (session-scoped "yes to all" per signature).
@@ -324,7 +341,8 @@ def _make_confirm_callback(pause_event=None, status_holder=None, exiting=None, a
         try:
             loop = asyncio.get_running_loop()
 
-            prompt = f"\n  [auth] {_describe(request)}  (a)llow / (d)eny / (y)es to all: "
+            prompt = (_describe(request)
+                      + "\n  允许(a) / 拒绝(d) / 一律允许(y): ")
             # One prompt at a time across all workers sharing this callback.
             async with _prompt_lock:
                 _sys.stdout.write(prompt)
@@ -1726,6 +1744,30 @@ def _preview_session(s, limit: int) -> str:
     return "(空会话)"
 
 
+def _print_session_history(console, session, use_rich, limit: int = 6):
+    """恢复会话后打印最近对话摘要，让用户立刻知道这个会话之前做过什么。"""
+    convo = [
+        m for m in session.messages
+        if m.role in ("user", "assistant")
+        and isinstance(m.content, str) and m.content.strip()
+    ]
+    if not convo:
+        return
+    tail = convo[-limit:]
+    rows = [f"最近对话（共 {len(session.messages)} 条消息，显示最后 {len(tail)} 条）："]
+    for m in tail:
+        who = "用户" if m.role == "user" else "助手"
+        first_line = " ".join(
+            l.strip() for l in m.content.strip().splitlines() if l.strip()
+        )
+        rows.append(f"  {who}: {_middle(first_line, 56)}")
+    text = "\n".join(rows)
+    if use_rich:
+        console.print(f"[dim]{text}[/dim]\n")
+    else:
+        print(text + "\n")
+
+
 def _pick_session(console, sessions, initial: int = 0):
     """交互式选择已保存会话（Rich Live）。返回选中的 Session 或 None（取消）。"""
     n = len(sessions)
@@ -1741,13 +1783,11 @@ def _pick_session(console, sessions, initial: int = 0):
     def _render():
         lines = [Text("  选择要恢复的会话（↑↓ 移动，Enter 选择，Esc 取消）", style="dim")]
         for i, s in enumerate(sessions):
-            head = Text(f"  {'▶' if i == idx else ' '} ")
-            head.append(s.id[:8], style="bold bright_cyan" if i == idx else "bright_cyan")
-            head.append(f"  ·  {len(s.messages)} msgs\n", style=_HINT)
-            tail = Text(f"      {_preview_session(s, limit)}\n", style=_SYSTEM)
-            line = Text()
-            line.append_text(head)
-            line.append_text(tail)
+            cur = i == idx
+            line = Text(f"  {'▶' if cur else ' '} ")
+            line.append(s.id[:8], style="bold bright_cyan" if cur else "bright_cyan")
+            line.append(f" {len(s.messages)}条 ", style=_HINT)
+            line.append(_preview_session(s, limit - 24), style=_SYSTEM)
             lines.append(line)
         return Text("\n").join(lines)
 
@@ -2413,7 +2453,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     print(f"Messages:   {len(session.messages)}")
             elif cmd == "/sessions":
                 from synapse.core.session import Session as _S
-                sessions = _S.list_sessions()
+                # 空会话（无消息）没有恢复价值，不进列表。
+                sessions = [s for s in _S.list_sessions() if s.messages]
                 msg = "No saved sessions." if not sessions else (
                     "Saved sessions:\n" + "\n".join(
                         f"  {s.id}  ({len(s.messages)} msgs)" for s in sessions[:10]
@@ -2426,9 +2467,9 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             elif cmd == "/resume":
                 if arg:
                     session = _resolve_session(arg)
-                    note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
+                    note = f"已恢复会话 {session.id[:8]}（{len(session.messages)} 条消息）。"
                 else:
-                    sessions = Session.list_sessions()
+                    sessions = [s for s in Session.list_sessions() if s.messages]
                     if not sessions:
                         note = "没有已保存的会话。"
                         chosen = None
@@ -2442,13 +2483,14 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                                 print("已取消恢复。")
                             continue
                         session = chosen
-                        note = f"Resumed session {session.id} ({len(session.messages)} msgs)."
+                        note = f"已恢复会话 {session.id[:8]}（{len(session.messages)} 条消息）。"
                 from synapse.modules.todo import get_default_todo_store
                 get_default_todo_store().bind_session(session.id)
                 if use_rich:
                     console.print(f"[dim]{note}[/dim]")
                 else:
                     print(note)
+                _print_session_history(console, session, use_rich)
             elif cmd == "/context-report":
                 _show_context_report(console, _synapse, use_rich)
             elif cmd == "/score":

@@ -49,3 +49,14 @@ def test_token_estimate():
     s.add_message(Message(role="user", content="hello world"))
     # Rough estimate: ~1.3 tokens per word for English
     assert s.estimated_tokens > 0
+
+
+def test_save_skips_empty_session(tmp_path):
+    """空会话不落盘：没有消息的会话文件没有恢复价值，只会堆满 /resume 列表。"""
+    s = Session()
+    assert s.save(tmp_path) is None
+    assert list(tmp_path.glob("*.json")) == []
+
+    s.add_message(Message(role="user", content="hi"))
+    path = s.save(tmp_path)
+    assert path is not None and path.exists()

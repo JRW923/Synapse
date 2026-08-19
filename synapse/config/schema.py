@@ -96,17 +96,10 @@ class ToolsConfig(BaseModel):
         "load_skill", "todo_write", "todo_read", "web_search", "web_fetch",
         "web", "db", "browser",
     ])
-    allowlist_commands: list[str] = Field(default_factory=lambda: [
-        "ls", "git", "pytest", "python", "pip", "npm", "cargo", "go", "node",
-        "curl", "wget", "mkdir", "find", "cat", "echo", "type", "dir",
-        # PowerShell cmdlets so Windows-first agents aren't denied by default
-        # (matching is case-insensitive in ActionAuthorizer).
-        "get-content", "get-childitem", "get-item", "get-process",
-        "get-location", "measure-object", "select-string", "select-object",
-        "test-path", "where-object", "sort-object", "group-object",
-        "compare-object", "format-table", "format-list", "out-string",
-        "new-item", "remove-item", "copy-item", "move-item", "set-content",
-    ])
+    # None → 回落到 ActionAuthorizer 内置默认集（ALWAYS_ALLOWED_COMMANDS ∪
+    # CONFIRM_REQUIRED_COMMANDS）。此前这里内联了一份不完整的副本，装配时
+    # 覆盖掉内置集，导致 python3/head/tail/rm/pwd 等常见命令被硬拒。
+    allowlist_commands: list[str] | None = None
     workspace_root: str = "."
 
 
