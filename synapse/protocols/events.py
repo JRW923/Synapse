@@ -72,6 +72,7 @@ class ToolCallCompleted(BaseEvent):
     duration_ms: int
     files_touched: list[str] = field(default_factory=list)
     sandbox_violation: bool = False
+    error: str = ""
 
 
 @dataclass(kw_only=True)

@@ -66,6 +66,7 @@ def test_powershell_routing_detection():
     )
     assert _is_powershell_command("Get-Content -LiteralPath x")
     assert _is_powershell_command("get-childitem")
+    assert _is_powershell_command("pwd")
     assert not _is_powershell_command("git status")
     assert not _is_powershell_command("")
     assert route_windows_shell("git status") == "git status"

@@ -721,6 +721,7 @@ class ReActPlanner:
                             success=False,
                             duration_ms=duration_ms,
                             files_touched=[],
+                            error=denied_result.error or "",
                         ))
                         tool_results.append((tc["id"], denied_result))
                     else:
@@ -836,6 +837,7 @@ class ReActPlanner:
                         duration_ms=duration_ms,
                         files_touched=result.metadata.files_touched,
                         sandbox_violation=result.metadata.sandbox_violation,
+                        error=result.error or "",
                     ))
 
             # Drop any prefetched task nobody consumed (denied call, early

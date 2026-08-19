@@ -231,6 +231,8 @@ class SessionInfo(BaseModel):
 class MessageResponse(BaseModel):
     role: str
     content: str
+    tool_calls: list[dict] = PydanticField(default_factory=list)
+    tool_call_id: str | None = None
 
 
 class ExperimentRequest(BaseModel):
@@ -799,6 +801,9 @@ def create_app(
     _STREAM_EVENTS = (
         "agent_progress",
         "llm_token",
+        "plan_created",
+        "task_decomposed",
+        "merge_result",
         "tool_call_started",
         "tool_call_completed",
         "background_result",
@@ -986,7 +991,12 @@ def create_app(
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
         return [
-            MessageResponse(role=m.role, content=m.content)
+            MessageResponse(
+                role=m.role,
+                content=m.content,
+                tool_calls=m.tool_calls,
+                tool_call_id=m.tool_call_id,
+            )
             for m in session.messages
         ]
 
@@ -1002,11 +1012,18 @@ def create_app(
                 continue
             path = DEFAULT_SESSION_DIR / f"{s.id}.json"
             mtime = path.stat().st_mtime if path.exists() else 0
+            preview = next(
+                (m.content.strip().replace("\n", " ")[:96]
+                 for m in s.messages
+                 if m.role == "user" and isinstance(m.content, str) and m.content.strip()),
+                "",
+            )
             out.append({
                 "id": s.id,
                 "message_count": len(s.messages),
                 "estimated_tokens": s.estimated_tokens,
                 "modified_at": mtime,
+                "preview": preview,
             })
             seen.add(s.id)
         # 运行中但尚未落盘的会话(在内存里)也补进列表,侧栏才能立即显示当前会话。
@@ -1018,6 +1035,12 @@ def create_app(
                 "message_count": len(s.messages),
                 "estimated_tokens": s.estimated_tokens,
                 "modified_at": time.time(),
+                "preview": next(
+                    (m.content.strip().replace("\n", " ")[:96]
+                     for m in s.messages
+                     if m.role == "user" and isinstance(m.content, str) and m.content.strip()),
+                    "",
+                ),
             })
         # connector 模式运行中的会话由本地 connector 进程持有,不在服务端
         # sessions 里,靠 broker 的活跃任务补进列表,侧栏才能高亮当前会话。
@@ -1031,9 +1054,34 @@ def create_app(
                     "message_count": 0,
                     "estimated_tokens": 0,
                     "modified_at": time.time(),
+                    "preview": "运行中的会话",
                 })
                 seen.add(sid)
+        # 内存会话和磁盘会话来源不同，统一排序后再交给 WebUI，避免当前会话
+        # 在列表顶部/底部来回跳动。
+        out.sort(key=lambda item: item.get("modified_at", 0), reverse=True)
         return out
+
+    # ---- DELETE /sessions — 一键清空历史会话 -----------------------------
+
+    @app.delete("/sessions")
+    async def clear_sessions():
+        deleted = 0
+        for path in DEFAULT_SESSION_DIR.glob("*.json"):
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError:
+                pass
+        for path in DEFAULT_TODO_DIR.glob("*.json"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        sessions.clear()
+        synapse_instances.clear()
+        app.state.session_runtime.clear()
+        return {"ok": True, "deleted": deleted}
 
     # ---- DELETE /sessions/{session_id} — 删除会话 (WebUI 侧栏) ------------
 
@@ -1050,6 +1098,7 @@ def create_app(
                 todo_path.unlink()
         sessions.pop(session_id, None)
         synapse_instances.pop(session_id, None)
+        app.state.session_runtime.pop(session_id, None)
         return {"ok": True}
 
     # ---- GET /status — 工作区状态栏 (WebUI) -------------------------------

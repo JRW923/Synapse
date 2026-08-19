@@ -39,6 +39,12 @@ _POWERSHELL_CMDLETS = frozenset({
     "copy-item", "move-item", "set-content",
 })
 
+# 常见 Unix/PowerShell 别名在 Windows cmd.exe 中不存在，但模型经常会
+# 使用它们探测工作区。统一交给 PowerShell 解析，避免“授权通过、执行失败”。
+_POWERSHELL_ALIASES = frozenset({
+    "pwd", "ls", "cat", "rm", "cp", "mv",
+})
+
 
 def _is_powershell_command(command: str) -> bool:
     """True when the first word marks PowerShell-only syntax (a cmdlet).
@@ -47,7 +53,7 @@ def _is_powershell_command(command: str) -> bool:
     in powershell or cmd.exe would just report "not recognized".
     """
     head = command.strip().split(None, 1)[0].lower() if command.strip() else ""
-    return head in _POWERSHELL_CMDLETS
+    return head in _POWERSHELL_CMDLETS or head in _POWERSHELL_ALIASES
 
 
 def route_windows_shell(command: str) -> str:
