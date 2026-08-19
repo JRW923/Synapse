@@ -50,3 +50,19 @@ def test_show_todos_view():
         assert c.print.called
     finally:
         store.clear()
+
+
+def test_event_sink_fires_on_change():
+    # 运行期侧栏实时刷新靠这条：set_todos/clear 必须通知已注册的 sink。
+    store = TodoStore()
+    store.bind_session("s1")
+    seen = []
+    store.set_event_sink(lambda sid, todos: seen.append((sid, todos)))
+    store.set_todos([{"content": "x", "status": "pending"}])
+    assert seen == [("s1", [{"content": "x", "status": "pending", "active_form": ""}])]
+    store.clear()
+    assert len(seen) == 2
+    # 摘掉 sink 后不再通知
+    store.set_event_sink(None)
+    store.set_todos([{"content": "y"}])
+    assert len(seen) == 2

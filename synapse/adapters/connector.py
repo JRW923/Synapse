@@ -408,6 +408,14 @@ class ConnectorBroker:
             return None
         return self._jobs.get(record.active_job_id)
 
+    def active_session_ids(self) -> list[str]:
+        """正在运行的 connector 任务对应的 session id(供 web 侧栏运行期高亮)。"""
+        out = []
+        for job in self._jobs.values():
+            if not job.completion.done():
+                out.append(job.session_id)
+        return out
+
     async def resolve_confirm(
         self, request_id: str, approve: bool, *, remember: bool = False,
     ) -> bool:

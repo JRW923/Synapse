@@ -31,11 +31,22 @@ class TodoStore:
         self._todos: list[Todo] = []
         self._directory = Path(directory)
         self._session_id: str | None = None
+        # ponytail: 可选事件汇点,用于把待办变化推给 Web SSE 等外部通道;
+        # 不引入 EventBus 依赖(todo.py 仅用 stdlib)。单用户单进程下足够,
+        # 并发多 session 会互相覆盖 sink —— 升级路径是把 sink 改为 per-session。
+        self._event_sink: "callable | None" = None
 
     def bind_session(self, session_id: str) -> None:
         """Bind the store to a session and load its persisted list (if any)."""
         self._session_id = session_id
         self._todos = self._load(session_id)
+
+    def set_event_sink(self, sink: "callable | None") -> None:
+        self._event_sink = sink
+
+    def _notify(self) -> None:
+        if self._event_sink is not None and self._session_id is not None:
+            self._event_sink(self._session_id, self.list())
 
     def set_todos(self, items: list[dict]) -> None:
         """Replace the list (Claude Code TodoWrite semantics: full snapshot)."""
@@ -48,6 +59,7 @@ class TodoStore:
             for it in items
         ]
         self._persist()
+        self._notify()
 
     def list(self) -> list[dict]:
         return [
@@ -58,6 +70,7 @@ class TodoStore:
     def clear(self) -> None:
         self._todos.clear()
         self._persist()
+        self._notify()
 
     def __len__(self) -> int:
         return len(self._todos)

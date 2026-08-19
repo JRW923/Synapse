@@ -54,6 +54,8 @@
     border: 1px solid transparent; border-radius: 7px; cursor: pointer;
   }
   .session-row:hover { background: var(--bg); border-color: var(--border); }
+  .session-row.current { background: rgba(57,197,207,0.12); border-color: var(--brand); }
+  .tag { font-size: 10px; color: var(--brand); border: 1px solid var(--brand); border-radius: 4px; padding: 0 4px; }
   .session-row .sid {
     font: 12px/1.4 Consolas, monospace; color: var(--text); flex: 1;
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1027,7 +1029,7 @@ async function loadSessions() {
     }
     for (const s of list.slice(0, 50)) {
       const row = document.createElement("div");
-      row.className = "session-row";
+      row.className = "session-row" + (s.id === sessionId ? " current" : "");
       const sid = document.createElement("span");
       sid.className = "sid";
       sid.textContent = s.id.slice(0, 8);
@@ -1091,7 +1093,7 @@ async function loadStatus() {
       "<div class='kv'><span class='k'>模型</span><span class='v'>" + (st.provider || "?") + "/" + (st.model || "?") + "</span></div>" +
       "<div class='kv'><span class='k'>模式</span><span class='v'>" + (st.mode || "?") + "</span></div>" +
       "<div class='kv'><span class='k'>工具</span><span class='v'>" + numberOrZero(st.tools_count) + " 个</span></div>" +
-      "<div class='kv'><span class='k'>工作区</span><span class='v' title='" + (st.workspace || "") + "'>" + (st.workspace || "") + "</span></div>" +
+      "<div class='kv'><span class='k'>工作区</span><span class='v' title='" + (st.workspace || "") + "'>" + (st.workspace || "") + (st.workspace_source === "connector" ? " <span class='tag'>本地连接</span>" : "") + "</span></div>" +
       "<div class='meter'><div class='meter-fill' style='width:" + pct + "%;background:" + barColor + "'></div></div>" +
       "<div class='meter-label'>Token " + formatTokenCount(used) + " / " + formatTokenCount(budget) + " (" + pct + "%)</div>";
   } catch (e) {
@@ -1184,6 +1186,12 @@ async function send(e) {
 }
 
 function handle(item) {
+  if (item.session_id) sessionId = item.session_id;
+  if (item.type === "session") {
+    $("session").textContent = sessionId ? sessionId.slice(0, 8) : "";
+    loadSessions(); loadStatus();
+    return;
+  }
   if (item.type === "event") {
     const ev = item.event;
     if (ev.event_type === "agent_progress") {
@@ -1267,6 +1275,8 @@ function handle(item) {
     } else if (ev.event_type === "swarm_verified") {
       liveState.verified = ev.status || "unknown";
       renderSwarm();
+    } else if (ev.event_type === "todo_updated") {
+      loadTodos();
     }
   } else if (item.type === "confirm") {
     pendingConfirm = item.request_id;

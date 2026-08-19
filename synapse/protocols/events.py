@@ -30,6 +30,7 @@ class EventType(str, Enum):
     TASK_CLAIMED = "task_claimed"
     TASK_RELEASED = "task_released"
     BACKGROUND_RESULT = "background_result"
+    TODO_UPDATED = "todo_updated"
     AGENT_MESSAGE = "agent_message"
     CHECKPOINT_CREATED = "checkpoint_created"
     CHECKPOINT_RESTORED = "checkpoint_restored"
@@ -54,6 +55,13 @@ class ToolCallStarted(BaseEvent):
     event_type: str = EventType.TOOL_CALL_STARTED
     tool_name: str
     tool_params: dict
+
+
+@dataclass(kw_only=True)
+class TodoUpdated(BaseEvent):
+    """待办清单变化(Web 侧栏实时刷新用)。todos 为当前全量快照。"""
+    event_type: str = EventType.TODO_UPDATED
+    todos: list = field(default_factory=list)
 
 
 @dataclass(kw_only=True)

@@ -941,6 +941,7 @@ def main():
                     "connector_id": connection.connector_id,
                     "browser_token": local_browser_token,
                     "name": connection.name,
+                    "workspace": str(Path(args.workspace).resolve()),
                 }
 
             # 单 Ctrl+C 干净退出：关服务 + 取消 connector。

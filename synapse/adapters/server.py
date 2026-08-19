@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import tempfile
+import time
 import uuid
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ from synapse.adapters.connector import (
 )
 from synapse.config import load_config
 from synapse.core.events import EventBus
+from synapse.protocols.events import TodoUpdated
 from synapse.core.session import DEFAULT_SESSION_DIR, Session
 from synapse.modules.todo import DEFAULT_TODO_DIR, TodoStore, get_default_todo_store
 from synapse.protocols.planner import AgentResult, ExecutionMetrics
@@ -796,6 +798,7 @@ def create_app(
         "review_submitted",
         "vote_cast",
         "swarm_verified",
+        "todo_updated",
     )
 
     @app.post("/run/stream")
@@ -803,9 +806,13 @@ def create_app(
         connector_job = await _connector_job_for(req)
         if connector_job is not None:
             async def _connector_event_stream():
+                # 抢在首个 connector 事件前把 session_id 交给前端,侧栏立即显示
+                # 当前会话(与纯 web 模式一致)。
+                yield f"data: {json.dumps({'type': 'session', 'session_id': connector_job.session_id}, ensure_ascii=False)}\n\n"
                 try:
                     while True:
                         item = await connector_broker.next_event(connector_job)
+                        item.setdefault("session_id", connector_job.session_id)
                         yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
                         if item["type"] in ("done", "error"):
                             break
@@ -839,13 +846,25 @@ def create_app(
             for k, v in list(data.items()):
                 if hasattr(v, "isoformat"):
                     data[k] = v.isoformat()
-            await queue.put({"type": "event", "event": data})
+            await queue.put({"type": "event", "event": data, "session_id": session.id})
 
         subscribed = []
         if event_bus is not None:
             for et in _STREAM_EVENTS:
                 event_bus.subscribe(et, _on_event)
                 subscribed.append(et)
+
+        # 待办变化经全局 TodoStore 单例推回 SSE:运行期实时刷新侧栏待办。
+        # ponytail: 单用户单进程下安全;并发多 session 会互相覆盖 sink。
+        todo_sink = None
+        if event_bus is not None:
+            def _todo_sink(sid: str, todos: list) -> None:
+                # emit 是协程,set_todos 在 run 的事件循环内同步调用,需 fire-and-forget。
+                asyncio.ensure_future(
+                    event_bus.emit(TodoUpdated(session_id=sid, todos=todos))
+                )
+            todo_sink = _todo_sink
+            get_default_todo_store().set_event_sink(todo_sink)
 
         async def _run():
             try:
@@ -886,8 +905,12 @@ def create_app(
                         event_bus.unsubscribe(et, _on_event)
                     except Exception:
                         pass
+                # 无论正常结束还是断开,都摘掉待办事件汇点,避免残留 sink。
+                get_default_todo_store().set_event_sink(None)
 
         async def _event_stream():
+            # 抢在第一个 agent 事件前把 session_id 交给前端,侧栏立即显示当前会话。
+            await queue.put({"type": "session", "session_id": session.id})
             run_task = asyncio.create_task(_run())
             try:
                 while True:
@@ -963,6 +986,7 @@ def create_app(
     @app.get("/sessions", response_model=list)
     async def list_sessions():
         out = []
+        seen = set()
         for s in Session.list_sessions():
             # 过滤空会话:未持久化消息历史的会话无法恢复,留着只会刷屏
             if not s.messages:
@@ -975,6 +999,31 @@ def create_app(
                 "estimated_tokens": s.estimated_tokens,
                 "modified_at": mtime,
             })
+            seen.add(s.id)
+        # 运行中但尚未落盘的会话(在内存里)也补进列表,侧栏才能立即显示当前会话。
+        for sid, s in sessions.items():
+            if sid in seen or not s.messages:
+                continue
+            out.append({
+                "id": sid,
+                "message_count": len(s.messages),
+                "estimated_tokens": s.estimated_tokens,
+                "modified_at": time.time(),
+            })
+        # connector 模式运行中的会话由本地 connector 进程持有,不在服务端
+        # sessions 里,靠 broker 的活跃任务补进列表,侧栏才能高亮当前会话。
+        broker = app.state.connector_broker
+        if broker is not None:
+            for sid in broker.active_session_ids():
+                if sid in seen:
+                    continue
+                out.append({
+                    "id": sid,
+                    "message_count": 0,
+                    "estimated_tokens": 0,
+                    "modified_at": time.time(),
+                })
+                seen.add(sid)
         return out
 
     # ---- DELETE /sessions/{session_id} — 删除会话 (WebUI 侧栏) ------------
@@ -1020,12 +1069,18 @@ def create_app(
                     sess = Session.load(p)
             if sess is not None:
                 used_tokens = sess.estimated_tokens
+        # 连了本地 connector 时,真实执行目录在 connector 进程的工作区,
+        # 而非本服务端进程 cwd——按连接动态显示。
+        local = app.state.local_connector
+        connector_ws = (local or {}).get("workspace") if local else None
+        workspace = connector_ws or str(Path.cwd())
         return {
             "version": __version__,
             "provider": provider,
             "model": model,
             "mode": mode,
-            "workspace": str(Path.cwd()),
+            "workspace": workspace,
+            "workspace_source": "connector" if connector_ws else "server",
             "tools_count": len(getattr(config.tools, "enabled", []) or []),
             "configured": rc is not None,
             "used_tokens": used_tokens,

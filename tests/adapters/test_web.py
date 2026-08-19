@@ -78,6 +78,82 @@ def test_local_connector_endpoint_returns_auto_bound_connector():
     assert data["name"] == registration["name"]
 
 
+def test_status_reports_connector_workspace_when_bound(tmp_path: Path, monkeypatch):
+    # 连接到本地 connector 时,/status 的工作区应反映 connector 的真实目录,
+    # 而非服务端进程 cwd;workspace_source 标记其来源。
+    home = tmp_path / "home"
+    _temp_models_json(home)
+    monkeypatch.setenv("HOME", str(home))
+    app = create_app()
+    ws = str((tmp_path / "ws").resolve())
+    (tmp_path / "ws").mkdir(exist_ok=True)
+    app.state.local_connector = {
+        "connector_id": "cid", "browser_token": "tok", "name": "ws",
+        "workspace": ws,
+    }
+    client = TestClient(app)
+    data = client.get("/status").json()
+    assert data["workspace"] == ws
+    assert data["workspace_source"] == "connector"
+
+
+def test_connector_stream_injects_session_id(tmp_path: Path, monkeypatch):
+    # connector 模式的 SSE 也必须在首个事件前把 session_id 推给前端,
+    # 否则侧栏顶栏在整个运行期都不显示当前会话(纯 web 模式已修,这里对齐)。
+    import asyncio
+
+    from synapse.adapters.connector import ConnectorJob
+
+    home = tmp_path / "home"
+    _temp_models_json(home)
+    monkeypatch.setenv("HOME", str(home))
+    app = create_app()
+    sid = "11111111-1111-1111-1111-111111111111"
+
+    async def fake_start_job(*, connector_id, browser_token, task, session_id, confirm_mode="ask"):
+        loop = asyncio.get_running_loop()
+        job = ConnectorJob(
+            id="j1", connector_id=connector_id, session_id=session_id,
+            events=asyncio.Queue(),
+            completion=loop.create_future(),
+        )
+        job.completion.set_result({})
+        await job.events.put({"type": "event", "event": {"event_type": "agent_progress", "message": "x"}})
+        await job.events.put({"type": "done", "result": {"session_id": session_id, "output": "ok"}})
+        return job
+
+    app.state.connector_broker.start_job = fake_start_job
+    client = TestClient(app)
+    chunks = []
+    with client.stream(
+        "POST", "/run/stream",
+        json={"task": "t", "connector_id": "c", "connector_token": "k", "session_id": sid},
+    ) as resp:
+        for line in resp.iter_lines():
+            if line.startswith("data: "):
+                chunks.append(json.loads(line[6:]))
+            if len(chunks) >= 3:
+                break
+
+    assert chunks[0]["type"] == "session"
+    assert chunks[0]["session_id"] == sid
+    # 后续事件也透传 session_id,前端无需等 done 就能拿到。
+    assert chunks[1]["session_id"] == sid
+
+
+def test_list_sessions_includes_active_connector_session(tmp_path: Path, monkeypatch):
+    # connector 模式运行中的会话要进列表,前端才能给当前行加高亮。
+    home = tmp_path / "home"
+    _temp_models_json(home)
+    monkeypatch.setenv("HOME", str(home))
+    app = create_app()
+    sid = "22222222-2222-2222-2222-222222222222"
+    app.state.connector_broker.active_session_ids = lambda: [sid]
+    client = TestClient(app)
+    ids = [s["id"] for s in client.get("/sessions").json()]
+    assert sid in ids
+
+
 def _wait_for_local_connector(port: int, timeout: float = 12.0) -> dict | None:
     deadline = time.time() + timeout
     while time.time() < deadline:
