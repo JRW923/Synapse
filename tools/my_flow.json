@@ -30,14 +30,13 @@
     ]
   },
   {
-    "name": "04-connect-local",
+    "name": "04-connector",
     "url": "http://localhost:8000/",
-    "note": "连接本机工作区：生成配对码，本机运行 synapse connect 认领",
-    "highlight": "#pair-code",
+    "note": "本机工作区已自动连接（单进程 synapse serve 无需手动配对）",
+    "highlight": "#connector",
     "actions": [
       {"type": "click_if_exists", "selector": "text=关闭"},
-      {"type": "click", "selector": "text=连接本机"},
-      {"type": "wait", "selector": "#pair"}
+      {"type": "wait", "selector": "#connector:not(:empty)"}
     ]
   },
   {

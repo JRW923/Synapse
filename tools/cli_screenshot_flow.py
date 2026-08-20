@@ -290,12 +290,15 @@ def _run_step_win(step: dict, cols: int, rows: int,
     screen = pyte.Screen(cols, rows)
     stream = pyte.ByteStream(screen)
 
+    lock = threading.Lock()
+
     def _reader() -> None:
         while True:
             data = proc.stdout.read(65536)
             if not data:
                 break
-            stream.feed(data)
+            with lock:
+                stream.feed(data)
 
     threading.Thread(target=_reader, daemon=True).start()
     try:
@@ -304,9 +307,11 @@ def _run_step_win(step: dict, cols: int, rows: int,
         if isinstance(commands, str):
             commands = [commands]
         prompt = "\x1b[36m$\x1b[0m " if is_bash else "> "
+        cmd_newline = "\n" if is_bash else "\r\n"
         for cmd in commands:
-            stream.feed(prompt.encode() + cmd.encode() + b"\r\n")
-            proc.stdin.write((cmd + "\n").encode())
+            with lock:
+                stream.feed(prompt.encode() + cmd.encode() + b"\r\n")
+            proc.stdin.write((cmd + cmd_newline).encode())
             proc.stdin.flush()
         dur = step.get("wait_ms", 800) / 1000.0
         expect = step.get("expect")
