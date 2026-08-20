@@ -1,0 +1,41 @@
+[
+  {
+    "name": "01-configured-home",
+    "url": "http://localhost:8000/",
+    "note": "已配置模型的首屏：不再自动弹设置，可直接输入任务",
+    "highlight": "#input",
+    "actions": []
+  },
+  {
+    "name": "02-run-live",
+    "url": "http://localhost:8000/",
+    "note": "任务运行中：模型输出流式展示，工具调用实时出现在「最近工具」",
+    "highlight": "#stream",
+    "actions": [
+      {"type": "fill", "selector": "#input", "value": "读取 README.md 并概括它的核心特性（用中文，3 条）"},
+      {"type": "click", "selector": "#sendbtn"},
+      {"type": "wait", "selector": "#stream-section"},
+      {"type": "wait_ms", "ms": 1500}
+    ]
+  },
+  {
+    "name": "03-run-done",
+    "url": "http://localhost:8000/",
+    "note": "运行结束：会话消息 + 运行摘要 + 四维评分卡（安全/过程/质量/效率）",
+    "highlight": ".score-card",
+    "actions": [
+      {"type": "fill", "selector": "#input", "value": "读取 README.md 并概括它的核心特性（用中文，3 条）"},
+      {"type": "click", "selector": "#sendbtn"},
+      {"type": "wait", "selector": ".score-card"}
+    ]
+  },
+  {
+    "name": "04-context-report",
+    "note": "上下文报告：点击展开后展示区块引用率热力表（复用上一步同一运行，不再发请求）",
+    "highlight": ".ctx-table",
+    "actions": [
+      {"type": "click", "selector": ".ctx-title"},
+      {"type": "wait", "selector": ".ctx-table"}
+    ]
+  }
+]

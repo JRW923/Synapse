@@ -1,0 +1,27 @@
+[
+  {
+    "name": "project-overview",
+    "commands": ["pwd", "ls -1"],
+    "note": "项目目录概览",
+    "wait_ms": 500
+  },
+  {
+    "name": "synapse-help",
+    "commands": ["synapse --help"],
+    "note": "Synapse CLI 命令总览",
+    "wait_ms": 800
+  },
+  {
+    "name": "run-unit-test",
+    "commands": ["pytest tests/modules/test_browser_tool.py -q"],
+    "note": "跑一个模块测试，验证回归链路",
+    "wait_ms": 8000,
+    "expect": "passed"
+  },
+  {
+    "name": "recent-commits",
+    "commands": ["git log --oneline -5"],
+    "note": "最近 5 条提交",
+    "wait_ms": 500
+  }
+]
