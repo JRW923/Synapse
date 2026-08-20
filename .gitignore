@@ -46,3 +46,8 @@ logs/
 tmp/
 gold.synapse-verified-*.json
 synapse-grader-smoke.*.json
+
+# Screenshot tool output (tools/screenshot_flow.py, cli_screenshot_flow.py, run_all.py)
+shots/
+shots-cli/
+shots-all/
