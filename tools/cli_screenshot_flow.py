@@ -3,6 +3,9 @@
 和 Web 脚本（screenshot_flow.py）风格统一：每张图自带步骤编号横幅，单图自解释。
 真实命令 + 真实输出 + 真实 ANSI 颜色，全部由 pyte 虚拟终端捕获后用 Pillow 渲染。
 
+跨平台：Linux/macOS 用 pty 起真实 bash；Windows 无 pty 模块，改用管道 + 后台线程读输出，
+并手动回显提示符与命令（推荐装 Git for Windows 以提供 bash.exe，否则回退 cmd.exe）。
+
 依赖（一次性安装）:
     pip install pyte Pillow
 
@@ -35,6 +38,7 @@ import pty
 import select
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -210,12 +214,26 @@ def _make_env() -> dict:
         **os.environ,
         "TERM": "xterm-256color",
         "PS1": "\x1b[36m$\x1b[0m ",
+        # 非交互管道下程序默认不输出颜色，这两个变量强制上色
+        "CLICOLOR_FORCE": "1",
+        "FORCE_COLOR": "1",
         "PATH": py_bin + os.pathsep + os.environ.get("PATH", ""),
     }
 
 
-def _run_step(step: dict, cols: int, rows: int,
-              font, cjk_font, char_w: int, char_h: int) -> Image.Image:
+def _shell_win() -> list[str]:
+    for cand in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files (x86)\Git\bin\bash.exe",
+        os.path.expanduser(r"~\scoop\apps\git\current\bin\bash.exe"),
+    ]:
+        if os.path.exists(cand):
+            return [cand, "--norc", "--noprofile"]
+    return ["cmd.exe"]
+
+
+def _run_step_posix(step: dict, cols: int, rows: int,
+                   font, cjk_font, char_w: int, char_h: int) -> Image.Image:
     master, slave = pty.openpty()
     proc = subprocess.Popen(
         ["bash", "--norc", "--noprofile"],
@@ -240,6 +258,66 @@ def _run_step(step: dict, cols: int, rows: int,
             os.close(master)
         except OSError:
             pass
+
+
+def _run_step_win(step: dict, cols: int, rows: int,
+                  font, cjk_font, char_w: int, char_h: int) -> Image.Image:
+    # Windows 没有 pty 模块，改用管道 + 后台线程读输出；提示符与命令由我们手动回显
+    shell = _shell_win()
+    is_bash = "bash" in os.path.basename(shell[0]).lower()
+    proc = subprocess.Popen(
+        shell,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env=_make_env(), bufsize=0,
+    )
+    screen = pyte.Screen(cols, rows)
+    stream = pyte.ByteStream(screen)
+
+    def _reader() -> None:
+        while True:
+            data = proc.stdout.read(65536)
+            if not data:
+                break
+            stream.feed(data)
+
+    threading.Thread(target=_reader, daemon=True).start()
+    try:
+        time.sleep(0.6)
+        commands = step.get("commands", [])
+        if isinstance(commands, str):
+            commands = [commands]
+        prompt = "\x1b[36m$\x1b[0m " if is_bash else "> "
+        for cmd in commands:
+            stream.feed(prompt.encode() + cmd.encode() + b"\r\n")
+            proc.stdin.write((cmd + "\n").encode())
+            proc.stdin.flush()
+        dur = step.get("wait_ms", 800) / 1000.0
+        expect = step.get("expect")
+        end = time.monotonic() + dur
+        while time.monotonic() < end:
+            if expect and expect in "\n".join(screen.display):
+                time.sleep(0.3)
+                break
+            time.sleep(0.1)
+        time.sleep(0.2)
+        return render_terminal(screen, cols, rows, font, cjk_font, char_w, char_h)
+    finally:
+        try:
+            proc.stdin.close()
+        except Exception:
+            pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+
+
+def _run_step(step: dict, cols: int, rows: int,
+              font, cjk_font, char_w: int, char_h: int) -> Image.Image:
+    if os.name == "nt":
+        return _run_step_win(step, cols, rows, font, cjk_font, char_w, char_h)
+    return _run_step_posix(step, cols, rows, font, cjk_font, char_w, char_h)
 
 
 def capture(steps: list[dict], out_dir: Path,
