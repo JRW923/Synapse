@@ -40,7 +40,7 @@ from synapse.adapters.connector import (
     ConnectorOfflineError,
     ConnectorPairingError,
 )
-from synapse.config import load_config
+from synapse.config import load_config, models_config_path
 from synapse.core.events import EventBus
 from synapse.protocols.events import TodoUpdated
 from synapse.core.session import DEFAULT_SESSION_DIR, Session
@@ -518,6 +518,20 @@ def create_app(
             get_default_todo_store().bind_session(session.id)
         return session
 
+    def _is_configured() -> bool:
+        """Whether a model is runnable without a browser-supplied key.
+
+        Mirrors the backend's real resolution path in ``_synapse_for``: a
+        model is available if either the browser set an in-memory ``runtime_key``
+        or a user-level ``~/.synapse/models.json`` exists on disk (the same file
+        the CLI writes). Previously only the in-memory key counted, so the web UI
+        re-prompted for config on every page load even when models.json was
+        already present.
+        """
+        if app.state.runtime_key is not None:
+            return True
+        return models_config_path().exists()
+
     async def _connector_job_for(req: RunRequest) -> ConnectorJob | None:
         if req.connector_id is None and req.connector_token is None:
             return None
@@ -561,7 +575,7 @@ def create_app(
 
         rc = app.state.runtime_key
         return {
-            "configured": rc is not None,
+            "configured": _is_configured(),
             "provider": rc["provider"] if rc else None,
             "model": rc["model"] if rc else None,
             "base_url": rc.get("base_url", "") if rc else "",
@@ -1140,7 +1154,7 @@ def create_app(
             "workspace": workspace,
             "workspace_source": "connector" if connector_ws else "server",
             "tools_count": len(getattr(config.tools, "enabled", []) or []),
-            "configured": rc is not None,
+            "configured": _is_configured(),
             "used_tokens": used_tokens,
             "budget": config.planning.max_tokens_per_task,
         }

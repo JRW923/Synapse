@@ -193,6 +193,40 @@ def test_health_check(client):
     assert data["status"] == "ok"
 
 
+def test_configured_reflects_models_json(tmp_path, monkeypatch):
+    """GET /config must report configured when ~/.synapse/models.json exists,
+    not only after a browser runtime key is set.
+
+    Regression: previously ``configured`` only checked the in-memory
+    ``runtime_key``, so the web UI re-prompted for config on every load even
+    when the CLI-written models.json was already present on disk.
+    """
+    import synapse.adapters.server as server
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "DEFAULT_SESSION_DIR", tmp_path)
+    models_file = tmp_path / "models.json"
+    monkeypatch.setattr(server, "models_config_path", lambda: models_file)
+
+    client = TestClient(server.create_app())
+
+    # No models.json and no browser key -> not configured.
+    assert not models_file.exists()
+    assert client.get("/config").json()["configured"] is False
+
+    # A present models.json (the file the CLI writes) -> configured, even
+    # with no browser-supplied key.
+    models_file.write_text("{}")
+    assert client.get("/config").json()["configured"] is True
+
+    # A browser runtime key also makes it configured (original behaviour).
+    client.post("/config", json={
+        "provider": "openai", "model": "gpt-4o-mini", "api_key": "x",
+    })
+    assert client.get("/config").json()["configured"] is True
+
+
+
 # ---------------------------------------------------------------------------
 # Test 2: Run task
 # ---------------------------------------------------------------------------
