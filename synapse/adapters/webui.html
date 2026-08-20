@@ -219,7 +219,7 @@
   #settings { position: fixed; inset: 0; background: rgba(0,0,0,.6);
     display: none; align-items: center; justify-content: center; z-index: 20; }
   #settings.show { display: flex; }
-  #settings .box { background: var(--panel); border: 1px solid var(--border);
+  #settings .box { position: relative; background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; padding: 22px 22px 18px; width: 400px; max-width: 92vw;
     box-shadow: 0 12px 40px rgba(0,0,0,.45); max-height: 90vh; overflow-y: auto; }
   #settings h3 { margin: 0 0 6px; font-size: 16px; }
@@ -241,6 +241,12 @@
   #settings button:hover { border-color: var(--dim); }
   #settings button.save { background: var(--brand); color: #0d1117; border: none; }
   #settings button.save:hover { filter: brightness(1.08); }
+  #settings button.close {
+    position: absolute; top: 14px; right: 14px; width: 28px; height: 28px;
+    padding: 0; border: none; border-radius: 6px; color: var(--dim); font-size: 20px;
+    line-height: 1;
+  }
+  #settings button.close:hover { color: var(--text); background: var(--bg); }
   #settings .err { color: var(--err); font-size: 12px; min-height: 15px; margin-top: 8px; }
   #settings .model-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;
     max-height: 116px; overflow-y: auto; padding-right: 2px; }
@@ -339,6 +345,7 @@
 </div>
 <div id="settings" onclick="if(event.target===this)closeSettings()">
   <div class="box">
+    <button class="close" type="button" onclick="closeSettings()" title="关闭设置" aria-label="关闭设置">×</button>
     <h3>开始使用</h3>
     <div class="hint">Key 仅保存在本机进程内存，不写入任何服务器文件。每次启动需重新填写（本地优先用法）。</div>
 
@@ -423,7 +430,6 @@
       <div id="cfg-switch-empty" hidden class="hint">发送任务创建会话后，可在此切换规划模式。</div>
     </div>
     <div class="row" id="cfg-footer">
-      <button onclick="closeSettings()">关闭</button>
       <button class="save" onclick="applySettings()">应用</button>
     </div>
   </div>
@@ -1145,12 +1151,25 @@ async function resumeSession(id) {
       const msgs = await res.json();
       if (requestToken !== historyRequestToken || sessionId !== id) return;
       // 与 CLI 一致：仅恢复用户/助手可见消息，系统提示和工具往返属于
-      // 执行上下文，不应在历史对话里重复展示。
+      // 执行上下文，不应在历史对话里重复展示。同一次回答可能经历多轮
+      // assistant -> tool；把其中的可见文本合并后只画一个头像。
+      let assistantParts = [];
+      const flushAssistant = () => {
+        if (!assistantParts.length) return;
+        addMsg("agent", assistantParts.join("\n\n"));
+        assistantParts = [];
+      };
       for (const m of msgs) {
-        if (!(m.role === "user" || m.role === "assistant")) continue;
         const content = typeof m.content === "string" ? m.content : "";
-        if (content.trim()) addMsg(m.role === "user" ? "user" : "agent", content);
+        if (m.role === "user") {
+          flushAssistant();
+          if (content.trim()) addMsg("user", content);
+        } else if (m.role === "assistant") {
+          if (content.trim()) assistantParts.push(content);
+          if (!Array.isArray(m.tool_calls) || !m.tool_calls.length) flushAssistant();
+        }
       }
+      flushAssistant();
     }
   } catch (e) { /* 历史加载失败不阻断 */ }
   if (requestToken !== historyRequestToken || sessionId !== id) return;

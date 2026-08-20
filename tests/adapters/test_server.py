@@ -361,6 +361,8 @@ def test_webui_served_at_root(client):
         "swarm_verified",
         "resetLiveState",
         "run-summary",
+        'aria-label="关闭设置"',
+        'assistantParts.join("\\n\\n")',
     ):
         assert marker in response.text
 
