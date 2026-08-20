@@ -34,7 +34,6 @@ import argparse
 import glob
 import json
 import os
-import pty
 import select
 import subprocess
 import sys
@@ -234,6 +233,7 @@ def _shell_win() -> list[str]:
 
 def _run_step_posix(step: dict, cols: int, rows: int,
                    font, cjk_font, char_w: int, char_h: int) -> Image.Image:
+    import pty  # 仅 POSIX 可用；Windows 走 _run_step_win，不会执行到这里
     master, slave = pty.openpty()
     proc = subprocess.Popen(
         ["bash", "--norc", "--noprofile"],
