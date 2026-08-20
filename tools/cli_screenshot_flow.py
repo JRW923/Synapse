@@ -70,13 +70,21 @@ STEPS = [
 
 def find_font(size: int) -> ImageFont.ImageFont:
     cands = [
+        # Linux
         "/usr/share/fonts/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/Library/Fonts/Menlo.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        # macOS
+        "/Library/Fonts/Menlo.ttf",
+        # Windows
+        r"C:\Windows\Fonts\consola.ttf",
+        r"C:\Windows\Fonts\cour.ttf",
+        r"C:\Windows\Fonts\lucon.ttf",
     ]
     cands += glob.glob("/usr/share/fonts/**/*Mono*.ttf", recursive=True)
     cands += glob.glob("/usr/share/fonts/**/*mono*.ttf", recursive=True)
+    cands += glob.glob("C:/Windows/Fonts/*Mono*.ttf", recursive=True)
+    cands += glob.glob("C:/Windows/Fonts/*onsola*.ttf", recursive=True)
     seen: set[str] = set()
     for c in cands:
         if c in seen or not os.path.exists(c):
@@ -92,12 +100,20 @@ def find_font(size: int) -> ImageFont.ImageFont:
 
 def find_cjk_font(size: int) -> ImageFont.ImageFont | None:
     cands = [
+        # Linux
         "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        # macOS
         "/System/Library/Fonts/PingFang.ttc",
         "/System/Library/Fonts/STHeiti Light.ttc",
+        # Windows
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\msyhbd.ttc",
+        r"C:\Windows\Fonts\simsun.ttc",
+        r"C:\Windows\Fonts\malgun.ttf",
+        r"C:\Windows\Fonts\msgothic.ttc",
     ]
     for c in cands:
         if not os.path.exists(c):
@@ -145,12 +161,13 @@ def render_terminal(screen, cols: int, rows: int,
             if not data or data == " ":
                 x += 1
                 continue
-            w = wcwidth(data)
-            if w <= 0:
+            # 单个 cell 可能含多码点（组合字符/代理对），按每个码点累加宽度
+            total_w = sum(wcwidth(c) for c in data)
+            if total_w <= 0:
                 x += 1
                 continue
-            cell_w = char_w * w
-            use_font = cjk_font if w == 2 and cjk_font else font
+            cell_w = char_w * total_w
+            use_font = cjk_font if total_w >= 2 and cjk_font else font
             fg = _rgb(ch.fg) or DEFAULT_FG
             bg = _rgb(ch.bg)
             if ch.reverse:
@@ -159,7 +176,7 @@ def render_terminal(screen, cols: int, rows: int,
             if bg and bg != TERM_BG:
                 d.rectangle([px, py, px + cell_w, py + char_h], fill=bg)
             d.text((px, py), data, fill=fg, font=use_font)
-            x += w
+            x += total_w
     return img
 
 

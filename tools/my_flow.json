@@ -2,9 +2,9 @@
   {
     "name": "01-home-firstrun",
     "url": "http://localhost:8000/",
-    "note": "首屏：未配置模型时自动弹出设置面板（首次进入的真实状态）",
-    "highlight": "#settings .box",
-    "actions": [{"type": "wait", "selector": "#settings.show"}]
+    "note": "首屏：未配置模型时设置面板会自动弹出（已配置则显示干净首页）",
+    "highlight": "#input",
+    "actions": [{"type": "wait", "selector": "#main"}]
   },
   {
     "name": "02-settings-free-model",
@@ -12,6 +12,7 @@
     "note": "设置面板：选择「使用免费模型」，填 OpenRouter Key 即可免付费试用",
     "highlight": "#cfg-free",
     "actions": [
+      {"type": "click", "selector": "text=设置"},
       {"type": "wait", "selector": "#settings.show"},
       {"type": "click", "selector": "text=使用免费模型"},
       {"type": "wait", "selector": "#cfg-free:not([hidden])"}
@@ -23,7 +24,7 @@
     "note": "功能指引弹窗：会话/待办/评分/上下文报告等说明",
     "highlight": "#help .box",
     "actions": [
-      {"type": "click", "selector": "text=关闭"},
+      {"type": "click_if_exists", "selector": "text=关闭"},
       {"type": "click", "selector": "text=?"},
       {"type": "wait", "selector": "#help.show"}
     ]
@@ -34,18 +35,18 @@
     "note": "连接本机工作区：生成配对码，本机运行 synapse connect 认领",
     "highlight": "#pair-code",
     "actions": [
-      {"type": "click", "selector": "text=关闭"},
+      {"type": "click_if_exists", "selector": "text=关闭"},
       {"type": "click", "selector": "text=连接本机"},
       {"type": "wait", "selector": "#pair"}
     ]
   },
   {
-    "name": "05-send-no-key-error",
+    "name": "05-send-task",
     "url": "http://localhost:8000/",
-    "note": "错误态：未配模型就发任务，提示先填 API Key",
+    "note": "发送任务：未配模型时提示先填 Key；已配则真实运行",
     "highlight": ".msg.agent .body",
     "actions": [
-      {"type": "click", "selector": "text=关闭"},
+      {"type": "click_if_exists", "selector": "text=关闭"},
       {"type": "fill", "selector": "#input", "value": "列出当前目录的文件"},
       {"type": "click", "selector": "#sendbtn"},
       {"type": "wait_ms", "ms": 1500}

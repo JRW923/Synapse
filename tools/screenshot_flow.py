@@ -51,43 +51,39 @@ STEPS = [
 
 
 def _inject_overlay(page, idx: int, step: dict) -> None:
-    """在截图前注入步骤横幅 + 高亮框，让单张图自解释。"""
+    """在截图前注入步骤横幅 + 高亮框，让单张图自解释。
+
+    用 IIFE + 注入 JSON 的方式，避免 Playwright 在部分环境下把箭头函数
+    误判为表达式导致 SyntaxError。JSON 是 JS 字面量子集，直接拼进源码安全。
+    """
     note = step.get("note", step.get("name", ""))
     hl = step.get("highlight")
-    page.evaluate(
-        """(args) => {
-            const {idx, name, note, hl} = args;
-            // 清理上一步残留
-            document.getElementById('__shot_banner')?.remove();
-            document.getElementById('__shot_hl')?.remove();
-
-            const banner = document.createElement('div');
-            banner.id = '__shot_banner';
-            banner.textContent = `#${idx}  ${name}  —  ${note}`;
-            banner.setAttribute('style',
-                'position:fixed;top:0;left:0;right:0;z-index:2147483647;'
-                'background:rgba(15,23,42,.92);color:#fff;font:600 14px/1.4 monospace;'
-                'padding:8px 14px;box-shadow:0 2px 8px rgba(0,0,0,.4);'
-                'letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
-            document.body.appendChild(banner);
-
-            if (hl) {
-                const el = document.querySelector(hl);
-                if (el) {
-                    const r = el.getBoundingClientRect();
-                    const box = document.createElement('div');
-                    box.id = '__shot_hl';
-                    box.setAttribute('style',
-                        `position:fixed;z-index:2147483646;pointer-events:none;`
-                        `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;`
-                        `border:3px solid #f59e0b;border-radius:4px;`
-                        `box-shadow:0 0 0 9999px rgba(0,0,0,.15);`);
-                    document.body.appendChild(box);
-                }
-            }
-        }""",
+    args_json = json.dumps(
         {"idx": idx, "name": step.get("name", ""), "note": note, "hl": hl},
+        ensure_ascii=False,
     )
+    js = (
+        "(function(){"
+        "var a=" + args_json + ";"
+        "var idx=a.idx,name=a.name,note=a.note,hl=a.hl;"
+        "var b=document.getElementById('__shot_banner');if(b)b.remove();"
+        "var h=document.getElementById('__shot_hl');if(h)h.remove();"
+        "var banner=document.createElement('div');banner.id='__shot_banner';"
+        "banner.textContent='#'+idx+'  '+name+'  —  '+note;"
+        "banner.setAttribute('style','position:fixed;top:0;left:0;right:0;z-index:2147483647;"
+        "background:rgba(15,23,42,.92);color:#fff;font:600 14px/1.4 monospace;padding:8px 14px;"
+        "box-shadow:0 2px 8px rgba(0,0,0,.4);letter-spacing:.3px;white-space:nowrap;"
+        "overflow:hidden;text-overflow:ellipsis;');"
+        "document.body.appendChild(banner);"
+        "if(hl){var el=document.querySelector(hl);if(el){var r=el.getBoundingClientRect();"
+        "var box=document.createElement('div');box.id='__shot_hl';"
+        "box.setAttribute('style','position:fixed;z-index:2147483646;pointer-events:none;"
+        "left:'+r.left+'px;top:'+r.top+'px;width:'+r.width+'px;height:'+r.height+'px;"
+        "border:3px solid #f59e0b;border-radius:4px;box-shadow:0 0 0 9999px rgba(0,0,0,.15);');"
+        "document.body.appendChild(box);}}"
+        "})();"
+    )
+    page.evaluate(js)
 
 
 def _run_actions(page, actions: list[dict]) -> None:
@@ -97,6 +93,12 @@ def _run_actions(page, actions: list[dict]) -> None:
             page.wait_for_selector(act["selector"], state="visible")
         elif t == "click":
             page.click(act["selector"])
+        elif t == "click_if_exists":
+            # 存在才点，不存在则跳过（用于“先尝试关设置”这类非强制操作）
+            try:
+                page.click(act["selector"], timeout=800)
+            except Exception:
+                pass
         elif t == "fill":
             page.fill(act["selector"], act.get("value", ""))
         elif t == "wait_ms":
