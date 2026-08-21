@@ -1091,6 +1091,7 @@ _SLASH_COMMANDS: tuple = (
     ("/provider",        "显示/切换供应商"),
     ("/mode",            "切换规划模式"),
     ("/tools",           "列出可用工具"),
+    ("/compact",         "压缩当前会话上下文"),
     ("/context-report",  "上下文区块引用热力图"),
     ("/score",           "运行时评分 + 过程提示"),
     ("/todos",           "查看当前任务清单"),
@@ -1458,6 +1459,7 @@ def _show_help(console):
     t.add_row("  /provider [name]", "显示/切换供应商")
     t.add_row("  /mode [name]", "规划模式 (react / plan_execute / hierarchical / swarm)")
     t.add_row("  /tools", "列出可用工具")
+    t.add_row("  /compact", "压缩当前会话上下文（也可输入「压缩一下」）")
     t.add_row("  /context-report", "上下文区块引用 / 使用热力图")
     t.add_row("  /score", "运行时评分 (safety/process/quality/efficiency) + 提示")
     t.add_row("  /todos", "查看当前任务清单")
@@ -1466,6 +1468,35 @@ def _show_help(console):
     t.add_row("  /exit, /quit", "退出")
     console.print(t)
     console.print()
+
+
+
+async def _compact_current_session(session, synapse, config) -> str:
+    """Force compact the live REPL session and persist it."""
+    from synapse.modules.context.history_compact import compact_history
+    from synapse.protocols.llm import LLMProvider
+    if not session.messages:
+        return "当前会话还没有内容可压缩。"
+    llm = None
+    if synapse is not None:
+        try:
+            llm = synapse._container.resolve(LLMProvider)
+        except Exception:
+            llm = None
+    cfg = config.planning
+    report = await compact_history(
+        session.messages,
+        llm=llm,
+        session_meta=session.metadata,
+        force=True,
+        soft_chars=cfg.history_soft_chars,
+        keep_recent_tools=cfg.history_keep_recent_tools,
+        keep_recent_turns=cfg.history_keep_recent_turns,
+        rotate_after=cfg.compact_rotate_after,
+        strategy=cfg.history_compaction,
+    )
+    session.save()
+    return report.summary
 
 
 def _format_citation_summary(synapse) -> str:
@@ -2450,6 +2481,12 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     citation_line = _format_citation_summary(_synapse)
                     if citation_line:
                         console.print(f"[{_HINT}]Context: {citation_line}[/{_HINT}]")
+                    compact_n = int(session.metadata.get("compact_count") or 0)
+                    if compact_n:
+                        last = session.metadata.get("last_compact") or {}
+                        console.print(f"[dim]Compact: {compact_n} 次"
+                                      + (f" · 上次 {last.get('level', '')} {last.get('chars_before', '?')}→{last.get('chars_after', '?')}" if last else "")
+                                      + "[/dim]")
                 else:
                     print(f"Messages: {len(session.messages)}")
                     print(f"Est. tokens: {est} / {budget}")
@@ -2458,6 +2495,9 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     citation_line = _format_citation_summary(_synapse)
                     if citation_line:
                         print(f"Context: {citation_line}")
+                    compact_n = int(session.metadata.get("compact_count") or 0)
+                    if compact_n:
+                        print(f"Compact: {compact_n} 次")
             elif cmd == "/session":
                 from synapse.core.session import DEFAULT_SESSION_DIR
                 path = DEFAULT_SESSION_DIR / f"{session.id}.json"
@@ -2510,6 +2550,12 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 else:
                     print(note)
                 _print_session_history(console, session, use_rich)
+            elif cmd == "/compact":
+                note = await _compact_current_session(session, _synapse, config)
+                if use_rich:
+                    console.print(f"[dim]{note}[/dim]")
+                else:
+                    print(note)
             elif cmd == "/context-report":
                 _show_context_report(console, _synapse, use_rich)
             elif cmd == "/score":
@@ -2712,6 +2758,15 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     print(msg)
             else:
                 console.print(f"[red]未知命令：{cmd}[/red]") if use_rich else print(f"未知命令：{cmd}")
+            continue
+
+        from synapse.modules.context.history_compact import is_compact_request
+        if is_compact_request(user_input):
+            note = await _compact_current_session(session, _synapse, config)
+            if use_rich:
+                console.print(f"[dim]{note}[/dim]")
+            else:
+                print(note)
             continue
 
         # ---- Task execution ----

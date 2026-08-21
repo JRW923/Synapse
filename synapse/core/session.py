@@ -67,6 +67,35 @@ class Session:
             return len(runs)
         return sum(message.role == "user" for message in self.visible_messages())
 
+    def conversation_runs(self) -> list[dict]:
+        """Return the user-visible turns used to restore a conversation.
+
+        Prefer structured run_history (matches the live Web/CLI transcript).
+        Older sessions without it fall back to folded visible messages.
+        """
+        runs = self.metadata.get("run_history")
+        if isinstance(runs, list) and runs:
+            return [run for run in runs if isinstance(run, dict)]
+        out: list[dict] = []
+        pending: str | None = None
+        for message in self.visible_messages():
+            content = message.content if isinstance(message.content, str) else ""
+            if message.role == "user":
+                if pending is not None:
+                    out.append({"task": pending, "output": "(无输出)", "status": "failed"})
+                pending = content
+            elif pending is not None:
+                out.append({"task": pending, "output": content, "status": "success"})
+                pending = None
+            else:
+                out.append({"task": "", "output": content, "status": "success"})
+        if pending is not None:
+            out.append({"task": pending, "output": "(无输出)", "status": "failed"})
+        report = self.metadata.get("citation_report")
+        if out and isinstance(report, dict):
+            out[-1] = {**out[-1], "citation_report": report}
+        return out
+
     def fork(self, new_id: str) -> "Session":
         """Create an independent copy for a sub-session."""
         child = Session(session_id=new_id)

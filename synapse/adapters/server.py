@@ -914,13 +914,18 @@ def create_app(
                 sessions[session.id] = session
                 with _swallow("run/stream: session save"):
                     session.save(DEFAULT_SESSION_DIR)
+                last = {}
+                runs = session.metadata.get("run_history")
+                if isinstance(runs, list) and runs and isinstance(runs[-1], dict):
+                    last = runs[-1]
                 await queue.put({"type": "done", "result": {
                     "status": res.status.value,
                     "output": res.output,
                     "session_id": session.id,
                     "run_id": session.metadata.get("last_run_id", ""),
-                    "artifacts": [
-                        {"path": a.path, "content": a.content, "action": a.action}
+                    "task": last.get("task", req.task),
+                    "artifacts": last.get("artifacts") or [
+                        {"path": a.path, "action": a.action}
                         for a in res.artifacts
                     ],
                     "metrics": {
@@ -932,6 +937,10 @@ def create_app(
                         "thrashing_events": res.metrics.thrashing_events,
                     },
                     "run_score": synapse.get_run_score(),  # L.4
+                    "citation_report": last.get("citation_report"),
+                    "tools": last.get("tools") or [],
+                    "plan": last.get("plan"),
+                    "swarm": last.get("swarm"),
                 }})
             except Exception as exc:
                 await queue.put({"type": "error", "error": f"{type(exc).__name__}: {exc}"})
@@ -1031,9 +1040,8 @@ def create_app(
                 session = Session.load(path)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        runs = session.metadata.get("run_history")
         return SessionHistoryResponse(
-            runs=runs if isinstance(runs, list) else [],
+            runs=session.conversation_runs(),
             messages=[
                 MessageResponse(role=m.role, content=m.content)
                 for m in session.visible_messages()
@@ -1162,6 +1170,7 @@ def create_app(
         if mode is None:
             mode = config.planning.mode
         used_tokens = 0
+        sess = None
         if session_id:
             sess = sessions.get(session_id)
             if sess is None:
@@ -1186,6 +1195,8 @@ def create_app(
             "configured": _is_configured(),
             "used_tokens": used_tokens,
             "budget": config.planning.max_tokens_per_task,
+            "compact_count": int((sess.metadata.get("compact_count") if sess is not None else 0) or 0),
+            "last_compact": (sess.metadata.get("last_compact") if sess is not None else None),
         }
 
     # ---- GET /sessions/{session_id}/context-report — 上下文引用热力图 -----
@@ -1199,6 +1210,36 @@ def create_app(
             return {"blocks": []}
         session = Session.load(path)
         return session.metadata.get("citation_report") or {"blocks": []}
+
+    @app.post("/sessions/{session_id}/compact")
+    async def compact_session(session_id: str):
+        session = sessions.get(session_id)
+        if session is None:
+            path = DEFAULT_SESSION_DIR / f"{session_id}.json"
+            if path.exists():
+                session = Session.load(path)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        inst = synapse_instances.get(session_id)
+        if inst is not None:
+            report = await inst.compact_session(session)
+        else:
+            from synapse.modules.context.history_compact import compact_history
+            cfg = load_config()[0].planning
+            report = (await compact_history(
+                session.messages,
+                session_meta=session.metadata,
+                force=True,
+                soft_chars=cfg.history_soft_chars,
+                keep_recent_tools=cfg.history_keep_recent_tools,
+                keep_recent_turns=cfg.history_keep_recent_turns,
+                rotate_after=cfg.compact_rotate_after,
+                strategy=cfg.history_compaction,
+            )).to_dict()
+        sessions[session_id] = session
+        with _swallow("compact: session save"):
+            session.save(DEFAULT_SESSION_DIR)
+        return report
 
     # ---- GET /todos — 待办清单 (WebUI 侧栏) -------------------------------
 

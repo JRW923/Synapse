@@ -94,3 +94,60 @@ def test_under_soft_limit_is_noop():
     _run(p, msgs, llm)
     llm.chat.assert_not_awaited()
     assert msgs[1].content == "x" * 300
+
+
+from synapse.modules.context.history_compact import (
+    compact_history, is_compact_request,
+)
+
+
+def test_is_compact_request_phrases():
+    assert is_compact_request("/compact")
+    assert is_compact_request("/compact now")
+    assert is_compact_request("压缩一下")
+    assert is_compact_request("请压缩上下文")
+    assert not is_compact_request("压缩这个文件")
+    assert not is_compact_request("请帮我修 bug")
+
+
+def test_l2_folds_older_user_turns():
+    msgs = [Message(role="system", content="sys")]
+    for i in range(6):
+        msgs.append(Message(role="user", content=f"turn {i} " + "q" * 20))
+        msgs.append(Message(role="assistant", content=f"ans {i}"))
+    report = asyncio.run(compact_history(msgs, force=True, keep_recent_turns=2, keep_recent_tools=0))
+    assert report.changed
+    assert report.level == "l2"
+    users = [m.content for m in msgs if m.role == "user"]
+    assert users == ["turn 4 " + "q" * 20, "turn 5 " + "q" * 20]
+    assert any(m.role == "system" and "[compacted earlier conversation]" in (m.content or "") for m in msgs)
+
+
+def test_rotate_hint_after_threshold():
+    msgs = _messages_over_limit(n_tool_msgs=8, chars_each=400)
+    meta = {}
+    report = asyncio.run(compact_history(
+        msgs, force=True, session_meta=meta, keep_recent_tools=2, rotate_after=1))
+    assert report.changed
+    assert report.compact_count == 1
+    assert report.rotate_hint
+    assert "新会话" in report.summary
+
+
+def test_recent_reads_are_protected():
+    msgs = [Message(role="system", content="sys"), Message(role="user", content="task")]
+    msgs.append(Message(role="assistant", content="", tool_calls=[
+        {"id": "r0", "name": "read", "input": {"path": "a.py"}},
+        {"id": "s0", "name": "shell", "input": {"command": "ls"}},
+        {"id": "s1", "name": "shell", "input": {"command": "pwd"}},
+        {"id": "s2", "name": "shell", "input": {"command": "echo"}},
+    ]))
+    msgs.append(Message(role="tool", content="FILE " + "a" * 300, tool_call_id="r0"))
+    msgs.append(Message(role="tool", content="SH0 " + "b" * 300, tool_call_id="s0"))
+    msgs.append(Message(role="tool", content="SH1 " + "c" * 300, tool_call_id="s1"))
+    msgs.append(Message(role="tool", content="SH2 " + "d" * 300, tool_call_id="s2"))
+    asyncio.run(compact_history(msgs, force=True, keep_recent_tools=1, keep_recent_turns=8))
+    by_id = {m.tool_call_id: m.content for m in msgs if m.role == "tool"}
+    assert "FILE" in by_id["r0"]
+    assert "SH2" in by_id["s2"]
+    assert "[elided" in by_id["s0"]

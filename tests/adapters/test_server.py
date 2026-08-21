@@ -397,8 +397,16 @@ def test_webui_served_at_root(client):
         "run-summary",
         'aria-label="关闭设置"',
         '/sessions/" + id + "/history',
+        "renderCompletedRun",
+        "turn-details",
+        "toggleTheme",
+        "synapse-theme",
+        "score-head",
     ):
         assert marker in response.text
+    assert "a.id === sessionId ? -1" not in response.text
+    assert "const marker = role === \"user\"" not in response.text
+    assert "who.textContent = marker" not in response.text
 
 
 @pytest.mark.asyncio
@@ -486,6 +494,35 @@ def test_per_session_synapse_instances(monkeypatch):
     assert len(created) == 2
 
 
+def test_session_history_returns_run_snapshot(tmp_path, monkeypatch):
+    """历史接口返回结构化 run_history，供 Web 按当前会话布局还原。"""
+    import synapse.adapters.server as server
+    from synapse.core.session import Session
+    from synapse.protocols.llm import Message
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(server, "DEFAULT_SESSION_DIR", tmp_path)
+    session = Session(session_id="11111111-1111-1111-1111-111111111111")
+    session.add_message(Message(role="user", content="检查项目"))
+    session.add_message(Message(role="assistant", content="中间过程"))
+    session.add_message(Message(role="assistant", content="完成"))
+    session.metadata["run_history"] = [{
+        "task": "检查项目",
+        "output": "完成",
+        "status": "success",
+        "metrics": {"duration_ms": 12, "tokens_input": 1, "tokens_output": 2,
+                    "tool_call_count": 1, "tool_success_count": 1},
+        "tools": [{"name": "read", "success": True, "args": "path=a.py", "meta": "3ms"}],
+        "plan": {"steps": [{"step_id": 1, "description": "读文件"}], "reasoning": ""},
+    }]
+    session.save(tmp_path)
+    app = create_app()
+    data = TestClient(app).get(f"/sessions/{session.id}/history").json()
+    assert data["runs"][0]["output"] == "完成"
+    assert data["runs"][0]["tools"][0]["name"] == "read"
+    assert data["runs"][0]["plan"]["steps"][0]["description"] == "读文件"
+
+
 def test_session_history(client):
     """After a run, GET /sessions/{id}/messages returns message history."""
     # First, run a task to create a session
@@ -560,6 +597,35 @@ def test_status_endpoint(client, monkeypatch):
     assert data["budget"] == 200000
     assert data["tools_count"] == 2
     assert "version" in data
+    assert data["compact_count"] == 0
+
+
+def test_compact_endpoint(client, tmp_path, monkeypatch):
+    import synapse.adapters.server as server
+    from synapse.config.schema import PlanningConfig
+    from synapse.core.session import Session
+    from synapse.protocols.llm import Message
+
+    fake = MagicMock()
+    fake.planning = PlanningConfig()
+    monkeypatch.setattr(server, "load_config", lambda *a, **k: (fake, None))
+
+    assert client.post("/sessions/missing/compact").status_code == 404
+
+    session = Session()
+    session.messages = [
+        Message(role="system", content="s"),
+        Message(role="user", content="t"),
+    ]
+    for i in range(8):
+        session.messages.append(Message(role="tool", content="x" * 400, tool_call_id=f"t{i}"))
+    session.save(tmp_path)
+    response = client.post(f"/sessions/{session.id}/compact")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["changed"] is True
+    assert body["level"] in {"l1", "l2"}
+    assert "summary" in body
 
 
 def test_todos_endpoint(client, monkeypatch, tmp_path):

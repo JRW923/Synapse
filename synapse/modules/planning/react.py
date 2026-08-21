@@ -195,6 +195,29 @@ def _classify_llm_failure(exc: BaseException) -> str:
     return "llm_error"
 
 
+_CONTEXT_OVERFLOW_MARKERS = (
+    "context_length_exceeded",
+    "context length exceeded",
+    "maximum context length",
+    "too large for model",
+    "prompt is too long",
+    "prompt too long",
+)
+
+
+def _is_context_overflow(exc: BaseException) -> bool:
+    """True when a provider rejected the prompt for length, not schema."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).lower()
+        if any(marker in message for marker in _CONTEXT_OVERFLOW_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _error_summary(exc: BaseException) -> str:
     """str(exc) can be empty (asyncio.TimeoutError, bare OSError) — the
     exception type name is the floor so retry logs never show a blank cause."""
@@ -224,6 +247,10 @@ class ReActPlanner:
                  # points (library._build_planner) enable it via config.
                  checkpoint_enabled: bool = False,
                  history_compaction: str = "elide",
+                 history_soft_chars: int = 120_000,
+                 history_keep_recent_tools: int = 6,
+                 history_keep_recent_turns: int = 4,
+                 compact_rotate_after: int = 3,
                  verbose: bool = True,
         role: str = "", system_prompt_suffix: str = "",
         background_manager=None, skill_loader=None):
@@ -241,6 +268,10 @@ class ReActPlanner:
         self.completion_gate_enabled = completion_gate_enabled
         self.checkpoint_enabled = checkpoint_enabled
         self.history_compaction = history_compaction
+        self.history_soft_chars = history_soft_chars
+        self.history_keep_recent_tools = history_keep_recent_tools
+        self.history_keep_recent_turns = history_keep_recent_turns
+        self.compact_rotate_after = compact_rotate_after
         self.verbose = verbose
         # role lets one ReActPlanner act as a specialized swarm worker
         # (e.g. "reviewer") without a separate class.
@@ -433,6 +464,7 @@ class ReActPlanner:
         if self.background_manager is not None:
             self.background_manager.set_run_context(event_bus, session.id)
         file_touch_counts: dict[str, int] = {}
+        budget_compacted = False
 
         # Phase 4 — citation tracking (tracks which context blocks the LLM cites)
         from synapse.modules.context.citation import CitationTracker
@@ -445,6 +477,10 @@ class ReActPlanner:
         system_prompt = self._build_system_prompt(context, task)
         if session.messages:
             repaired = self._repair_session(session.messages)
+            if repaired and repaired[0].role == "system":
+                repaired[0] = Message(role="system", content=system_prompt)
+            else:
+                repaired.insert(0, Message(role="system", content=system_prompt))
             repaired.append(Message(role="user", content=task))
             messages = repaired
         else:
@@ -513,11 +549,11 @@ class ReActPlanner:
                 session.messages = self._repair_session(messages)
                 break
 
-            # In-loop history compaction: elide (or LLM-summarize, then elide)
-            # the content of old tool results once the conversation grows past
-            # a soft budget, so long tasks don't blow the provider context
-            # window (which would 400 -> retry -> FAILED).
-            await self._compact_history(messages, llm=llm)
+            # In-loop history compaction: L1 elides old tool results past the
+            # soft budget; overflow / 80% budget force a compact instead of
+            # dying on a context-length 400.
+            await self._compact_history(
+                messages, llm=llm, session=session, event_bus=event_bus)
 
             # Call LLM with exponential backoff retry (I2)
             self._log(f"Iteration {iteration}: calling LLM...")
@@ -526,7 +562,9 @@ class ReActPlanner:
                 message=f"Iteration {iteration}: calling LLM..."
             ))
             max_llm_retries = self.max_llm_retries
-            for attempt in range(max_llm_retries + 1):  # 1 initial + retries
+            overflow_retried = False
+            attempt = 0
+            while True:
                 t_llm = time.monotonic()
                 try:
                     response = await asyncio.wait_for(
@@ -539,8 +577,20 @@ class ReActPlanner:
                     break
                 except Exception as e:
                     kind = _classify_llm_failure(e)
+                    if (
+                        kind == "invalid_request"
+                        and not overflow_retried
+                        and _is_context_overflow(e)
+                    ):
+                        overflow_retried = True
+                        report = await self._compact_history(
+                            messages, llm=llm, force=True,
+                            session=session, event_bus=event_bus)
+                        if report.changed:
+                            self._log("Context overflow — compacted history, retrying LLM call")
+                            continue
                     non_retryable = kind in ("auth", "invalid_request")
-                    if non_retryable or attempt == max_llm_retries:
+                    if non_retryable or attempt >= max_llm_retries:
                         attempts = attempt + 1
                         # Provider outages are infrastructure facts; tag the
                         # metrics so evaluation keeps them out of capability
@@ -562,6 +612,7 @@ class ReActPlanner:
                         )
                     await asyncio.sleep(2 ** attempt)  # 1s, 2s, 4s
                     self._log(f"LLM call attempt {attempt + 1} failed: {_error_summary(e)} [{_classify_llm_failure(e)}], retrying...")
+                    attempt += 1
                 finally:
                     metrics.llm_call_count += 1
                     metrics.llm_time_ms += int((time.monotonic() - t_llm) * 1000)
@@ -580,6 +631,11 @@ class ReActPlanner:
                             f"({total_tokens}/{self.max_tokens_per_task})"
                         ),
                     ))
+                    if not budget_compacted:
+                        budget_compacted = True
+                        await self._compact_history(
+                            messages, llm=llm, force=True,
+                            session=session, event_bus=event_bus)
                 elif ratio >= 1.0:
                     final_output = (
                         f"Token budget exhausted "
@@ -1018,86 +1074,37 @@ class ReActPlanner:
             )
         return prefetched
 
-    async def _compact_history(self, messages, llm=None, soft_chars: int = 120_000,
-                               keep_recent: int = 6):
-        """Bound conversation growth: summarize-then-elide old tool results.
-
-        Tool messages only need role + tool_call_id + content to stay valid.
-        With ``history_compaction="llm"`` the content about to be dropped is
-        first summarized into one compacted note (auto /compact), preserving
-        findings the model may still need; on any summarizer failure this
-        degrades to plain elision. Recent tool results are kept intact so the
-        model retains what it just did. System/user/assistant turns are never
-        touched.
-        """
-        total = sum(len(getattr(m, "content", "") or "") for m in messages)
-        if total <= soft_chars:
-            return
-        tool_idx = [i for i, m in enumerate(messages) if getattr(m, "role", None) == "tool"]
-        # Never elide the most recent `keep_recent` tool messages.
-        old_idx = tool_idx[:-keep_recent] if len(tool_idx) > keep_recent else []
-        victims = [i for i in old_idx
-                   if len(getattr(messages[i], "content", "") or "") > 200
-                   and "[elided" not in (messages[i].content or "")
-                   and "[compacted" not in (messages[i].content or "")]
-        if not victims:
-            return
-
-        if self.history_compaction == "llm" and llm is not None:
-            summary = await self._summarize_history(messages, victims, llm)
-            if summary:
-                first = victims[0]
-                messages[first].content = (
-                    f"[compacted summary of {len(victims)} older tool results]\n{summary}"
-                )
-                for i in victims[1:]:
-                    messages[i].content = "[elided → summarized above]"
-                return
-            # Summarizer failed — fall through to plain elision.
-
-        for i in victims:
-            messages[i].content = "[elided older tool result to save context]"
-
-    async def _summarize_history(self, messages, victims, llm) -> str:
-        """Summarize the tool results about to be elided (best effort).
-
-        ponytail: input capped at 8K chars per compaction pass — very long
-        histories lose tail content in the summary. Upgrade path: chunked
-        hierarchical summarization like LLMCompactor does for OVERFLOW blocks.
-        """
-        import hashlib
-        from synapse.modules.context.llm_compactor import (
-            MAX_INPUT_CHARS, MAX_SUMMARY_CHARS,
+    async def _compact_history(self, messages, llm=None, soft_chars: int | None = None,
+                               keep_recent: int | None = None, force: bool = False,
+                               session=None, event_bus=None):
+        """Bound conversation growth via shared L1/L2 compaction."""
+        from synapse.modules.context.history_compact import compact_history
+        report = await compact_history(
+            messages,
+            llm=llm,
+            session_meta=getattr(session, "metadata", None),
+            force=force,
+            soft_chars=self.history_soft_chars if soft_chars is None else soft_chars,
+            keep_recent_tools=self.history_keep_recent_tools if keep_recent is None else keep_recent,
+            keep_recent_turns=self.history_keep_recent_turns,
+            rotate_after=self.compact_rotate_after,
+            strategy=self.history_compaction,
         )
-        joined = "\n\n".join(
-            f"--- tool result #{n} ---\n{(messages[i].content or '')}"
-            for n, i in enumerate(victims, start=1)
-        )[:MAX_INPUT_CHARS]
-        key = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
-        cached = getattr(self, "_history_summary_cache", None)
-        if cached is None:
-            cached = self._history_summary_cache = {}
-        if key in cached:
-            return cached[key]
-        try:
-            response = await llm.chat([
-                Message(role="system",
-                        content="You are a concise context summarizer for a coding agent."),
-                Message(role="user", content=(
-                    "Summarize these past tool results into one dense reference. "
-                    "Preserve file paths, symbol names, error messages, key "
-                    "findings and decisions. Drop prose.\n\n"
-                    f"{joined}"
-                )),
-            ], tools=None)
-            summary = (response.content or "").strip()[:MAX_SUMMARY_CHARS]
-        except Exception:
-            summary = ""
-        cached[key] = summary
-        return summary
+        if report.changed and event_bus is not None and session is not None:
+            await event_bus.emit(AgentProgress(
+                session_id=session.id, phase="compaction",
+                message=report.summary,
+            ))
+            if report.rotate_hint:
+                await event_bus.emit(AgentProgress(
+                    session_id=session.id, phase="compact_rotate",
+                    message="已多次压缩，建议开新会话继续，以免摘要失真。",
+                ))
+        return report
 
     @staticmethod
     def _format_block(block) -> str:
+
         """Render a context block with its source provenance.
 
         External-sourced blocks are wrapped in <external-content> tags by the

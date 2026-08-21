@@ -118,9 +118,13 @@ class PlanningConfig(BaseModel):
     max_tool_result_chars: int = 16_000
     # Conversation-history compaction once it passes the soft limit:
     # "elide" replaces old tool results with a placeholder (cheap, lossy);
-    # "llm" first summarizes them into one compacted note (auto /compact),
+    # "llm" first summarizes them into one compacted note,
     # falling back to elide when the summarizer fails.
     history_compaction: str = "elide"
+    history_soft_chars: int = 120_000
+    history_keep_recent_tools: int = 6
+    history_keep_recent_turns: int = 4
+    compact_rotate_after: int = 3
     # Git-backed workspace checkpoints: task-start snapshot + thrashing
     # auto-recovery + /rewind. Requires a git workspace; silently skipped
     # otherwise.

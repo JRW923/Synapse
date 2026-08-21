@@ -118,3 +118,64 @@ def test_error_summary_falls_back_to_type_name():
     from synapse.modules.planning.react import _error_summary
     assert _error_summary(asyncio.TimeoutError()) == "TimeoutError"
     assert _error_summary(RuntimeError("boom")) == "boom"
+
+
+from synapse.modules.planning.react import _is_context_overflow
+from synapse.protocols.llm import Message
+
+
+def test_context_overflow_detected():
+    e = RuntimeError("Error code: 400 - maximum context length is 128000 tokens")
+    assert _is_context_overflow(e)
+    assert not _is_context_overflow(RuntimeError("Error code: 400 - invalid json schema"))
+
+
+def test_context_overflow_compacts_and_retries():
+    llm = AsyncMock()
+    overflow = RuntimeError(
+        "Error code: 400 - {'error': {'message': 'maximum context length is 128000 tokens'}}")
+    llm.chat.side_effect = [
+        overflow,
+        LLMResponse(content="ok", tool_calls=[], stop_reason="end_turn",
+                    usage={"input": 3, "output": 2}),
+    ]
+    session = Session()
+    session.messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="task"),
+        Message(role="assistant", content="", tool_calls=[
+            {"id": f"t{i}", "name": "shell", "input": {"command": "x"}} for i in range(8)
+        ]),
+    ]
+    for i in range(8):
+        session.messages.append(Message(
+            role="tool", content=f"out {i} " + "x" * 400, tool_call_id=f"t{i}"))
+    planner = ReActPlanner(max_iterations=2, max_llm_retries=0, history_keep_recent_tools=2)
+    result = asyncio.run(planner.execute(
+        task="x", context=Context(), tools=_registry(), llm=llm,
+        sandbox=None, session=session, event_bus=EventBus(),
+    ))
+    assert result.status.value == "success"
+    assert llm.chat.call_count == 2
+    assert any("[elided" in (m.content or "") for m in session.messages if m.role == "tool")
+
+
+def test_system_prompt_refreshed_on_followup():
+    llm = AsyncMock()
+    llm.chat.return_value = LLMResponse(
+        content="done", tool_calls=[], stop_reason="end_turn", usage={"input": 1, "output": 1})
+    session = Session()
+    session.messages = [
+        Message(role="system", content="OLD PROMPT"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="hello"),
+    ]
+    planner = ReActPlanner(max_iterations=1)
+    result = asyncio.run(planner.execute(
+        task="next", context=Context(), tools=_registry(), llm=llm,
+        sandbox=None, session=session, event_bus=EventBus(),
+    ))
+    assert result.status.value == "success"
+    assert session.messages[0].role == "system"
+    assert "OLD PROMPT" not in session.messages[0].content
+    assert "AI coding agent" in session.messages[0].content

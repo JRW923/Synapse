@@ -68,6 +68,26 @@ def test_visible_messages_groups_assistant_tool_iterations():
         ("assistant", "先读取文件\n\n检查完成"),
     ]
     assert s.conversation_turns == 1
+    assert s.conversation_runs() == [{
+        "task": "检查项目",
+        "output": "先读取文件\n\n检查完成",
+        "status": "success",
+    }]
+
+
+def test_conversation_runs_prefers_run_history():
+    s = Session()
+    s.add_message(Message(role="user", content="检查项目"))
+    s.add_message(Message(role="assistant", content="中间过程"))
+    s.add_message(Message(role="assistant", content="最终回答"))
+    s.metadata["run_history"] = [{
+        "task": "检查项目",
+        "output": "最终回答",
+        "status": "success",
+        "tools": [{"name": "read", "success": True, "args": "path=a.py", "meta": "3ms"}],
+    }]
+    assert s.conversation_runs()[0]["output"] == "最终回答"
+    assert s.conversation_runs()[0]["tools"][0]["name"] == "read"
 
 
 def test_save_skips_empty_session(tmp_path):

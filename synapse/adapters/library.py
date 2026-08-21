@@ -23,7 +23,7 @@ from synapse.core.container import Container
 from synapse.core.agent import Agent
 from synapse.core.session import Session
 from synapse.core.events import EventBus
-from synapse.protocols.events import BaseEvent
+from synapse.protocols.events import BaseEvent, EventType
 
 from synapse.protocols.llm import LLMProvider
 from synapse.protocols.planner import Planner, AgentResult, PlanningMode
@@ -170,6 +170,131 @@ def _resolve_provider(name: str, custom_providers: list | None = None, model: st
 
 
 # ---- Synapse facade --------------------------------------------------------
+
+_UI_EVENTS = (
+    EventType.PLAN_CREATED,
+    EventType.TASK_DECOMPOSED,
+    EventType.MERGE_RESULT,
+    EventType.TOOL_CALL_STARTED,
+    EventType.TOOL_CALL_COMPLETED,
+    EventType.BACKGROUND_RESULT,
+    EventType.WORKER_SPAWNED,
+    EventType.WORKER_COMPLETED,
+    EventType.REVIEW_SUBMITTED,
+    EventType.VOTE_CAST,
+    EventType.SWARM_VERIFIED,
+)
+
+
+def _clip_ui(value: object, limit: int = 80) -> str:
+    text = " ".join(str(value or "").split())
+    return text[: limit - 3] + "..." if len(text) > limit else text
+
+
+def _ui_args(params: object) -> str:
+    if not isinstance(params, dict):
+        return ""
+    parts: list[str] = []
+    for key, value in list(params.items())[:8]:
+        lowered = str(key).lower()
+        if any(tag in lowered for tag in (
+            "api_key", "apikey", "token", "authorization", "password", "secret", "cookie",
+        )):
+            parts.append(f"{key}=<redacted>")
+            continue
+        try:
+            text = value if isinstance(value, str) else json.dumps(
+                value, ensure_ascii=False, default=str,
+            )
+        except TypeError:
+            text = str(value)
+        parts.append(f"{key}={_clip_ui(text)}")
+    return ", ".join(parts)
+
+
+def _new_run_ui() -> dict[str, Any]:
+    return {
+        "tools": [],
+        "plan": None,
+        "swarm": {"workers": {}, "reviews": [], "votes": [], "verified": None},
+        "_args": {},
+    }
+
+
+def _public_swarm(swarm: dict[str, Any]) -> dict[str, Any] | None:
+    workers = swarm.get("workers") or {}
+    reviews = swarm.get("reviews") or []
+    votes = swarm.get("votes") or []
+    verified = swarm.get("verified")
+    if not workers and not reviews and not votes and verified is None:
+        return None
+    return {
+        "workers": [{"id": key, **value} for key, value in workers.items()],
+        "reviews": reviews,
+        "votes": votes,
+        "verified": verified,
+    }
+
+
+def _capture_run_ui(ui: dict[str, Any], event: BaseEvent) -> None:
+    et = event.event_type
+    if et == EventType.PLAN_CREATED:
+        ui["plan"] = {
+            "steps": list(getattr(event, "plan_steps", None) or []),
+            "reasoning": getattr(event, "reasoning", "") or "",
+        }
+    elif et == EventType.TASK_DECOMPOSED:
+        count = getattr(event, "subtask_count", 0) or len(getattr(event, "subtask_ids", None) or [])
+        ui["plan"] = {
+            "steps": [{"step_id": "分解", "description": f"已拆分为 {count} 个子任务"}],
+            "reasoning": "",
+        }
+    elif et == EventType.MERGE_RESULT:
+        count = getattr(event, "subtask_count", 0)
+        ui["plan"] = {
+            "steps": [{"step_id": "汇总", "description": f"已合并 {count} 个子任务结果"}],
+            "reasoning": "",
+        }
+    elif et == EventType.TOOL_CALL_STARTED:
+        ui["_args"][getattr(event, "tool_name", "")] = _ui_args(getattr(event, "tool_params", {}) or {})
+    elif et == EventType.TOOL_CALL_COMPLETED:
+        name = getattr(event, "tool_name", "") or "tool"
+        files = getattr(event, "files_touched", None) or []
+        suffix = f" · 文件 {len(files)}" if files else ""
+        sandbox = " · 沙箱拒绝" if getattr(event, "sandbox_violation", False) else ""
+        ui["tools"].append({
+            "name": name,
+            "success": bool(getattr(event, "success", False)),
+            "args": ui["_args"].pop(name, "") or _clip_ui(getattr(event, "error", "") or ""),
+            "meta": f"{int(getattr(event, 'duration_ms', 0) or 0)}ms{suffix}{sandbox}",
+        })
+    elif et == EventType.BACKGROUND_RESULT:
+        task_id = str(getattr(event, "task_id", "") or "")[:8]
+        ui["tools"].append({
+            "name": "bg:" + task_id,
+            "success": bool(getattr(event, "success", False)),
+            "args": _clip_ui(getattr(event, "stdout", "") or getattr(event, "stderr", "") or ""),
+            "meta": "",
+        })
+    elif et == EventType.WORKER_SPAWNED:
+        wid = getattr(event, "agent_id", "") or getattr(event, "role", "") or "worker"
+        ui["swarm"]["workers"][wid] = {
+            "role": getattr(event, "role", "") or "worker",
+            "status": "running",
+        }
+    elif et == EventType.WORKER_COMPLETED:
+        wid = getattr(event, "agent_id", "") or getattr(event, "role", "") or "worker"
+        prev = ui["swarm"]["workers"].get(wid) or {}
+        ui["swarm"]["workers"][wid] = {
+            "role": getattr(event, "role", "") or prev.get("role") or "worker",
+            "status": getattr(event, "status", "") or "completed",
+        }
+    elif et == EventType.REVIEW_SUBMITTED:
+        ui["swarm"]["reviews"].append({"verdict": getattr(event, "verdict", "") or ""})
+    elif et == EventType.VOTE_CAST:
+        ui["swarm"]["votes"].append({"decision": getattr(event, "decision", "") or ""})
+    elif et == EventType.SWARM_VERIFIED:
+        ui["swarm"]["verified"] = getattr(event, "status", "") or "unknown"
 
 
 class Synapse:
@@ -335,7 +460,19 @@ class Synapse:
             for _m in self._run_metrics:
                 _m.reset()
 
-            result = await agent.run(task, session)
+            bus = self._container.resolve(EventBus)
+            ui = _new_run_ui()
+
+            async def _capture(event: BaseEvent) -> None:
+                _capture_run_ui(ui, event)
+
+            for event_type in _UI_EVENTS:
+                bus.subscribe(event_type.value, _capture)
+            try:
+                result = await agent.run(task, session)
+            finally:
+                for event_type in _UI_EVENTS:
+                    bus.unsubscribe(event_type.value, _capture)
 
             status = result.status.value if hasattr(result.status, "value") else str(result.status)
             self._last_run_score = RunScore(
@@ -351,7 +488,7 @@ class Synapse:
             await self._persist_run_score(self._last_run_score)
             history = session.metadata.setdefault("run_history", [])
             if isinstance(history, list):
-                history.append({
+                entry = {
                     "task": task,
                     "output": result.output,
                     "status": status,
@@ -359,7 +496,15 @@ class Synapse:
                     "metrics": asdict(result.metrics),
                     "run_score": self.get_run_score(),
                     "citation_report": self.get_citation_report(),
-                })
+                    "tools": ui["tools"],
+                    "plan": ui["plan"],
+                    "swarm": _public_swarm(ui["swarm"]),
+                    "artifacts": [
+                        {"path": artifact.path, "action": artifact.action}
+                        for artifact in (result.artifacts or [])
+                    ],
+                }
+                history.append(json.loads(json.dumps(entry, ensure_ascii=False, default=str)))
             return result
         finally:
             # ponytail: the planner swap is instance-wide and not safe under
@@ -400,6 +545,27 @@ class Synapse:
         if tracker is None or context is None:
             return None
         return tracker.report(context)
+
+    async def compact_session(self, session: Session) -> dict:
+        """Force L1/L2 history compaction on an existing session."""
+        from synapse.modules.context.history_compact import compact_history
+        try:
+            llm = self._container.resolve(LLMProvider)
+        except Exception:
+            llm = None
+        cfg = self._config.planning
+        report = await compact_history(
+            session.messages,
+            llm=llm,
+            session_meta=session.metadata,
+            force=True,
+            soft_chars=cfg.history_soft_chars,
+            keep_recent_tools=cfg.history_keep_recent_tools,
+            keep_recent_turns=cfg.history_keep_recent_turns,
+            rotate_after=cfg.compact_rotate_after,
+            strategy=cfg.history_compaction,
+        )
+        return report.to_dict()
 
     def clear_session_memory(self) -> None:
         """Drop all in-memory SESSION memory entries.
@@ -885,6 +1051,10 @@ def build_planner(
         completion_gate_enabled=completion_gate_enabled,
         checkpoint_enabled=cfg.checkpoints,
         history_compaction=cfg.history_compaction,
+        history_soft_chars=cfg.history_soft_chars,
+        history_keep_recent_tools=cfg.history_keep_recent_tools,
+        history_keep_recent_turns=cfg.history_keep_recent_turns,
+        compact_rotate_after=cfg.compact_rotate_after,
         background_manager=background_manager or get_default_manager(),
         skill_loader=get_default_skill_loader(),
     )

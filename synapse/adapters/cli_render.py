@@ -382,6 +382,10 @@ class _LiveRun:
             return "调用模型"
         if phase == "token_budget":
             return "接近 token 预算"
+        if phase == "compaction":
+            return message or "压缩上下文"
+        if phase == "compact_rotate":
+            return message or "建议开新会话"
         if phase == "context_timeout":
             return "上下文检索超时"
         if phase == "done":

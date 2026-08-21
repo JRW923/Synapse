@@ -1067,7 +1067,7 @@ class ConnectorClient:
             if report is not None:
                 session.metadata["citation_report"] = report
             session.save(DEFAULT_SESSION_DIR)
-            payload = self._result_payload(result, synapse, session_id)
+            payload = self._result_payload(result, synapse, session)
         except asyncio.CancelledError:
             payload = _error_result(session_id, "本地 Connector 已停止任务")
         except Exception as exc:
@@ -1144,19 +1144,20 @@ class ConnectorClient:
                 for _ in range(consumed):
                     queue.task_done()
 
-    def _result_payload(self, result, synapse: Synapse, session_id: str) -> dict[str, Any]:
+    def _result_payload(self, result, synapse: Synapse, session: Session) -> dict[str, Any]:
         metrics = result.metrics
+        last = {}
+        runs = session.metadata.get("run_history")
+        if isinstance(runs, list) and runs and isinstance(runs[-1], dict):
+            last = runs[-1]
         payload = {
             "status": getattr(result.status, "value", str(result.status)),
             "output": result.output,
-            "session_id": session_id,
-            "run_id": "",
-            "artifacts": [
-                {
-                    "path": artifact.path,
-                    "content": artifact.content,
-                    "action": artifact.action,
-                }
+            "session_id": session.id,
+            "run_id": str(session.metadata.get("last_run_id", "") or last.get("run_id", "")),
+            "task": last.get("task"),
+            "artifacts": last.get("artifacts") or [
+                {"path": artifact.path, "action": artifact.action}
                 for artifact in result.artifacts
             ],
             "metrics": {
@@ -1168,6 +1169,10 @@ class ConnectorClient:
                 "thrashing_events": metrics.thrashing_events,
             },
             "run_score": synapse.get_run_score(),
+            "citation_report": last.get("citation_report"),
+            "tools": last.get("tools") or [],
+            "plan": last.get("plan"),
+            "swarm": last.get("swarm"),
         }
         return _redact_workspace(_json_safe(payload), self.workspace)
 

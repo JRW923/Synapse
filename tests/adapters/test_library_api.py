@@ -377,6 +377,9 @@ async def test_run_score_populated_after_run():
     # surfaced (non-empty string).
     assert isinstance(score["process_hint"], str) and score["process_hint"]
     assert session.metadata["run_history"][-1]["output"] == result.output
+    assert "tools" in session.metadata["run_history"][-1]
+    assert "plan" in session.metadata["run_history"][-1]
+    assert "swarm" in session.metadata["run_history"][-1]
 
 
 @pytest.mark.asyncio
