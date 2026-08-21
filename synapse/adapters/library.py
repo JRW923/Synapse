@@ -10,6 +10,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 import hashlib
 import json
 import tempfile
@@ -348,6 +349,17 @@ class Synapse:
                 efficiency=self._run_metrics[3].snapshot(),
             )
             await self._persist_run_score(self._last_run_score)
+            history = session.metadata.setdefault("run_history", [])
+            if isinstance(history, list):
+                history.append({
+                    "task": task,
+                    "output": result.output,
+                    "status": status,
+                    "run_id": str(session.metadata.get("last_run_id", "")),
+                    "metrics": asdict(result.metrics),
+                    "run_score": self.get_run_score(),
+                    "citation_report": self.get_citation_report(),
+                })
             return result
         finally:
             # ponytail: the planner swap is instance-wide and not safe under

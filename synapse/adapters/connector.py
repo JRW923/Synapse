@@ -288,6 +288,7 @@ class ConnectorBroker:
         task: str,
         session_id: str,
         confirm_mode: str = "ask",
+        planning_mode: str | None = None,
     ) -> ConnectorJob:
         self._sweep()
         record = self._authenticate_browser(connector_id, browser_token)
@@ -297,6 +298,10 @@ class ConnectorBroker:
             raise ConnectorBusyError("本地 Connector 正在执行另一个任务")
         if not _valid_uuid(session_id):
             raise ConnectorJobError("会话标识无效")
+        if planning_mode is not None and planning_mode not in {
+            "react", "plan_execute", "hierarchical", "swarm",
+        }:
+            raise ConnectorJobError("规划模式无效")
 
         loop = asyncio.get_running_loop()
         job = ConnectorJob(
@@ -308,13 +313,16 @@ class ConnectorBroker:
         )
         self._jobs[job.id] = job
         record.active_job_id = job.id
-        await record.commands.put({
+        command = {
             "type": "run",
             "job_id": job.id,
             "session_id": session_id,
             "task": task,
             "confirm_mode": confirm_mode,
-        })
+        }
+        if planning_mode is not None:
+            command["planning_mode"] = planning_mode
+        await record.commands.put(command)
         return job
 
     async def publish_events(
@@ -854,6 +862,7 @@ class ConnectorClient:
         self._config_path = config_path
         self._http = _JsonHttpClient(server)
         self._synapse: Synapse | None = None
+        self._synapse_mode: str | None = None
         self._sessions: dict[str, Session] = {}
         self._active_task: asyncio.Task[None] | None = None
         self._active_job_id: str | None = None
@@ -936,7 +945,11 @@ class ConnectorClient:
             return
         self._active_job_id = job_id
         self._active_task = asyncio.create_task(
-            self._run_job(job_id, session_id, task, str(command.get("confirm_mode", "ask"))),
+            self._run_job(
+                job_id, session_id, task,
+                str(command.get("confirm_mode", "ask")),
+                command.get("planning_mode"),
+            ),
         )
 
     def _cancel_active_job(self, job_id: str) -> None:
@@ -964,7 +977,7 @@ class ConnectorClient:
         answer[0] = approve
         event.set()
 
-    def _get_synapse(self) -> Synapse:
+    def _get_synapse(self, planning_mode: str | None = None) -> Synapse:
         if self._synapse is None:
             # The server never supplies these settings.  This local construction
             # keeps the existing tool/auth/sandbox pipeline on the user's host.
@@ -983,7 +996,9 @@ class ConnectorClient:
                 hooks={},
                 paths=[],
                 mcp_servers=[],
+                **({"mode": planning_mode} if planning_mode else {}),
             )
+            self._synapse_mode = planning_mode
         return self._synapse
 
     def _session(self, session_id: str) -> Session:
@@ -1000,6 +1015,7 @@ class ConnectorClient:
 
     async def _run_job(
         self, job_id: str, session_id: str, task: str, confirm_mode: str = "ask",
+        planning_mode: str | None = None,
     ) -> None:
         self._pending_confirms.clear()
         event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(EVENT_QUEUE_SIZE)
@@ -1029,7 +1045,10 @@ class ConnectorClient:
 
         payload: dict[str, Any]
         try:
-            synapse = self._get_synapse()
+            if self._synapse is not None and planning_mode != self._synapse_mode:
+                await self._synapse.aclose()
+                self._synapse = None
+            synapse = self._get_synapse(planning_mode)
             event_bus = synapse._container.resolve(EventBus)
             for event_type in EventType:
                 event_bus.subscribe(event_type.value, on_event)

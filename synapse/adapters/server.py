@@ -235,6 +235,11 @@ class MessageResponse(BaseModel):
     tool_call_id: str | None = None
 
 
+class SessionHistoryResponse(BaseModel):
+    runs: list[dict[str, Any]] = PydanticField(default_factory=list)
+    messages: list[MessageResponse] = PydanticField(default_factory=list)
+
+
 class ExperimentRequest(BaseModel):
     name: str
     variables: dict[str, Any] = PydanticField(default_factory=dict)
@@ -554,6 +559,7 @@ def create_app(
                 task=req.task,
                 session_id=session_id,
                 confirm_mode=app.state.confirm_mode,
+                planning_mode=(app.state.session_runtime.get(session_id) or {}).get("mode"),
             )
         except ConnectorError as exc:
             _raise_connector_error(exc)
@@ -574,11 +580,13 @@ def create_app(
         from synapse.config.schema import OPENROUTER_DEFAULT_MODEL
 
         rc = app.state.runtime_key
+        config, _ = load_config()
         return {
             "configured": _is_configured(),
-            "provider": rc["provider"] if rc else None,
-            "model": rc["model"] if rc else None,
+            "provider": rc["provider"] if rc else config.provider.provider,
+            "model": rc["model"] if rc else config.provider.model,
             "base_url": rc.get("base_url", "") if rc else "",
+            "source": "browser" if rc else ("file" if models_config_path().exists() else "default"),
             "free_model": {"provider": "openrouter", "model": OPENROUTER_DEFAULT_MODEL},
         }
 
@@ -1014,6 +1022,24 @@ def create_app(
             for m in session.messages
         ]
 
+    @app.get("/sessions/{session_id}/history", response_model=SessionHistoryResponse)
+    async def get_session_history(session_id: str):
+        session = sessions.get(session_id)
+        if session is None:
+            path = DEFAULT_SESSION_DIR / f"{session_id}.json"
+            if path.exists():
+                session = Session.load(path)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        runs = session.metadata.get("run_history")
+        return SessionHistoryResponse(
+            runs=runs if isinstance(runs, list) else [],
+            messages=[
+                MessageResponse(role=m.role, content=m.content)
+                for m in session.visible_messages()
+            ],
+        )
+
     # ---- GET /sessions — 历史会话列表 (WebUI 侧栏) ------------------------
 
     @app.get("/sessions", response_model=list)
@@ -1034,7 +1060,8 @@ def create_app(
             )
             out.append({
                 "id": s.id,
-                "message_count": len(s.messages),
+                "message_count": len(s.visible_messages()),
+                "turn_count": s.conversation_turns,
                 "estimated_tokens": s.estimated_tokens,
                 "modified_at": mtime,
                 "preview": preview,
@@ -1046,7 +1073,8 @@ def create_app(
                 continue
             out.append({
                 "id": sid,
-                "message_count": len(s.messages),
+                "message_count": len(s.visible_messages()),
+                "turn_count": s.conversation_turns,
                 "estimated_tokens": s.estimated_tokens,
                 "modified_at": time.time(),
                 "preview": next(
@@ -1066,6 +1094,7 @@ def create_app(
                 out.append({
                     "id": sid,
                     "message_count": 0,
+                    "turn_count": 0,
                     "estimated_tokens": 0,
                     "modified_at": time.time(),
                     "preview": "运行中的会话",

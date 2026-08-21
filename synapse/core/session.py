@@ -31,6 +31,42 @@ class Session:
     def clear_messages(self) -> None:
         self.messages.clear()
 
+    def visible_messages(self) -> list[Message]:
+        """Return user-facing conversation messages with tool turns folded.
+
+        A single assistant answer may span several assistant/tool iterations.
+        Only the final grouped answer belongs in conversation history.
+        """
+        visible: list[Message] = []
+        assistant_parts: list[str] = []
+
+        def flush_assistant() -> None:
+            if assistant_parts:
+                visible.append(Message(role="assistant", content="\n\n".join(assistant_parts)))
+                assistant_parts.clear()
+
+        for message in self.messages:
+            content = message.content if isinstance(message.content, str) else ""
+            if message.role == "user":
+                flush_assistant()
+                if content.strip():
+                    visible.append(Message(role="user", content=content))
+            elif message.role == "assistant":
+                if content.strip():
+                    assistant_parts.append(content)
+                if not getattr(message, "tool_calls", None):
+                    flush_assistant()
+        flush_assistant()
+        return visible
+
+    @property
+    def conversation_turns(self) -> int:
+        """Number of user-visible task turns in this session."""
+        runs = self.metadata.get("run_history")
+        if isinstance(runs, list):
+            return len(runs)
+        return sum(message.role == "user" for message in self.visible_messages())
+
     def fork(self, new_id: str) -> "Session":
         """Create an independent copy for a sub-session."""
         child = Session(session_id=new_id)

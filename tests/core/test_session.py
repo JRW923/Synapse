@@ -51,6 +51,25 @@ def test_token_estimate():
     assert s.estimated_tokens > 0
 
 
+def test_visible_messages_groups_assistant_tool_iterations():
+    s = Session()
+    s.add_message(Message(role="user", content="检查项目"))
+    s.add_message(Message(
+        role="assistant", content="先读取文件",
+        tool_calls=[{"id": "1", "name": "read", "arguments": {}}],
+    ))
+    s.add_message(Message(role="tool", content="file contents", tool_call_id="1"))
+    s.add_message(Message(role="assistant", content="检查完成"))
+
+    visible = s.visible_messages()
+
+    assert [(message.role, message.content) for message in visible] == [
+        ("user", "检查项目"),
+        ("assistant", "先读取文件\n\n检查完成"),
+    ]
+    assert s.conversation_turns == 1
+
+
 def test_save_skips_empty_session(tmp_path):
     """空会话不落盘：没有消息的会话文件没有恢复价值，只会堆满 /resume 列表。"""
     s = Session()

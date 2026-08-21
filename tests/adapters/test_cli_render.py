@@ -30,7 +30,7 @@ def test_print_result_rich():
     console = Console(file=out, width=80)
     _print_result(console, _result(ResultStatus.SUCCESS), True)
     text = out.getvalue()
-    assert "TASK COMPLETE" in text
+    assert "任务完成" in text
     assert "done" in text
 
 
@@ -184,7 +184,7 @@ def test_welcome_uses_compact_layout_on_narrow_terminal():
 
     text = console.export_text()
     assert _WELCOME_ART[0].strip() not in text
-    assert "READY" in text
+    assert "就绪" in text
     assert "abcdef12" in text
     assert {cell_len(line) for line in text.splitlines()} == {40}
 
@@ -470,7 +470,7 @@ def test_print_session_history_shows_recent_conversation(capsys):
     _print_session_history(None, s, use_rich=False)
     out = capsys.readouterr().out
 
-    assert "最近对话" in out and "共 10 条消息" in out
+    assert "最近对话" in out and "共 2 轮" in out
     assert "用户: 再加个切换按钮" in out
     assert "第 0 步已完成" not in out  # 只显示最后几条,不灌屏
     assert "助手: 第 7 步已完成" in out

@@ -110,7 +110,8 @@ def test_connector_stream_injects_session_id(tmp_path: Path, monkeypatch):
     app = create_app()
     sid = "11111111-1111-1111-1111-111111111111"
 
-    async def fake_start_job(*, connector_id, browser_token, task, session_id, confirm_mode="ask"):
+    async def fake_start_job(*, connector_id, browser_token, task, session_id,
+                             confirm_mode="ask", planning_mode=None):
         loop = asyncio.get_running_loop()
         job = ConnectorJob(
             id="j1", connector_id=connector_id, session_id=session_id,
@@ -192,6 +193,15 @@ def _wait_for_local_connector(port: int, timeout: float = 12.0) -> dict | None:
     return None
 
 
+def _stop_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        proc.terminate()
+    else:
+        proc.send_signal(signal.SIGINT)
+
+
 def test_web_command_auto_binds_and_exits_on_sigint(tmp_path: Path):
     home = tmp_path / "home"
     _temp_models_json(home)
@@ -202,8 +212,9 @@ def test_web_command_auto_binds_and_exits_on_sigint(tmp_path: Path):
     proc = subprocess.Popen(
         [sys.executable, "-m", "synapse", "web",
          "--workspace", str(workspace), "--port", str(port)],
-        env={**os.environ, "HOME": str(home), "BROWSER": "/bin/true"},
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env={**os.environ, "HOME": str(home), "USERPROFILE": str(home),
+             "BROWSER": "/bin/true"},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
     )
     try:
         bound = _wait_for_local_connector(port)
@@ -212,7 +223,7 @@ def test_web_command_auto_binds_and_exits_on_sigint(tmp_path: Path):
         assert bound["browser_token"]
 
         # 单 Ctrl+C 应干净退出（服务停服、进程结束）。
-        proc.send_signal(signal.SIGINT)
+        _stop_process(proc)
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -224,8 +235,8 @@ def test_web_command_auto_binds_and_exits_on_sigint(tmp_path: Path):
             proc.kill()
 
 
-def test_web_command_without_models_exits_cleanly(tmp_path: Path):
-    # 未配置模型时：应给出清晰中文提示并正常退出，而非抛出 uvicorn 堆栈。
+def test_web_command_without_models_starts_configuration_ui(tmp_path: Path):
+    # 未配置模型时仍应启动网页，让用户浏览历史并从设置完成配置。
     home = tmp_path / "home_no_models"
     home.mkdir(parents=True, exist_ok=True)  # 故意不写 models.json
     workspace = tmp_path / "ws2"
@@ -235,17 +246,25 @@ def test_web_command_without_models_exits_cleanly(tmp_path: Path):
     proc = subprocess.Popen(
         [sys.executable, "-m", "synapse", "web",
          "--workspace", str(workspace), "--port", str(port)],
-        env={**os.environ, "HOME": str(home), "BROWSER": "/bin/true"},
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env={**os.environ, "HOME": str(home), "USERPROFILE": str(home),
+             "BROWSER": "/bin/true"},
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
     )
     try:
-        out, _ = proc.communicate(timeout=15)
+        deadline = time.time() + 12
+        data = None
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/config", timeout=2) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    break
+            except (urllib.error.URLError, ConnectionError, ValueError):
+                time.sleep(0.25)
+        assert data is not None
+        assert data["configured"] is False
     finally:
         if proc.poll() is None:
             proc.kill()
-
-    assert proc.returncode is not None
-    assert "尚未配置模型" in out
 
 
 def test_web_command_ignores_stale_saved_connection(tmp_path: Path):
@@ -275,7 +294,7 @@ def test_web_command_ignores_stale_saved_connection(tmp_path: Path):
         [sys.executable, "-m", "synapse", "web",
          "--workspace", str(workspace), "--port", str(port)],
         env={**os.environ, "HOME": str(home), "BROWSER": "/bin/true"},
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8",
     )
     try:
         bound = _wait_for_local_connector(port)
@@ -283,7 +302,7 @@ def test_web_command_ignores_stale_saved_connection(tmp_path: Path):
         assert bound["connector_id"]
     finally:
         if proc.poll() is None:
-            proc.send_signal(signal.SIGINT)
+            _stop_process(proc)
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:

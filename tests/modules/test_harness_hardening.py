@@ -229,6 +229,7 @@ async def test_sse_generator_close_cancels_agent_run():
     endpoint = next(route.endpoint for route in app.routes if route.path == "/run/stream")
     response = await endpoint(RunRequest(task="wait"))
     iterator = response.body_iterator
+    assert '"type": "session"' in await anext(iterator)
     assert "agent_progress" in await anext(iterator)
     await iterator.aclose()
     await asyncio.wait_for(cancelled.wait(), timeout=1)

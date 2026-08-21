@@ -11,6 +11,19 @@ import threading
 import time as _time
 from pathlib import Path
 
+
+def _configure_stdio() -> None:
+    """Use one UTF-8 policy for argparse, print, Rich, and redirected output."""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError):
+                pass
+
 # Platform-specific key-input helpers for interactive selection
 if sys.platform == "win32":
     import msvcrt as _msvcrt
@@ -429,56 +442,56 @@ def _resolve_session(resume):
 
 
 def main():
+    _configure_stdio()
     parser = argparse.ArgumentParser(
         prog="synapse",
-        description="Synapse — Connecting ideas into code",
+        description="Synapse - 连接想法与代码",
     )
     parser.add_argument(
         "--config", "-c",
         default=None,
         metavar="PATH",
-        help="Path to synapse.yaml (default: auto-detect from CWD upward, then ~/.synapse/)",
+        help="synapse.yaml 路径（默认从当前目录向上查找，再使用 ~/.synapse/）",
     )
     parser.add_argument(
         "--resume",
         nargs="?", const="__latest__", default=None, metavar="SESSION_ID",
-        help="Resume a saved session by id (omit the value to resume the most "
-             "recent session).",
+        help="按 ID 恢复会话；省略 ID 时恢复最近会话",
     )
     sub = parser.add_subparsers(dest="command")
 
-    run_parser = sub.add_parser("run", help="Execute a task")
-    run_parser.add_argument("task", nargs="+", help="Task description")
+    run_parser = sub.add_parser("run", help="执行一次任务")
+    run_parser.add_argument("task", nargs="+", help="任务描述")
     run_parser.add_argument(
         "--provider", "-p",
         default=None,
         # No argparse choices here: custom providers registered in
         # ~/.synapse/models.json must be selectable too; _resolve_provider
         # owns the real validation (built-ins + custom_providers).
-        help="LLM provider (overrides config)",
+        help="LLM Provider（覆盖配置）",
     )
     run_parser.add_argument(
         "--model", "-m",
         default=None,
-        help="Model name (overrides config)",
+        help="模型名称（覆盖配置）",
     )
     run_parser.add_argument(
         "--mode",
         default=None,
         choices=["react", "plan_execute", "hierarchical", "swarm"],
-        help="Planning mode (overrides config)",
+        help="规划模式（覆盖配置）",
     )
     run_parser.add_argument(
         "--memory-backend",
         default="chromadb",
         choices=["chromadb", "qdrant"],
-        help="Semantic memory backend (default: chromadb)",
+        help="语义记忆后端（默认：chromadb）",
     )
     run_parser.add_argument(
         "--enable-external-tools",
         action="store_true",
         default=False,
-        help="Enable external tools (HTTP, DB, Browser) — disabled by default",
+        help="启用外部工具（HTTP、DB、Browser；默认关闭）",
     )
     run_parser.add_argument(
         "--mcp-server",
@@ -497,19 +510,17 @@ def main():
         "--yes", "-y",
         action="store_true",
         default=False,
-        help="Auto-approve confirmation-required tool calls (write/execute) "
-             "instead of denying them in non-interactive mode.",
+        help="自动允许需确认的写入/执行工具；非交互模式默认拒绝",
     )
     run_parser.add_argument(
         "--resume",
         nargs="?", const="__latest__", default=None, metavar="SESSION_ID",
-        help="Resume a saved session by id (omit the value to resume the most "
-             "recent session). The task is appended to the existing history.",
+        help="恢复会话并追加本次任务；省略 ID 时恢复最近会话",
     )
 
-    sub.add_parser("version", help="Show version")
+    sub.add_parser("version", help="显示版本")
 
-    serve_parser = sub.add_parser("serve", help="Start the HTTP API server")
+    serve_parser = sub.add_parser("serve", help="启动 HTTP API 服务")
     serve_parser.add_argument(
         "--port", "-p",
         type=int,
@@ -593,7 +604,7 @@ def main():
         help="网页显示的本地工作区名称（默认使用目录名）",
     )
 
-    chat_parser = sub.add_parser("chat", help="Start an interactive chat session")
+    chat_parser = sub.add_parser("chat", help="启动交互式会话")
     chat_parser.add_argument(
         "--provider", "-p",
         default=None,
@@ -827,6 +838,8 @@ def main():
             kwargs["confirm_callback"] = _auto_approve
 
         synapse = Synapse(**kwargs)  # type: ignore[arg-type]
+        if not args.yes:
+            print("提示：非交互模式会拒绝需要确认的写入或执行操作；确认可信后可使用 --yes。")
 
         # Stream the run with a Rich live panel when available, so a one-shot
         # task shows the same progress as the REPL; fall back to plain output.
@@ -1240,8 +1253,8 @@ def _print_result(console, result, use_rich: bool) -> None:
         result.status.value, "dim"
     )
     console.print()
-    title = {"success": "TASK COMPLETE", "partial": "TASK PARTIAL", "failed": "TASK FAILED"}.get(
-        status, "TASK FINISHED"
+    title = {"success": "任务完成", "partial": "部分完成", "failed": "任务失败"}.get(
+        status, "任务结束"
     )
     parts = [
         Text(f"● {title}", style=f"bold {color}"),
@@ -1268,11 +1281,11 @@ def _show_welcome(console, config, config_path: str = "", session=None):
     cwd = str(Path.cwd())
     available, _ = _available_models(config)
     ready = any(e.provider == provider and e.model == model for e in available)
-    status = "READY" if ready else "SETUP"
+    status = "就绪" if ready else "待配置"
     status_style = _SUCCESS if ready else _WARNING
     session_label = "new"
     if session is not None:
-        session_label = f"{session.id[:8]} · {len(session.messages)} msgs"
+        session_label = f"{session.id[:8]} · {_session_turn_count(session)} 轮"
 
     # Rich ignores an explicit width on legacy Windows in ``console.width``;
     # ``_width`` is the constructor override and is otherwise None.
@@ -1526,7 +1539,7 @@ def _show_context_report(console, synapse, use_rich: bool) -> None:
 
     from rich.table import Table
     console.print()
-    console.print(f"  [bold {_BRAND}]Context heatmap[/bold {_BRAND}]  [{_HINT}]citation rate = cited / used[/{_HINT}]")
+    console.print(f"  [bold {_BRAND}]上下文热力图[/bold {_BRAND}]  [{_HINT}]引用率 = 引用 / 使用[/{_HINT}]")
     t = Table(show_header=True, box=None, padding=(0, 2), pad_edge=False)
     t.add_column("Zone", style=f"bold {_BRAND}")
     t.add_column("Source", style=_HINT)
@@ -1581,7 +1594,7 @@ def _show_score(console, synapse, use_rich: bool) -> None:
     header = f"{score.get('status', '')} · {score.get('task', '')[:60]}"
     if use_rich:
         console.print()
-        console.print(f"  [bold {_BRAND}]Run score[/{_BRAND}]  [{_HINT}]{header}[/{_HINT}]")
+        console.print(f"  [bold {_BRAND}]运行评分[/{_BRAND}]  [{_HINT}]{header}[/{_HINT}]")
         t = Table(show_header=False, box=None, padding=(0, 2), pad_edge=False)
         t.add_column(style=f"bold {_BRAND}", no_wrap=True)
         t.add_column(style=_HINT)
@@ -1593,7 +1606,7 @@ def _show_score(console, synapse, use_rich: bool) -> None:
             console.print(f"  [{_HINT}]hint:[/{_HINT}] {hint}")
         console.print()
     else:
-        print(f"Run score — {header}")
+        print(f"运行评分 - {header}")
         for dim in ("safety", "process", "quality", "efficiency"):
             print(f"  {dim}: {_fmt(score.get(dim) or {})}")
         if score.get("process_hint"):
@@ -1698,7 +1711,7 @@ def _pick_model(console, entries, initial: int = 0) -> int | None:
     from rich.live import Live
 
     def _render():
-        lines = [Text("  Use arrow keys to move, Enter to select, Esc to cancel", style="dim")]
+        lines = [Text("  ↑↓ 移动，Enter 选择，Esc 取消", style="dim")]
         for i, (label, _) in enumerate(entries):
             cursor = ">" if i == idx else " "
             line = Text.from_markup(f"  {cursor} {label}")
@@ -1744,17 +1757,21 @@ def _preview_session(s, limit: int) -> str:
     return "(空会话)"
 
 
+def _session_turn_count(session) -> int:
+    value = getattr(session, "conversation_turns", None)
+    if isinstance(value, int):
+        return value
+    return sum(getattr(message, "role", "") == "user" for message in session.messages)
+
+
 def _print_session_history(console, session, use_rich, limit: int = 6):
     """恢复会话后打印最近对话摘要，让用户立刻知道这个会话之前做过什么。"""
-    convo = [
-        m for m in session.messages
-        if m.role in ("user", "assistant")
-        and isinstance(m.content, str) and m.content.strip()
-    ]
+    from synapse.core.session import Session
+    convo = Session.visible_messages(session)
     if not convo:
         return
     tail = convo[-limit:]
-    rows = [f"最近对话（共 {len(session.messages)} 条消息，显示最后 {len(tail)} 条）："]
+    rows = [f"最近对话（共 {_session_turn_count(session)} 轮，显示最后 {len(tail)} 条）："]
     for m in tail:
         who = "用户" if m.role == "user" else "助手"
         first_line = " ".join(
@@ -1786,7 +1803,7 @@ def _pick_session(console, sessions, initial: int = 0):
             cur = i == idx
             line = Text(f"  {'▶' if cur else ' '} ")
             line.append(s.id[:8], style="bold bright_cyan" if cur else "bright_cyan")
-            line.append(f" {len(s.messages)}条 ", style=_HINT)
+            line.append(f" {_session_turn_count(s)}轮 ", style=_HINT)
             line.append(_preview_session(s, limit - 24), style=_SYSTEM)
             lines.append(line)
         return Text("\n").join(lines)
@@ -1816,7 +1833,7 @@ def _pick_session_plain(sessions):
     """无 Rich 时的编号选择。返回选中的 Session 或 None（取消）。"""
     print("已保存的会话：")
     for i, s in enumerate(sessions, 1):
-        print(f"  {i}. {s.id[:8]}  ·  {len(s.messages)} msgs  ·  {_preview_session(s, 60)}")
+        print(f"  {i}. {s.id[:8]}  ·  {_session_turn_count(s)} 轮  ·  {_preview_session(s, 60)}")
     while True:
         choice = input("选择编号（直接回车取消）: ").strip()
         if not choice:
@@ -2245,7 +2262,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
         use_rich = False
 
     if not use_rich:
-        print(f"Synapse v0.1.0 · {provider}/{model}")
+        from synapse import __version__
+        print(f"Synapse v{__version__} · {provider}/{model}")
 
     from synapse.core.session import Session
 
@@ -2417,9 +2435,9 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     with _swallow("/reset: clear session memory"):
                         getattr(_synapse, "clear_session_memory", lambda: None)()
                 if use_rich:
-                    console.print("[dim]Session cleared.[/dim]")
+                    console.print("[dim]已开始新会话，旧会话仍保留在历史中。[/dim]")
                 else:
-                    print("Session cleared.")
+                    print("已开始新会话，旧会话仍保留在历史中。")
             elif cmd == "/memory":
                 est = session.estimated_tokens if session.messages else 0
                 budget = config.planning.max_tokens_per_task
@@ -2455,9 +2473,10 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 from synapse.core.session import Session as _S
                 # 空会话（无消息）没有恢复价值，不进列表。
                 sessions = [s for s in _S.list_sessions() if s.messages]
-                msg = "No saved sessions." if not sessions else (
-                    "Saved sessions:\n" + "\n".join(
-                        f"  {s.id}  ({len(s.messages)} msgs)" for s in sessions[:10]
+                msg = "没有已保存的会话。" if not sessions else (
+                    "最近会话：\n" + "\n".join(
+                        f"  {s.id[:8]}  ·  {_session_turn_count(s)} 轮  ·  {_preview_session(s, 56)}"
+                        for s in sessions[:10]
                     )
                 )
                 if use_rich:
@@ -2467,7 +2486,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
             elif cmd == "/resume":
                 if arg:
                     session = _resolve_session(arg)
-                    note = f"已恢复会话 {session.id[:8]}（{len(session.messages)} 条消息）。"
+                    note = f"已恢复会话 {session.id[:8]}（{_session_turn_count(session)} 轮）。"
                 else:
                     sessions = [s for s in Session.list_sessions() if s.messages]
                     if not sessions:
@@ -2483,7 +2502,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                                 print("已取消恢复。")
                             continue
                         session = chosen
-                        note = f"已恢复会话 {session.id[:8]}（{len(session.messages)} 条消息）。"
+                        note = f"已恢复会话 {session.id[:8]}（{_session_turn_count(session)} 轮）。"
                 from synapse.modules.todo import get_default_todo_store
                 get_default_todo_store().bind_session(session.id)
                 if use_rich:
@@ -2522,7 +2541,14 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                         else:
                             print(hint)
                     elif arg.isdigit() and 1 <= int(arg) <= len(cps):
-                        note = mgr.restore(cps[int(arg) - 1])
+                        checkpoint = cps[int(arg) - 1]
+                        prompt = (f"将 tracked 文件恢复到 checkpoint {checkpoint.label}；"
+                                  "之后创建的 untracked 文件会保留。输入 yes 确认：")
+                        answer = (console.input(prompt) if use_rich else input(prompt)).strip().lower()
+                        if answer != "yes":
+                            note = "已取消回滚。"
+                        else:
+                            note = mgr.restore(checkpoint)
                         if use_rich:
                             console.print(f"[green]{note}[/green]")
                         else:
@@ -2576,8 +2602,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                                 if use_rich: console.print(prefix)
                                 else: print(prefix)
                         else:
-                            if use_rich: console.print(f"[red]Invalid number (1-{len(avail)}).[/red]")
-                            else: print(f"Invalid number (1-{len(avail)}).")
+                            if use_rich: console.print(f"[red]无效编号（1-{len(avail)}）。[/red]")
+                            else: print(f"无效编号（1-{len(avail)}）。")
                     else:
                         candidates = [e for e in avail if e.model == arg or f"{e.provider}/{e.model}" == arg]
                         if candidates:
@@ -2592,8 +2618,8 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                 else:
                     avail, unavail = _available_models(config)
                     if not avail:
-                        if use_rich: console.print("[red]No models available. Set an API key first.[/red]")
-                        else: print("No models available. Set an API key first.")
+                        if use_rich: console.print("[red]没有可用模型，请先配置 API Key。[/red]")
+                        else: print("没有可用模型，请先配置 API Key。")
                         continue
                     # Build entries for interactive picker
                     cur_idx = 0
@@ -2601,7 +2627,7 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                     for i, e in enumerate(avail):
                         label = f"{e.provider}/{e.model}"
                         if e.provider == provider and e.model == model:
-                            label += " [dim](current)[/dim]"
+                            label += " [dim](当前)[/dim]"
                             cur_idx = i
                         pick_entries.append((label, (e.provider, e.model)))
                     if not use_rich:
@@ -2615,22 +2641,22 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                         if _activate_model(entry):
                             n_msgs = len(session.messages)
                             if n_msgs:
-                                hint = f"[dim]Session preserved ({n_msgs} messages).[/dim]"
+                                hint = f"[dim]当前会话已保留（{_session_turn_count(session)} 轮）。[/dim]"
                                 if use_rich: console.print(hint)
-                                else: print(f"Session preserved ({n_msgs} messages).")
+                                else: print(f"当前会话已保留（{_session_turn_count(session)} 轮）。")
             elif cmd == "/provider":
                 if not arg:
                     avail, _ = _available_models(config)
                     providers_set = sorted({e.provider for e in avail})
-                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model} (current)[/dim]" if use_rich else f"{provider}/{model} (current)"
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model}（当前）[/dim]" if use_rich else f"{provider}/{model}（当前）"
                     if use_rich:
                         console.print(prefix)
                         if providers_set:
-                            console.print(f"[dim]Available providers: {', '.join(providers_set)}[/dim]")
+                            console.print(f"[dim]可用 Provider：{', '.join(providers_set)}[/dim]")
                     else:
                         print(prefix)
                         if providers_set:
-                            print(f"Available providers: {', '.join(providers_set)}")
+                            print(f"可用 Provider：{', '.join(providers_set)}")
                 else:
                     new_provider = arg.lower()
                     avail, _ = _available_models(config)
@@ -2641,12 +2667,17 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                         else:
                             print(f"'{new_provider}' is not available (no API key).")
                     else:
-                        # Pick the first model for this provider
-                        for e in avail:
-                            if e.provider == new_provider:
-                                entry = e
-                                break
-                        if _activate_model(entry):
+                        matches = [e for e in avail if e.provider == new_provider]
+                        entry = matches[0] if len(matches) == 1 else None
+                        if entry is None and use_rich:
+                            idx = _pick_model(
+                                console,
+                                [(f"{e.provider}/{e.model}", (e.provider, e.model)) for e in matches],
+                            )
+                            entry = matches[idx] if idx is not None else None
+                        elif entry is None:
+                            print("该 Provider 有多个模型，请使用 /model <名称> 选择。")
+                        if entry is not None and _activate_model(entry):
                             prefix = f"[bright_cyan]>[/bright_cyan] [dim]{provider}/{model} · 已设为默认[/dim]" if use_rich else f"{provider}/{model} · 已设为默认"
                             if use_rich:
                                 console.print(prefix)
@@ -2654,24 +2685,33 @@ async def _main_interface(config_path: str | None = None, resume: str | None = N
                                 print(prefix)
             elif cmd == "/mode":
                 if not arg:
-                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode: {config.planning.mode}[/dim]" if use_rich else f"Mode: {config.planning.mode}"
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]规划模式：{config.planning.mode}[/dim]" if use_rich else f"规划模式：{config.planning.mode}"
+                elif arg not in {"react", "plan_execute", "hierarchical", "swarm"}:
+                    prefix = (f"[red]无效规划模式：{arg}。可选 react / plan_execute / hierarchical / swarm。[/red]"
+                              if use_rich else f"无效规划模式：{arg}。可选 react / plan_execute / hierarchical / swarm。")
                 else:
                     config.planning.mode = arg
                     _synapse = None
-                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]Mode -> {arg}[/dim]" if use_rich else f"Mode -> {arg}"
+                    prefix = f"[bright_cyan]>[/bright_cyan] [dim]规划模式已切换为 {arg}，下次任务生效。[/dim]" if use_rich else f"规划模式已切换为 {arg}，下次任务生效。"
                 if use_rich:
                     console.print(prefix)
                 else:
                     print(prefix)
             elif cmd == "/tools":
-                tools = ["read", "write", "edit", "glob", "grep", "shell", "git", "web_search"]
-                msg = f"[bright_cyan]>[/bright_cyan] [dim]{', '.join(tools)}[/dim]" if use_rich else f"Tools: {', '.join(tools)}"
+                from synapse.protocols.tool import ToolRegistry
+                tools = sorted(
+                    _get_synapse()._container.resolve(ToolRegistry).list_all(),
+                    key=lambda tool: tool.name,
+                )
+                labels = [f"{tool.name}({tool.risk_level.value})" for tool in tools]
+                msg = (f"[bright_cyan]>[/bright_cyan] [dim]可用工具 {len(tools)} 个：{', '.join(labels)}[/dim]"
+                       if use_rich else f"可用工具 {len(tools)} 个：{', '.join(labels)}")
                 if use_rich:
                     console.print(msg)
                 else:
                     print(msg)
             else:
-                console.print(f"[red]Unknown: {cmd}[/red]") if use_rich else print(f"Unknown: {cmd}")
+                console.print(f"[red]未知命令：{cmd}[/red]") if use_rich else print(f"未知命令：{cmd}")
             continue
 
         # ---- Task execution ----

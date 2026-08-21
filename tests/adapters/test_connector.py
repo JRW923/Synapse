@@ -160,6 +160,23 @@ async def test_broker_relays_command_events_and_completion():
 
 
 @pytest.mark.asyncio
+async def test_broker_relays_planning_mode_when_selected():
+    broker = ConnectorBroker()
+    pairing, registration = _pair_connector(broker)
+    job = await broker.start_job(
+        connector_id=registration["connector_id"],
+        browser_token=pairing["browser_token"],
+        task="plan it",
+        session_id=str(uuid.uuid4()),
+        planning_mode="plan_execute",
+    )
+
+    command = await broker.poll(registration["connector_id"], registration["device_token"])
+    assert command["job_id"] == job.id
+    assert command["planning_mode"] == "plan_execute"
+
+
+@pytest.mark.asyncio
 async def test_broker_relays_confirm_to_browser_and_resolves_via_command_channel():
     broker = ConnectorBroker()
     pairing, registration = _pair_connector(broker)
@@ -558,7 +575,9 @@ async def test_connector_server_routes_relay_command_events_and_completion():
         async for chunk in response.body_iterator
     ]
     assert events == [
-        {"type": "event", "event": {"event_type": "agent_progress", "message": "working"}},
+        {"type": "session", "session_id": session_id},
+        {"type": "event", "event": {"event_type": "agent_progress", "message": "working"},
+         "session_id": session_id},
         {
             "type": "done",
             "result": {
@@ -569,6 +588,7 @@ async def test_connector_server_routes_relay_command_events_and_completion():
                 "metrics": {},
                 "run_score": None,
             },
+            "session_id": session_id,
         },
     ]
 

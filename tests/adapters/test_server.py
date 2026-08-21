@@ -396,7 +396,7 @@ def test_webui_served_at_root(client):
         "resetLiveState",
         "run-summary",
         'aria-label="关闭设置"',
-        'assistantParts.join("\\n\\n")',
+        '/sessions/" + id + "/history',
     ):
         assert marker in response.text
 
@@ -625,4 +625,26 @@ def test_session_config_switch_stores_mode_and_validates():
     # Unknown planning mode is rejected.
     bad = c.post("/sessions/s2/config", json={"mode": "nope"})
     assert bad.status_code == 422
+
+
+def test_connector_run_receives_session_planning_mode(monkeypatch):
+    import synapse.adapters.server as server
+    from fastapi.testclient import TestClient
+
+    app = server.create_app()
+    app.state.session_runtime["11111111-1111-1111-1111-111111111111"] = {"mode": "swarm"}
+    captured = {}
+
+    async def start_job(**kwargs):
+        captured.update(kwargs)
+        raise server.ConnectorOfflineError("offline")
+
+    monkeypatch.setattr(app.state.connector_broker, "start_job", start_job)
+    response = TestClient(app).post("/run/stream", json={
+        "task": "x", "session_id": "11111111-1111-1111-1111-111111111111",
+        "connector_id": "c", "connector_token": "t",
+    })
+
+    assert response.status_code == 409
+    assert captured["planning_mode"] == "swarm"
 

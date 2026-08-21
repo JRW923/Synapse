@@ -33,9 +33,11 @@ async def test_library_api_basic():
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
+        from synapse.core.session import Session
 
         synapse = Synapse(provider="anthropic")
-        result = await synapse.run("Say hello")
+        session = Session()
+        result = await synapse.run("Say hello", session=session)
 
     assert result.status == ResultStatus.SUCCESS
     assert "Task completed" in result.output
@@ -353,9 +355,11 @@ async def test_run_score_populated_after_run():
         return_value=mock_llm,
     ):
         from synapse.adapters.library import Synapse
+        from synapse.core.session import Session
 
         synapse = Synapse(provider="anthropic")
-        result = await synapse.run("Say hello")
+        session = Session()
+        result = await synapse.run("Say hello", session=session)
 
     score = synapse.get_run_score()
     assert score is not None
@@ -372,6 +376,7 @@ async def test_run_score_populated_after_run():
     # L.4 — a real run emits ProcessQualityScored, so the closed-loop hint is
     # surfaced (non-empty string).
     assert isinstance(score["process_hint"], str) and score["process_hint"]
+    assert session.metadata["run_history"][-1]["output"] == result.output
 
 
 @pytest.mark.asyncio
