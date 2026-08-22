@@ -460,6 +460,7 @@ class ReActPlanner:
         self._cancel_requested = False
         start_time = time.time()
         metrics = ExecutionMetrics()
+        self._active_metrics = metrics
         # s13 — let the shared background manager emit results on this run's bus.
         if self.background_manager is not None:
             self.background_manager.set_run_context(event_bus, session.id)
@@ -605,6 +606,7 @@ class ReActPlanner:
                         # All retries exhausted — return FAILED
                         self._log(f"ERROR: {detail}")
                         metrics.duration_ms = int((time.time() - start_time) * 1000)
+                        self._active_metrics = None
                         return AgentResult(
                             status=ResultStatus.FAILED,
                             output=detail,
@@ -636,6 +638,17 @@ class ReActPlanner:
                         await self._compact_history(
                             messages, llm=llm, force=True,
                             session=session, event_bus=event_bus)
+                        # The summary call itself consumes provider tokens.
+                        # Re-check before allowing another model iteration.
+                        compact_total = metrics.tokens_input + metrics.tokens_output
+                        if compact_total >= self.max_tokens_per_task:
+                            final_output = (
+                                f"Token budget exhausted "
+                                f"({compact_total}/{self.max_tokens_per_task}) "
+                                "after context compaction. Stopping to control costs."
+                            )
+                            result_status = ResultStatus.PARTIAL
+                            break
                 elif ratio >= 1.0:
                     final_output = (
                         f"Token budget exhausted "
@@ -963,6 +976,7 @@ class ReActPlanner:
                 tokens_input=metrics.tokens_input,
                 tokens_output=metrics.tokens_output,
             ))
+        self._active_metrics = None
         return AgentResult(
             status=result_status,
             output=final_output,
@@ -1090,6 +1104,14 @@ class ReActPlanner:
             rotate_after=self.compact_rotate_after,
             strategy=self.history_compaction,
         )
+        # Compaction is an LLM operation when strategy=llm or when L2 needs a
+        # summary. Include its usage in the same task budget and score.
+        metrics = getattr(self, "_active_metrics", None)
+        if metrics is not None:
+            metrics.tokens_input += report.tokens_input
+            metrics.tokens_output += report.tokens_output
+            metrics.llm_call_count += report.llm_calls
+            metrics.llm_time_ms += report.duration_ms
         if report.changed and event_bus is not None and session is not None:
             await event_bus.emit(AgentProgress(
                 session_id=session.id, phase="compaction",

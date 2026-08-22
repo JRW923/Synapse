@@ -548,6 +548,14 @@ class Synapse:
 
     async def compact_session(self, session: Session) -> dict:
         """Force L1/L2 history compaction on an existing session."""
+        await self._run_lock.acquire()
+        try:
+            return await self._compact_session_locked(session)
+        finally:
+            self._run_lock.release()
+
+    async def _compact_session_locked(self, session: Session) -> dict:
+        """Compact while the caller owns the instance run lock."""
         from synapse.modules.context.history_compact import compact_history
         try:
             llm = self._container.resolve(LLMProvider)

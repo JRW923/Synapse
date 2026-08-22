@@ -151,3 +151,36 @@ def test_recent_reads_are_protected():
     assert "FILE" in by_id["r0"]
     assert "SH2" in by_id["s2"]
     assert "[elided" in by_id["s0"]
+
+
+def test_l2_keeps_a_single_front_system_message():
+    msgs = [Message(role="system", content="base")]
+    for i in range(6):
+        msgs.append(Message(role="user", content=f"u{i}" + "x" * 30))
+        msgs.append(Message(role="assistant", content=f"a{i}"))
+    report = asyncio.run(compact_history(
+        msgs, force=True, keep_recent_turns=2, keep_recent_tools=0))
+    assert report.level == "l2"
+    assert [m.role for m in msgs].count("system") == 1
+    assert msgs[0].content.startswith("base")
+    assert "compacted earlier conversation" in msgs[0].content
+
+
+def test_llm_usage_is_reported():
+    llm = _fake_llm("summary")
+    llm.chat.return_value.usage = {"input": 17, "output": 5}
+    msgs = _messages_over_limit(n_tool_msgs=8, chars_each=400)
+    report = asyncio.run(compact_history(
+        msgs, llm=llm, force=True, strategy="llm", keep_recent_tools=2))
+    assert report.llm_calls >= 1
+    assert report.tokens_input >= 17
+    assert report.tokens_output >= 5
+
+
+def test_l1_summarizes_all_long_tool_output_in_chunks():
+    llm = _fake_llm("chunk summary")
+    msgs = _messages_over_limit(n_tool_msgs=3, chars_each=9_000)
+    report = asyncio.run(compact_history(
+        msgs, llm=llm, force=True, strategy="llm", keep_recent_tools=0))
+    assert report.llm_calls >= 2
+    assert llm.chat.await_count >= 2

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from synapse.protocols.llm import Message
@@ -30,6 +31,10 @@ class CompactReport:
     compact_count: int
     rotate_hint: bool
     summary: str
+    llm_calls: int = 0
+    tokens_input: int = 0
+    tokens_output: int = 0
+    duration_ms: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -40,6 +45,10 @@ class CompactReport:
             "compact_count": self.compact_count,
             "rotate_hint": self.rotate_hint,
             "summary": self.summary,
+            "llm_calls": self.llm_calls,
+            "tokens_input": self.tokens_input,
+            "tokens_output": self.tokens_output,
+            "duration_ms": self.duration_ms,
         }
 
 
@@ -104,52 +113,83 @@ def _elidable_tool_indices(messages: list[Message], keep_recent_tools: int) -> l
     return victims
 
 
-async def _llm_summary(llm, prompt: str) -> str:
+async def _llm_summary(llm, prompt: str) -> tuple[str, int, int, int]:
     from synapse.modules.context.llm_compactor import MAX_INPUT_CHARS, MAX_SUMMARY_CHARS
     if llm is None:
-        return ""
+        return "", 0, 0, 0
+    started = time.monotonic()
     try:
         response = await llm.chat([
             Message(role="system",
                     content="You are a concise context summarizer for a coding agent."),
             Message(role="user", content=prompt[:MAX_INPUT_CHARS]),
         ], tools=None)
-        return (response.content or "").strip()[:MAX_SUMMARY_CHARS]
+        usage = response.usage or {}
+        return (
+            (response.content or "").strip()[:MAX_SUMMARY_CHARS],
+            int(usage.get("input", 0) or 0),
+            int(usage.get("output", 0) or 0),
+            int((time.monotonic() - started) * 1000),
+        )
     except Exception:
-        return ""
+        return "", 0, 0, int((time.monotonic() - started) * 1000)
 
 
 _TOOL_SUMMARY_CACHE: dict[str, str] = {}
 
 
-async def _summarize_tool_victims(messages: list[Message], victims: list[int], llm) -> str:
+async def _summarize_tool_victims(messages: list[Message], victims: list[int], llm) -> tuple[str, int, int, int, int]:
     import hashlib
     from synapse.modules.context.llm_compactor import MAX_INPUT_CHARS
     joined = "\n\n".join(
         f"--- tool result #{n} ---\n{(messages[i].content or '')}"
         for n, i in enumerate(victims, start=1)
-    )[:MAX_INPUT_CHARS]
+    )
     key = hashlib.sha1(f"{id(llm)}:{joined}".encode("utf-8", errors="ignore")).hexdigest()
     cached = _TOOL_SUMMARY_CACHE.get(key)
     if cached is not None:
-        return cached
-    summary = await _llm_summary(
-        llm,
-        "Summarize these past tool results into one dense reference. "
-        "Preserve file paths, symbol names, error messages, key "
-        "findings and decisions. Drop prose.\n\n" + joined,
-    )
+        return cached, 0, 0, 0, 0
+    chunks = [joined[i:i + MAX_INPUT_CHARS] for i in range(0, len(joined), MAX_INPUT_CHARS)]
+    partials: list[str] = []
+    input_tokens = output_tokens = duration_ms = calls = 0
+    for chunk in chunks:
+        summary, used_in, used_out, elapsed = await _llm_summary(
+            llm,
+            "Summarize these past tool results into one dense reference. "
+            "Preserve file paths, symbol names, error messages, key "
+            "findings and decisions. Drop prose.\n\n" + chunk,
+        )
+        if summary:
+            partials.append(summary)
+        input_tokens += used_in
+        output_tokens += used_out
+        duration_ms += elapsed
+        calls += 1
+    if len(partials) > 1:
+        summary, used_in, used_out, elapsed = await _llm_summary(
+            llm,
+            "Merge these partial tool-result summaries. Keep file paths, "
+            "symbols, errors and decisions; drop repeats.\n\n" + "\n\n".join(partials),
+        )
+        input_tokens += used_in
+        output_tokens += used_out
+        duration_ms += elapsed
+        calls += 1
+        if not summary:
+            summary = "\n".join(partials)
+    else:
+        summary = partials[0] if partials else ""
     _TOOL_SUMMARY_CACHE[key] = summary
-    return summary
+    return summary, input_tokens, output_tokens, duration_ms, calls
 
 
 async def compact_l1(messages: list[Message], llm, strategy: str,
-                     keep_recent_tools: int) -> bool:
+                     keep_recent_tools: int) -> tuple[bool, int, int, int, int]:
     victims = _elidable_tool_indices(messages, keep_recent_tools)
     if not victims:
-        return False
+        return False, 0, 0, 0, 0
     if strategy == "llm" and llm is not None:
-        summary = await _summarize_tool_victims(messages, victims, llm)
+        summary, used_in, used_out, elapsed, calls = await _summarize_tool_victims(messages, victims, llm)
         if summary:
             first = victims[0]
             messages[first].content = (
@@ -157,10 +197,10 @@ async def compact_l1(messages: list[Message], llm, strategy: str,
             )
             for i in victims[1:]:
                 messages[i].content = "[elided → summarized above]"
-            return True
+            return True, used_in, used_out, elapsed, calls
     for i in victims:
         messages[i].content = "[elided older tool result to save context]"
-    return True
+    return True, 0, 0, 0, 0
 
 
 def _turn_excerpt(messages: list[Message]) -> str:
@@ -179,52 +219,64 @@ def _turn_excerpt(messages: list[Message]) -> str:
     return "\n\n".join(parts)
 
 
-async def _summarize_turns(old: list[Message], llm) -> str:
+async def _summarize_turns(old: list[Message], llm) -> tuple[str, int, int, int, int]:
     from synapse.modules.context.llm_compactor import MAX_INPUT_CHARS, MAX_SUMMARY_CHARS
     joined = _turn_excerpt(old)
     if not joined:
-        return ""
+        return "", 0, 0, 0, 0
     if llm is None:
-        return joined[:MAX_SUMMARY_CHARS]
-    chunks = [joined[i:i + MAX_INPUT_CHARS] for i in range(0, len(joined), MAX_INPUT_CHARS)][:4]
+        return joined[:MAX_SUMMARY_CHARS], 0, 0, 0, 0
+    chunks = [joined[i:i + MAX_INPUT_CHARS] for i in range(0, len(joined), MAX_INPUT_CHARS)]
     partials: list[str] = []
+    input_tokens = output_tokens = duration_ms = calls = 0
     for chunk in chunks:
-        piece = await _llm_summary(
+        piece, used_in, used_out, elapsed = await _llm_summary(
             llm,
             "Summarize earlier conversation for a coding agent. Preserve file "
             "paths, decisions, errors, and current task state. Drop chatter.\n\n" + chunk,
         )
         if piece:
             partials.append(piece)
+        input_tokens += used_in
+        output_tokens += used_out
+        duration_ms += elapsed
+        calls += 1
     if not partials:
-        return joined[:MAX_SUMMARY_CHARS]
+        return joined[:MAX_SUMMARY_CHARS], input_tokens, output_tokens, duration_ms, calls
     if len(partials) == 1:
-        return partials[0]
-    merged = await _llm_summary(llm, "Merge these partial summaries. Keep facts, drop repeats.\n\n"
-                                + "\n\n".join(partials))
-    return (merged or "\n".join(partials))[:MAX_SUMMARY_CHARS]
+        return partials[0], input_tokens, output_tokens, duration_ms, calls
+    merged, used_in, used_out, elapsed = await _llm_summary(
+        llm, "Merge these partial summaries. Keep facts, drop repeats.\n\n"
+        + "\n\n".join(partials))
+    return ((merged or "\n".join(partials))[:MAX_SUMMARY_CHARS],
+            input_tokens + used_in, output_tokens + used_out,
+            duration_ms + elapsed, calls + 1)
 
 
-async def compact_l2(messages: list[Message], llm, keep_recent_turns: int) -> bool:
+async def compact_l2(messages: list[Message], llm, keep_recent_turns: int) -> tuple[bool, int, int, int, int]:
     user_idx = [i for i, m in enumerate(messages) if getattr(m, "role", None) == "user"]
     if len(user_idx) <= keep_recent_turns:
-        return False
+        return False, 0, 0, 0, 0
     cut = user_idx[-keep_recent_turns]
     head_end = 1 if messages and getattr(messages[0], "role", None) == "system" else 0
     if cut <= head_end:
-        return False
+        return False, 0, 0, 0, 0
     old = messages[head_end:cut]
     if not old:
-        return False
-    summary = await _summarize_turns(old, llm)
+        return False, 0, 0, 0, 0
+    summary, used_in, used_out, elapsed, calls = await _summarize_turns(old, llm)
     if not summary:
         summary = f"{len(old)} older turns folded to save context."
-    note = Message(
-        role="system",
-        content=f"[compacted earlier conversation]\n{summary}",
-    )
-    messages[head_end:cut] = [note]
-    return True
+    compacted = f"[compacted earlier conversation]\n{summary}"
+    # Providers differ in how they handle system messages. Keep exactly one
+    # system message at the front so Anthropic and Gemini do not silently drop
+    # the compacted history.
+    if head_end:
+        messages[0].content = messages[0].content.rstrip() + "\n\n" + compacted
+        del messages[head_end:cut]
+    else:
+        messages[0:cut] = [Message(role="system", content=compacted)]
+    return True, used_in, used_out, elapsed, calls
 
 
 def _human_summary(level: str, before: int, after: int, count: int, rotate: bool) -> str:
@@ -252,13 +304,26 @@ async def compact_history(
     before = message_chars(messages)
     level = "none"
     changed = False
+    llm_calls = tokens_input = tokens_output = duration_ms = 0
     if force or before > soft_chars:
-        if await compact_l1(messages, llm, strategy, keep_recent_tools):
+        l1_changed, used_in, used_out, elapsed, calls = await compact_l1(
+            messages, llm, strategy, keep_recent_tools)
+        llm_calls += calls
+        tokens_input += used_in
+        tokens_output += used_out
+        duration_ms += elapsed
+        if l1_changed:
             changed = True
             level = "l1"
         after_l1 = message_chars(messages)
         if force or after_l1 > soft_chars:
-            if await compact_l2(messages, llm, keep_recent_turns):
+            l2_changed, used_in, used_out, elapsed, calls = await compact_l2(
+                messages, llm, keep_recent_turns)
+            llm_calls += calls
+            tokens_input += used_in
+            tokens_output += used_out
+            duration_ms += elapsed
+            if l2_changed:
                 changed = True
                 level = "l2"
     after = message_chars(messages)
@@ -270,6 +335,10 @@ async def compact_history(
             "level": level,
             "chars_before": before,
             "chars_after": after,
+            "llm_calls": llm_calls,
+            "tokens_input": tokens_input,
+            "tokens_output": tokens_output,
+            "duration_ms": duration_ms,
         }
     rotate = count >= rotate_after
     return CompactReport(
@@ -280,4 +349,8 @@ async def compact_history(
         compact_count=count,
         rotate_hint=rotate and changed,
         summary=_human_summary(level, before, after, count, rotate and changed),
+        llm_calls=llm_calls,
+        tokens_input=tokens_input,
+        tokens_output=tokens_output,
+        duration_ms=duration_ms,
     )

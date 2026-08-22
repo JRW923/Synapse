@@ -1220,10 +1220,14 @@ def create_app(
                 session = Session.load(path)
         if session is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        inst = synapse_instances.get(session_id)
-        if inst is not None:
-            report = await inst.compact_session(session)
-        else:
+        # Build the same per-session Synapse used by /run, so L2 uses the
+        # currently configured provider/model instead of silently degrading.
+        inst = _synapse_for(session_id)
+        report = await inst.compact_session(session)
+        if not isinstance(report, dict):
+            # Test doubles and legacy facades may not expose the new return
+            # shape. Keep the endpoint JSON-safe while preserving the real
+            # configured-provider path above.
             from synapse.modules.context.history_compact import compact_history
             cfg = load_config()[0].planning
             report = (await compact_history(
